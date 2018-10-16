@@ -6,6 +6,7 @@
 #include "config.h"
 #include "log.h"
 #include "process.h"
+#include "transform.h"
 #include "types.h"
 
 using namespace std;
@@ -14,6 +15,12 @@ using namespace chameleon;
 pid_t masterPID;
 static int childArgc;
 static char **childArgv;
+
+static bool checkCompatibility() {
+  // TODO check we're on a supported architecture, i.e., AArch64 or x86-64
+  // TODO check that page size is a multiple of 4k
+  return true;
+}
 
 static void printHelp(const char *bin) {
   cout << bin << " - run an application under the Popcorn Chameleon framework"
@@ -61,13 +68,12 @@ static void parseArgs(int argc, char **argv) {
   }
 
   if(!foundDelim || childArgc <= 0) {
-    ERRMSG("did not specify a binary" << endl);
     printHelp(argv[0]);
-    exit(1);
+    ERROR("did not specify a binary" << endl);
   }
 
   DEBUG(
-    DEBUGMSG("Child arguments:");
+    DEBUGMSG("child arguments:");
     for(i = 0; i < childArgc; i++)
       DEBUGMSG_RAW(" " << childArgv[i]);
     DEBUGMSG_RAW(endl);
@@ -77,23 +83,31 @@ static void parseArgs(int argc, char **argv) {
 int main(int argc, char **argv) {
   ret_t code;
 
+  if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
   DEBUG(printChameleonInfo())
   parseArgs(argc, argv);
 
+  // Initialize the child process
   Process child(childArgc, childArgv);
   code = child.forkAndExec();
-  if(code != ret_t::Success) {
-    ERRMSG("could not set up child for tracing: " << retText(code) << endl);
-    exit(1);
-  }
+  if(code != ret_t::Success)
+    ERROR("could not set up child for tracing: " << retText(code) << endl);
+
+  // Initialize libelf and set up the state transformer
+  code = Binary::initLibELF();
+  if(code != ret_t::Success)
+    ERROR("could not initialize libelf: " << retText(code) << endl);
+  CodeTransformer transformer(childArgv[0], child.getUserfaultfd());
+  code = transformer.initialize();
+  if(code != ret_t::Success)
+    ERROR("could not set up state transformer: " << retText(code) << endl);
 
   do {
     code = child.continueToNextEvent();
     if(code != ret_t::Success) {
-      ERRMSG("could not continue to next event: " << retText(code) << endl);
       child.detach();
-      exit(1);
+      ERROR("could not continue to next event: " << retText(code) << endl);
     }
 
     switch(child.getStatus()) {

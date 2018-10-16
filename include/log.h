@@ -14,22 +14,23 @@
 
 extern pid_t masterPID;
 
+/* Print information to the console */
 #define INFO( ... ) \
   do { std::cout << "[ chameleon " << masterPID << " ] " \
                  << __VA_ARGS__; } while(0);
 
-#define ERRMSG( ... ) \
+/* Print an error message and exit */
+#define ERROR( ... ) \
   do { std::cerr << "[ chameleon " << masterPID << " ] ERROR: " \
-                 << __VA_ARGS__; } \
-  while(0);
+                 << __VA_ARGS__; exit(1); } while(0);
 
 #ifndef NDEBUG
 /* Debug printing */
 # define DEBUGMSG( ... ) \
   do { \
-    std::cerr << "[ " << std::left << std::setw(20) << __FILENAME__ \
-              << ", line " << std::right << std::setw(4) << __LINE__ \
-              << " ] DEBUG: " << __VA_ARGS__; \
+    std::cerr << "[ " << std::right << std::setw(20) << __FILENAME__ << ":" \
+              << std::left << std::setw(3) << __LINE__ << " ] DEBUG: " \
+              << __VA_ARGS__; \
   } while(0);
 # define DEBUGMSG_RAW( ... ) do { std::cerr << __VA_ARGS__; } while(0);
 

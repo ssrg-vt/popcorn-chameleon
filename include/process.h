@@ -33,16 +33,15 @@ public:
    * Construct a process object.  Initialize the process' command-line but
    * nothing else; users must call forkAndExec() to start the process.
    *
-   * Note: argv[0] should be the binary to execute
+   * Note: argv[0] *must* be the binary to execute
    *
    * @param argc number of arguments
    * @param argv arguments for child process to be executed
    */
-  Process(int argc, char **argv) : bin(argv[0]), argc(argc),
-                                   argv(argv), pid(-1),
+  Process(int argc, char **argv) : argc(argc), argv(argv), pid(-1),
                                    status(Ready), exit(0),
-                                   reinjectSignal(false) {}
-  Process() : Process(0, nullptr) {}
+                                   reinjectSignal(false), uffd(-1) {}
+  Process() = delete;
 
   /**
    * Fork a child process to execute the application and set up ptrace.  The
@@ -96,11 +95,11 @@ public:
   /**
    * Field getters - return what you ask for.
    */
-  const char *getBin() const { return bin; }
   int getArgc() const { return argc; }
   char **getArgv() const { return argv; }
   int getPid() const { return pid; }
   status_t getStatus() const { return status; }
+  int getUserfaultfd() const { return uffd; }
 
   /**
    * Get the exit code after the child exits normally.
@@ -116,7 +115,6 @@ public:
 
 private:
   /* Arguments */
-  const char *bin;
   int argc;
   char **argv;
 
@@ -128,9 +126,20 @@ private:
     int signal; /* exit/stop signal if status == SignalExit or Stopped */
   };
   bool reinjectSignal; /* whether to re-inject signal into tracee */
+  int uffd; /* userfaultfd file descriptor */
 
-  /** Internal wait implementation controlling flags for reinjecting signals */
-  ret_t wait_internal(bool);
+  /**
+   * Internal wait implementation used to save relevant information depending
+   * on whether we need to forward a signal to the child.  If we're waiting for
+   * a signal to be delivered that we sent (either directly or indirectly) then
+   * we know we don't need to forward it to the child.  In the general case
+   * though, when we restart the child we want to forward the signal we
+   * intercepted.
+   *
+   * @param reinject whether or not to reinject a signal
+   * @return a return code describing the outcome
+   */
+  ret_t wait_internal(bool reinject);
 };
 
 }
