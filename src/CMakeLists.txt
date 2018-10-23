@@ -1,4 +1,5 @@
 add_executable (chameleon
+  arch.cpp
   binary.cpp
   chameleon.cpp
   process.cpp

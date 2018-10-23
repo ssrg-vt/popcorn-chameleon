@@ -98,13 +98,13 @@ int main(int argc, char **argv) {
   code = Binary::initLibELF();
   if(code != ret_t::Success)
     ERROR("could not initialize libelf: " << retText(code) << endl);
-  CodeTransformer transformer(childArgv[0], child.getUserfaultfd());
+  CodeTransformer transformer(child);
   code = transformer.initialize();
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
 
   do {
-    code = child.continueToNextEvent();
+    code = child.continueToNextEvent(false);
     if(code != ret_t::Success) {
       child.detach();
       ERROR("could not continue to next event: " << retText(code) << endl);

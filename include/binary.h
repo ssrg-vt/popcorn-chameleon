@@ -28,6 +28,13 @@ public:
   public:
     std::string name;
 
+    /**
+     * Zero-initialize all fields; users must call initialize() to set up the
+     * section.
+     */
+    Section() : name(""), elf(nullptr), header({0}), section(nullptr),
+                data(nullptr) {}
+
     uintptr_t address() const { return header.sh_addr; }
     uintptr_t fileOffset() const { return header.sh_offset; }
     uintptr_t size() const { return header.sh_size; }
@@ -35,12 +42,16 @@ public:
     /**
      * Initialize the object with a given name, header and section.  Also
      * grabs the actual section contents.
+     * @param elf pointer to Elf object
      * @param name the section name
      * @param header the section header from libelf
      * @param section the section descriptor from libelf
      * @return a return code describing the outcome
      */
-    ret_t initialize(const char *name, GElf_Shdr &header, Elf_Scn *section);
+    ret_t initialize(Elf *elf,
+                     const char *name,
+                     GElf_Shdr &header,
+                     Elf_Scn *section);
 
     /**
      * Retrieve a pointer to the section data for a given address.
@@ -49,11 +60,26 @@ public:
      */
     void *getData(uintptr_t addr);
 
-  private:
+  protected:
+    Elf *elf;
+
     /* The actual section data.  Hidden to enforce out-of-bounds checks */
     GElf_Shdr header;
     Elf_Scn *section;
     Elf_Data *data;
+  };
+
+  /**
+   * The symbol table section.
+   */
+  class SymbolTable : public Section {
+  public:
+    /**
+     * Get the virtual address of a symbol.
+     * @param symbol the symbol
+     * @return the symbol's virtual address
+     */
+    uintptr_t getSymbolAddress(const std::string &sym) const;
   };
 
   /**
@@ -131,6 +157,14 @@ public:
    */
   const Section &getCodeSection() const { return code; }
 
+  /**
+   * Return the symbol's virtual address from the symbol table.
+   * @param sym the symbol
+   * @return the symbol's virtual address or 0 if not found
+   */
+  uintptr_t getSymbolAddress(std::string &sym)
+  { return symtab.getSymbolAddress(sym); }
+
 private:
   const char *filename;
   int fd;
@@ -138,6 +172,7 @@ private:
   /* ELF metadata & relevant sections */
   Elf *elf;
   size_t shdrstrndx;
+  SymbolTable symtab;
   Section code;
   std::vector<Segment> segments;
 
@@ -148,6 +183,15 @@ private:
    * @return a return code describing the outcome
    */
   ret_t getSectionByName(const char *name, Section &section);
+
+  /**
+   * Search for a section by type and populate the section object argument with
+   * the first one found.
+   * @param type the ELF section type
+   * @param section a Section object to be populated
+   * @return a return code describing the outcome
+   */
+  ret_t getSectionByType(uint32_t type, Section &section);
 };
 
 }

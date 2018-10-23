@@ -13,6 +13,7 @@ namespace chameleon {
 /* Binary file access error codes */
 #define BINARY_RETCODES \
   X(OpenFailed, "could not open binary") \
+  X(InvalidElf, "invalid ELF file/format") \
   X(ElfFailed, "could not initialize libelf") \
   X(ElfReadError, "could not read ELF metadata") \
   X(NoSuchSection, "could not find ELF section")
@@ -25,12 +26,16 @@ namespace chameleon {
   X(WaitFailed, "wait() returned an error") \
   X(PtraceFailed, "ptrace() returned an error") \
   X(Exists, "process already exists") \
-  X(DoesNotExist, "process exited or terminated")
+  X(DoesNotExist, "process exited or terminated") \
+  X(InvalidState, "operation not allowed in current process state")
 
 /* State transformation error codes */
 #define TRANSFORM_RETCODES \
+  X(InvalidTransformConfig, "invalid transformation configuration") \
+  X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
-  X(UffdRegisterFailed, "userfaultfd register region failed")
+  X(UffdRegisterFailed, "userfaultfd register region failed") \
+  X(UffdCopyFailed, "userfaultfd copy failed")
 
 enum ret_t {
   Success = 0,

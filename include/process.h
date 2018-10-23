@@ -13,6 +13,7 @@
 #ifndef _PROCESS_H
 #define _PROCESS_H
 
+#include <sys/signal.h>
 #include <sys/types.h>
 #include "types.h"
 
@@ -43,6 +44,10 @@ public:
                                    reinjectSignal(false), uffd(-1) {}
   Process() = delete;
 
+  /////////////////////////////////////////////////////////////////////////////
+  // Execution control
+  /////////////////////////////////////////////////////////////////////////////
+
   /**
    * Fork a child process to execute the application and set up ptrace.  The
    * call will wait for the forked tracee's initialization and application
@@ -72,17 +77,33 @@ public:
   ret_t wait();
 
   /**
-   * Resume a child.
+   * Resume a child.  If syscall = false, tell ptrace to stop at the next
+   * signal delivery to the child.  If syscall = true, tell ptrace to stop at
+   * either the next signal delivery or system call boundary (either going into
+   * or coming out of kernel) by the child.
+   *
+   * @param syscall whether or not to trace syscalls
    * @return a return code describing the outcome
    */
-  ret_t resume();
+  ret_t resume(bool syscall);
 
   /**
-   * Continue child execution until the next event.  Equivalent to calling
-   * resume() followed by wait().
+   * Continue child execution until the next event.  If syscall = false,
+   * continue until the next signal delivery to the child.  If syscall = true,
+   * continue until either the next signal delivery or system call boundary
+   * (either going into or coming out of kernel) by the child.  Equivalent to
+   * calling resume() followed by wait().
+   * @param syscall whether or not to trace syscalls
    * @return a return code describing the outcome
    */
-  ret_t continueToNextEvent();
+  ret_t continueToNextEvent(bool syscall);
+
+  /**
+   * Return whether the child stopped at a system call boundary or not.
+   * @return true if the process is stopped at a system call boundary or false
+   *         if stopped for another reason (or is not stopped)
+   */
+  bool stoppedAtSyscall() const { return getSignal() == SIGTRAP; }
 
   /**
    * Detach from a child and clean up internal state; the process object can be
@@ -92,8 +113,12 @@ public:
    */
   void detach();
 
+  /////////////////////////////////////////////////////////////////////////////
+  // Inspect & modify process state
+  /////////////////////////////////////////////////////////////////////////////
+
   /**
-   * Field getters - return what you ask for.
+   * Process information - return what you ask for.
    */
   int getArgc() const { return argc; }
   char **getArgv() const { return argv; }
@@ -112,6 +137,68 @@ public:
    * @return signal number if status == SignalExit/Stopped, INT32_MAX otherwise
    */
   int getSignal() const;
+
+  /**
+   * Get the process' current program counter.
+   * @return the program counter or 0 if it could not be retrieved
+   */
+  uintptr_t getPC() const;
+
+  /**
+   * Set the process' current program counter.
+   * @return a return code describing the outcome
+   */
+  ret_t setPC(uintptr_t newPC) const;
+
+  /**
+   * Marshal a set of arguments into registers to invoke a function call
+   * according to the ISA-specific calling convention.
+   * @param a1-6 arguments to the system call
+   * @return a return code describing the outcome
+   */
+  ret_t setFuncCallRegs(long a1 = 0, long a2 = 0, long a3 = 0,
+                        long a4 = 0, long a5 = 0, long a6 = 0) const;
+
+  /**
+   * Marshal a set of arguments into registers to invoke a system call
+   * according to the ISA-specific calling convention.
+   * @param syscall system call number (ISA-specific)
+   * @param a1-6 arguments to the system call
+   * @return a return code describing the outcome
+   */
+  ret_t setSyscallRegs(long syscall, long a1 = 0, long a2 = 0, long a3 = 0,
+                       long a4 = 0, long a5 = 0, long a6 = 0) const;
+
+  /**
+   * Return the system call return value if stopped at a system call exit
+   * boundary.
+   *
+   * Note: ptrace stops the child at both entrance and exit system call
+   * boundaries.  The Process object doesn't track which boundary the process
+   * stopped at, meaning calling this function after stopping at the entrance
+   * boundary will return garbage.  Users should call continueToNextEvent(true)
+   * to continue through to the exit boundary.
+   *
+   * @param retval output parameter into which the exit code is written
+   * @return a return code describing the outcome
+   */
+  ret_t getSyscallReturnValue(int &retval) const;
+
+  /**
+   * Read 8 bytes of data from a virtual memory address.
+   * @param addr the address to read
+   * @param data output argument to which bytes will be written
+   * @return a return code describing the outcome
+   */
+  ret_t read(uintptr_t addr, uint64_t &data) const;
+
+  /**
+   * Write 8 bytes of data to a virtual memory address.
+   * @param addr the address to write
+   * @param data bytes to write to the address
+   * @return a return code describing the outcome
+   */
+  ret_t write(uintptr_t addr, uint64_t data) const;
 
 private:
   /* Arguments */

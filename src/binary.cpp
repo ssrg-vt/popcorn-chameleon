@@ -7,9 +7,62 @@
 
 using namespace chameleon;
 
+///////////////////////////////////////////////////////////////////////////////
+// Section implementation
+///////////////////////////////////////////////////////////////////////////////
+
+ret_t Binary::Section::initialize(Elf *elf,
+                                  const char *name,
+                                  GElf_Shdr &header,
+                                  Elf_Scn *section) {
+  this->elf = elf;
+  this->name = name;
+  this->header = header;
+  this->section = section;
+  if(!(this->data = elf_getdata(section, nullptr))) return ret_t::ElfReadError;
+
+  DEBUGMSG("Section '" << name << "':" << std::endl);
+  DEBUGMSG("  Address: 0x" << std::hex << header.sh_addr << std::endl);
+  DEBUGMSG("  File offset: 0x" << header.sh_offset << std::endl);
+  DEBUGMSG("  Size: " << std::dec << header.sh_size << " bytes" << std::endl);
+
+  return ret_t::Success;
+}
+
+void *Binary::Section::getData(uintptr_t addr) {
+  uintptr_t start = address();
+  if(start <= addr && addr < (start + size()))
+    return (char *)data->d_buf + addr - start;
+  else return nullptr;
+}
+
+// TODO if we end up doing this more than once we should go ahead and cache the
+// entire symbol table in a map (with name as a key) for faster lookups
+uintptr_t Binary::SymbolTable::getSymbolAddress(const std::string &sym) const {
+  size_t count = header.sh_size / header.sh_entsize;
+  GElf_Sym symEntry;
+  for(size_t i = 0; i < count; i++) {
+    if(gelf_getsym(data, i, &symEntry) != &symEntry) return 0;
+    std::string curSym(elf_strptr(elf, header.sh_link, symEntry.st_name));
+    if(sym == curSym) return symEntry.st_value;
+  }
+  return 0;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Binary implementation
+///////////////////////////////////////////////////////////////////////////////
+
 ret_t Binary::initLibELF() {
   if(elf_version(EV_CURRENT) == EV_NONE) return ret_t::ElfFailed;
   else return ret_t::Success;
+}
+
+static inline ret_t checkCompatibility(Elf *e) {
+  if(elf_kind(e) != ELF_K_ELF) return ret_t::InvalidElf;
+  if(gelf_getclass(e) != ELFCLASS64) return ret_t::InvalidElf;
+  // TODO other ELF checks?
+  return ret_t::Success;
 }
 
 static bool initializeSegments(Elf *e, std::vector<Binary::Segment> &segments) {
@@ -44,15 +97,17 @@ ret_t Binary::initialize() {
 
   DEBUGMSG("opened '" << filename << "' for reading" << std::endl);
 
-  // TODO check that it's an ELF file and executable?
-
   if(!(elf = elf_begin(fd, ELF_C_READ, nullptr)) ||
+     checkCompatibility(elf) != ret_t::Success ||
      elf_getshdrstrndx(elf, &shdrstrndx) ||
      getSectionByName(".text", code) != ret_t::Success ||
      !initializeSegments(elf, segments)) {
     retcode = ret_t::ElfReadError;
     goto error;
   }
+
+  if(getSectionByType(SHT_SYMTAB, symtab) != ret_t::Success)
+    INFO("binary is stripped - no symbol table" << std::endl);
 
   goto finish;
 
@@ -83,32 +138,25 @@ ret_t Binary::getSectionByName(const char *name, Section &section) {
     if(gelf_getshdr(scn, &shdr) != &shdr) return ret_t::ElfReadError;
     if((curName = elf_strptr(elf, shdrstrndx, shdr.sh_name)) &&
        strncmp(name, curName, len) == 0)
-      return section.initialize(name, shdr, scn);
+      return section.initialize(elf, name, shdr, scn);
   }
 
   return ret_t::NoSuchSection;
 }
 
-ret_t Binary::Section::initialize(const char *name,
-                                  GElf_Shdr &header,
-                                  Elf_Scn *section) {
-  this->name = name;
-  this->header = header;
-  this->section = section;
-  if(!(this->data = elf_getdata(section, nullptr))) return ret_t::ElfReadError;
+ret_t Binary::getSectionByType(uint32_t type, Section &section) {
+  const char *name;
+  Elf_Scn *scn = nullptr;
+  GElf_Shdr shdr;
 
-  DEBUGMSG("Section '" << name << "':" << std::endl);
-  DEBUGMSG("  Address: 0x" << std::hex << header.sh_addr << std::endl);
-  DEBUGMSG("  File offset: 0x" << header.sh_offset << std::endl);
-  DEBUGMSG("  Size: " << std::dec << header.sh_size << " bytes" << std::endl);
+  while((scn = elf_nextscn(elf, scn))) {
+    if(gelf_getshdr(scn, &shdr) != &shdr) return ret_t::ElfReadError;
+    if(shdr.sh_type == type) {
+      const char *name = elf_strptr(elf, shdrstrndx, shdr.sh_name);
+      return section.initialize(elf, name, shdr, scn);
+    }
+  }
 
-  return ret_t::Success;
-}
-
-void *Binary::Section::getData(uintptr_t addr) {
-  uintptr_t start = address();
-  if(start <= addr && addr < (start + size()))
-    return (char *)data->d_buf + addr - start;
-  else return nullptr;
+  return ret_t::NoSuchSection;
 }
 

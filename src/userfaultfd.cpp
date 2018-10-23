@@ -3,12 +3,11 @@
 
 #include "log.h"
 #include "userfaultfd.h"
+#include "utils.h"
 
 using namespace chameleon;
 
 #define MASK( bm, feat ) ((bm) & (feat) ? 1 : 0)
-#define PAGE_DOWN( val ) ((val) & -4096UL)
-#define PAGE_UP( val ) PAGE_DOWN((val) + 4095)
 
 static inline void printFeatures(uint64_t features) {
   // From the manpages (ioctl_userfaultfd):
@@ -42,6 +41,12 @@ static inline void printIoctls(uint64_t ioctls) {
            << std::endl);
   DEBUGMSG("  UFFDIO_UNREGISTER: " << MASK(ioctls, 1UL << _UFFDIO_UNREGISTER)
            << std::endl);
+  DEBUGMSG("  UFFDIO_WAKE: " << MASK(ioctls, 1UL << _UFFDIO_WAKE)
+           << std::endl);
+  DEBUGMSG("  UFFDIO_COPY: " << MASK(ioctls, 1UL << _UFFDIO_COPY)
+           << std::endl);
+  DEBUGMSG("  UFFDIO_ZEROPAGE: " << MASK(ioctls, 1UL << _UFFDIO_ZEROPAGE)
+           << std::endl);
 }
 
 bool uffd::api(int fd, uint64_t *features, uint64_t *ioctls) {
@@ -63,7 +68,7 @@ bool uffd::api(int fd, uint64_t *features, uint64_t *ioctls) {
   return true;
 }
 
-bool uffd::registerRegion(int fd, uint64_t addr, uint64_t size) {
+bool uffd::registerRegion(int fd, uintptr_t addr, uint64_t size) {
   struct uffdio_register ctrl;
 
   ctrl.range.start = PAGE_DOWN(addr);
@@ -74,10 +79,20 @@ bool uffd::registerRegion(int fd, uint64_t addr, uint64_t size) {
 
   DEBUG(
     DEBUGMSG("registered 0x" << std::hex << addr << " - " << (addr + size)
-             << " (" << std::dec << size << ")" << std::endl);
+             << " (size=" << std::dec << size << ")" << std::endl);
     printIoctls(ctrl.ioctls);
   )
 
+  return true;
+}
+
+bool uffd::copy(int fd, uintptr_t src, uintptr_t dest) {
+  struct uffdio_copy copy;
+  copy.src = src;
+  copy.dst = dest;
+  copy.len = PAGESZ;
+  copy.mode = 0;
+  if(ioctl(fd, UFFDIO_COPY, &copy) == -1) return false;
   return true;
 }
 

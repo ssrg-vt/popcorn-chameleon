@@ -8,38 +8,25 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 
+#include "arch.h"
 #include "log.h"
 #include "process.h"
 #include "ptrace.h"
 
 using namespace chameleon;
 
-#define SOCK_PATH "/tmp/chameleon-%d"
-
 /**
  * Send a file descriptor to another process.
  * @param fd the file descriptor to send
- * @param desc descriptor identifying the connection (i.e., parent PID)
+ * @param socket a UNIX domain socket connected to the parent
  * @return true if successfully sent or false othewise
  */
-static bool sendFileDescriptor(int fd, int desc) {
+static bool sendFileDescriptor(int fd, int socket) {
   bool success = false;
-  int sfd;
-  struct sockaddr_un addr;
   struct msghdr msg = {0};
   struct cmsghdr *cmsg;
   char buf[CMSG_SPACE(sizeof(int))], dup[256];
   struct iovec io = { .iov_base = &dup, .iov_len = sizeof(dup) };
-
-  // Note: use the close-on-exec flag to make the kernel clean up after us
-  if((sfd = socket(AF_UNIX, SOCK_STREAM | O_CLOEXEC, 0)) == -1)
-    return false;
-
-  memset(&addr, 0, sizeof(struct sockaddr_un));
-  addr.sun_family = AF_UNIX;
-  snprintf(addr.sun_path, sizeof(addr.sun_path), SOCK_PATH, desc);
-  if(connect(sfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_un)) == -1)
-    goto finish;
 
   memset(buf, 0, sizeof(buf));
   msg.msg_iov = &io;
@@ -51,61 +38,33 @@ static bool sendFileDescriptor(int fd, int desc) {
   cmsg->cmsg_type = SCM_RIGHTS;
   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
   memcpy((int *)CMSG_DATA(cmsg), &fd, sizeof(int));
-  if(sendmsg(sfd, &msg, 0) >= 0) success = true;
-finish:
-  close(sfd);
+  if(sendmsg(socket, &msg, 0) >= 0) success = true;
+  close(socket);
   return success;
 }
 
 /**
- * Initialize the server side of a UNIX domain socket connection.
- * @param desc descriptor identifying the connection (i.e., parent PID)
- * @return socket file descriptor if successful or -1 otherwise
- */
-static int initServerSocket(int desc) {
-  int sfd;
-  struct sockaddr_un addr;
-
-  if((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) return -1;
-  memset(&addr, 0, sizeof(struct sockaddr_un));
-  addr.sun_family = AF_UNIX;
-  snprintf(addr.sun_path, sizeof(addr.sun_path), SOCK_PATH, desc);
-  if(bind(sfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_un)) == -1 ||
-     listen(sfd, 1) == -1) {
-    close(sfd);
-    sfd = -1;
-  }
-  return sfd;
-}
-
-/**
  * Receive a file descriptor from another process.
- * @param sfd a UNIX domain socket bound as the server
+ * @param socket a UNIX domain socket connected to the child
  * @return received file descriptor if successful or -1 otherwise
  */
-static int receiveFileDescriptor(int sfd) {
-  int cfd, fd = -1;
-  struct sockaddr_un addr;
+static int receiveFileDescriptor(int socket) {
+  int fd = -1;
   struct msghdr msg = {0};
   struct cmsghdr *cmsg;
   char buf[CMSG_SPACE(sizeof(int))], dup[256];
   struct iovec io = { .iov_base = &dup, .iov_len = sizeof(dup) };
-
-  if((cfd = accept(sfd, nullptr, nullptr)) == -1) goto close_server;
 
   memset(buf, 0, sizeof(buf));
   msg.msg_iov = &io;
   msg.msg_iovlen = 1;
   msg.msg_control = buf;
   msg.msg_controllen = sizeof(buf);
-  if(recvmsg(cfd, &msg, 0) == -1) goto close_client;
-
-  cmsg = CMSG_FIRSTHDR(&msg);
-  memcpy(&fd, (int *)CMSG_DATA(cmsg), sizeof(int));
-close_client:
-  close(cfd);
-close_server:
-  close(sfd);
+  if(recvmsg(socket, &msg, 0) >= 0) {
+    cmsg = CMSG_FIRSTHDR(&msg);
+    memcpy(&fd, (int *)CMSG_DATA(cmsg), sizeof(int));
+  }
+  close(socket);
   return fd;
 }
 
@@ -114,25 +73,32 @@ close_server:
  * requested application.  The process doesn't return from here.
  * @param bin the binary to execute
  * @param argv the arguments to pass to the new application
+ * @param socket a UNIX domain socket connected to the parent
  */
 [[noreturn]] static void
-execChild(const char *bin, char **argv, pid_t parent) {
+execChild(const char *bin, char **argv, int socket) {
   int uffd;
 
   // Prepare for ptrace on the child (tracee) side
   if(!PTrace::traceme()) {
     perror("Could not enable ptrace in child");
+    close(socket);
     abort();
   }
+
+  // TODO Note: the kernel is modified to update the userfaultfd's context with
+  // the task's post execve() mm_struct so the descriptor is valid after
+  // starting the new application
 
   // Open the userfaultfd file descriptor and pass it to the parent.  Set the
   // close-on-exec flag so we don't need to close it ourselves.
-  if((uffd = syscall(__NR_userfaultfd, O_CLOEXEC)) == -1) {
+  if((uffd = syscall(SYS_userfaultfd, O_CLOEXEC)) == -1) {
     perror("Could not create userfaultfd descriptor in child");
+    close(socket);
     abort();
   }
 
-  if(!sendFileDescriptor(uffd, parent)) {
+  if(!sendFileDescriptor(uffd, socket)) {
     perror("Could not send userfaultfd file descriptor to parent");
     abort();
   }
@@ -143,28 +109,32 @@ execChild(const char *bin, char **argv, pid_t parent) {
 }
 
 ret_t Process::forkAndExec() {
-  int server;
-  pid_t child, parent = getpid();
+  int sockets[2];
+  pid_t child;
+  ret_t code = ret_t::Success;
 
   // Don't let the user fork another child if we've already got one
   if(status != Ready) return ret_t::Exists;
 
-  // We need the child to create a userfaultfd descriptor and pass it to us
-  // through UNIX domain stockets.  Establish the server side before forking
-  // the child to avoid racing connection attempts against server setup.
-  if((server = initServerSocket(parent)) == -1)
+  // Establish a pair of connected sockets for passing the userfaultfd file
+  // descriptor from the child to the parent
+  if(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1)
     return ret_t::RecvUFFDFailed;
 
   child = fork();
-  if(child == 0) execChild(argv[0], argv, parent);
-  else if(child < 0) return ret_t::ForkFailed;
+  if(child == 0) execChild(argv[0], argv, sockets[1]);
+  else if(child < 0) {
+    close(sockets[0]);
+    close(sockets[1]);
+    return ret_t::ForkFailed;
+  }
   pid = child;
   status = Running;
 
   DEBUGMSG("forked child " << pid << std::endl);
 
   // Receive userfaultfd descriptor from child
-  if((uffd = receiveFileDescriptor(server)) == -1)
+  if((uffd = receiveFileDescriptor(sockets[0])) == -1)
     return ret_t::RecvUFFDFailed;
 
   DEBUGMSG("received userfaultfd (fd=" << uffd << ") from child" << std::endl);
@@ -215,11 +185,9 @@ ret_t Process::wait_internal(bool reinject) {
   return retval;
 }
 
-ret_t Process::wait() {
-  return wait_internal(true);
-}
+ret_t Process::wait() { return wait_internal(true); }
 
-ret_t Process::resume() {
+ret_t Process::resume(bool syscall) {
   bool success;
 
   switch(status) {
@@ -231,8 +199,8 @@ ret_t Process::resume() {
   case SignalExit: return ret_t::DoesNotExist;
 
   default:
-    if(reinjectSignal) success = PTrace::resume(pid, signal);
-    else success = PTrace::resume(pid, 0);
+    if(reinjectSignal) success = PTrace::resume(pid, signal, syscall);
+    else success = PTrace::resume(pid, 0, syscall);
     if(success) {
       status = Running;
       return ret_t::Success;
@@ -241,8 +209,8 @@ ret_t Process::resume() {
   }
 }
 
-ret_t Process::continueToNextEvent() {
-  ret_t retcode = resume();
+ret_t Process::continueToNextEvent(bool syscall) {
+  ret_t retcode = resume(syscall);
   if(retcode != ret_t::Success) return retcode;
   return wait_internal(true);
 }
@@ -265,5 +233,63 @@ int Process::getExitCode() const {
 int Process::getSignal() const {
   if(status == SignalExit || status == Stopped) return signal;
   else return INT32_MAX;
+}
+
+// TODO the functions that only access a single register (i.e., get/setPC(),
+// getSyscallReturnValue()) should be converted to use PTRACE_PEEKUSER rather
+// than bulk reading/writing the entire register set
+
+uintptr_t Process::getPC() const {
+  struct user_regs_struct regs;
+  if(status != Stopped) return 0;
+  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  return arch::pc(regs);
+}
+
+ret_t Process::setPC(uintptr_t newPC) const {
+  struct user_regs_struct regs;
+  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  arch::pc(regs, newPC);
+  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  return ret_t::Success;
+}
+
+ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
+                               long a4, long a5, long a6) const {
+  struct user_regs_struct regs;
+  if(status != Stopped) return ret_t::InvalidState;
+  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  arch::marshalFuncCall(regs, a1, a2, a3, a4, a5, a6);
+  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  return ret_t::Success;
+}
+
+ret_t Process::setSyscallRegs(long syscall, long a1, long a2, long a3,
+                              long a4, long a5, long a6) const {
+  struct user_regs_struct regs;
+  if(status != Stopped) return ret_t::InvalidState;
+  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  arch::marshalSyscall(regs, syscall, a1, a2, a3, a4, a5, a6);
+  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  return ret_t::Success;
+}
+
+ret_t Process::getSyscallReturnValue(int &retval) const {
+  struct user_regs_struct regs;
+  if(!stoppedAtSyscall()) return ret_t::InvalidState;
+  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  retval = arch::syscallRetval(regs);
+  if(retval > -4096UL) retval = -retval;
+  return ret_t::Success;
+}
+
+ret_t Process::read(uintptr_t addr, uint64_t &data) const {
+  if(!PTrace::getMem(pid, addr, data)) return ret_t::PtraceFailed;
+  return ret_t::Success;
+}
+
+ret_t Process::write(uintptr_t addr, uint64_t data) const {
+  if(!PTrace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
+  return ret_t::Success;
 }
 

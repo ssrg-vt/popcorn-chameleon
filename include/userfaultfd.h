@@ -31,7 +31,21 @@ bool api(int fd, uint64_t *features, uint64_t *ioctls);
  * @param len length of virtual memory region
  * @return true if successfully registered or false otherwise
  */
-bool registerRegion(int fd, uint64_t addr, uint64_t len);
+bool registerRegion(int fd, uintptr_t addr, uint64_t len);
+
+/**
+ * Handle a fault by copying a user-supplied buffer into the faulting page.
+ *
+ * Note: the user-supplied buffer *must* be at least a page in size
+ *
+ * @param fd userfaultfd file descriptor
+ * @param src the source of the copy, i.e., address of the buffer containing
+ *            data to copy into the faulting page
+ * @param dest the destination of the copy, i.e., the address of the page in
+ *             the application that cause the fault
+ * @return true if successfully copied or false otherwise
+ */
+bool copy(int fd, uintptr_t src, uintptr_t dest);
 
 }
 }
