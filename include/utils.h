@@ -18,5 +18,8 @@
 #define PAGE_DOWN( val ) ((val) & -PAGESZ)
 #define PAGE_UP( val ) PAGE_DOWN((val) + (PAGESZ-1))
 
+/* Calculate page-aligned length from non-aligned address and length */
+#define PAGE_ALIGN_LEN( addr, len ) (PAGE_UP(addr + len) - PAGE_DOWN(addr))
+
 #endif /* _UTILS_H */
 

@@ -1,5 +1,5 @@
+#include <cstring>
 #include <csignal>
-#include <thread>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/userfaultfd.h>
@@ -12,11 +12,38 @@
 
 using namespace chameleon;
 
+///////////////////////////////////////////////////////////////////////////////
+// Fault handling
+///////////////////////////////////////////////////////////////////////////////
+
 static volatile bool faultHandlerExit = false;
 static size_t faultsHandled = 0;
 
+/**
+ * Set up signal handler for SIGINT.  Required because the calls to read() in
+ * handleFaultsAsync are blocking.
+ * @return true if successfully initialized or false otherwise
+ */
+static inline bool setSignalHandler() {
+  auto sigHandler = [](int signal) {};
+  struct sigaction handler;
+  handler.sa_handler = sigHandler;
+  if(sigaction(SIGINT, &handler, nullptr) == -1) return false;
+  return true;
+}
+
+/**
+ * Handle a fault, including mapping in the correct data and randomizing any
+ * code pieces.
+ *
+ * @param CT code transformer
+ * @param uffd userfaultfd file descriptor for user-space fault handling
+ * @param msg description of faulting region
+ * @return a return code describing the outcome
+ */
 static inline ret_t
 handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
+  uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address);
   uint64_t PAGE_ALIGNED pagebuf[PAGESZ / sizeof(uint64_t)];
   ret_t code = ret_t::Success;
 
@@ -26,25 +53,39 @@ handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
            << msg.arg.pagefault.feat.ptid << std::endl);
 
   // TODO map in actual memory from disk, transform code regions
-
-  if(!uffd::copy(uffd, (uintptr_t)&pagebuf, msg.arg.pagefault.address))
+  memset(pagebuf, 0, sizeof(pagebuf));
+  if(!uffd::copy(uffd, (uintptr_t)&pagebuf, pageAddr))
     code = ret_t::UffdCopyFailed;
 
   return code;
 }
 
-static void handleFaultsAsync(CodeTransformer *CT) {
-  int uffd;
+/**
+ * Fault handling event loop.  Runs asynchronously to main application.
+ * @param arg pointer to CodeTransformer object
+ * @return nullptr always
+ */
+static void *handleFaultsAsync(void *arg) {
+  CodeTransformer *CT = (CodeTransformer *)arg;
+  int uffd = CT->getUserfaultfd();
   size_t nfaults = CT->getNumFaultsBatched(), toHandle, i;
   ssize_t bytesRead;
-  struct uffd_msg *msg;
+  pid_t me = syscall(SYS_gettid);
+  struct uffd_msg *msg = new struct uffd_msg[nfaults];
 
-  uffd = CT->getUserfaultfd();
+  assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
-  msg = new struct uffd_msg[nfaults];
+  assert(msg && "Page fault message buffer allocation failed");
 
-  while(true) {
-    bytesRead = read(uffd, &msg, sizeof(struct uffd_msg) * nfaults);
+  if(!setSignalHandler())
+    ERROR("could not initialize cleanup signal handler" << std::endl);
+  CT->setFaultHandlerPid(me);
+
+  DEBUGMSG("fault handler " << me << ": reading from uffd=" << uffd
+           << ", batching " << nfaults << " fault(s)" << std::endl);
+
+  while(!faultHandlerExit) {
+    bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);
     if(bytesRead >= 0) {
       toHandle = bytesRead / sizeof(struct uffd_msg);
       for(i = 0; i < toHandle; i++) {
@@ -56,10 +97,29 @@ static void handleFaultsAsync(CodeTransformer *CT) {
         }
       }
     }
-    else if(faultHandlerExit) break;
+    else if(errno != EINTR) DEBUGMSG("read failed (return=" << bytesRead
+                                     << "), trying again..." << std::endl);
   }
+  delete [] msg;
 
-  delete msg;
+  DEBUGMSG("fault handler " << me << " exiting" << std::endl);
+
+  return nullptr;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// CodeTransformer implementation
+///////////////////////////////////////////////////////////////////////////////
+
+CodeTransformer::~CodeTransformer() {
+  faultHandlerExit = true;
+  proc.detach();
+  if(faultHandlerPid > 0) {
+    // Interrupt the fault handling thread if the thread was already blocking
+    // on a read before closing the userfaultfd file descriptor
+    syscall(SYS_tgkill, masterPID, faultHandlerPid, SIGINT);
+    pthread_join(faultHandler, nullptr);
+  }
 }
 
 ret_t CodeTransformer::initialize() {
@@ -80,7 +140,9 @@ ret_t CodeTransformer::initialize() {
     return ret_t::UffdHandshakeFailed;
   if(!uffd::registerRegion(proc.getUserfaultfd(), code.address(), code.size()))
     return ret_t::UffdRegisterFailed;
-  faultHandler = std::thread(handleFaultsAsync, this);
+
+  if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
+    return ret_t::FaultHandlerFailed;
 
   return ret_t::Success;
 }
@@ -96,6 +158,9 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   uint64_t bytes, newBytes, syscall, mask;
   size_t syscallSize, roundedLen;
   int prot, flags, retval;
+
+  DEBUGMSG("changing child's code section to be anonymous private mapping for "
+           "userfaultfd" << std::endl);
 
   // Load the system call and starting address instruction bytes
   syscall = arch::syscall(syscallSize);
@@ -114,7 +179,7 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
 
   // Marshal mmap arguments to change the mapping for the code section
   pageStart = PAGE_DOWN(start);
-  roundedLen = PAGE_UP(start + len) - pageStart;
+  roundedLen = PAGE_ALIGN_LEN(start, len);
   prot = PROT_EXEC | PROT_READ;
   flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
   if(proc.setSyscallRegs(SYS_mmap, pageStart, roundedLen, prot,

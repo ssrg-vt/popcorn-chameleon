@@ -5,15 +5,15 @@
  * Date: 10/11/2018
  */
 
-#ifndef _PTRACE_H
-#define _PTRACE_H
+#ifndef _TRACE_H
+#define _TRACE_H
 
 #include <cstdint>
 #include <unistd.h>
 #include <sys/user.h>
 
 namespace chameleon {
-namespace PTrace {
+namespace trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 // Setup
@@ -88,5 +88,5 @@ bool setMem(pid_t tracee, uintptr_t addr, uint64_t data);
 }
 }
 
-#endif /* _PTRACE_H */
+#endif /* _TRACE_H */
 

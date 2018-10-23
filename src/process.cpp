@@ -11,7 +11,7 @@
 #include "arch.h"
 #include "log.h"
 #include "process.h"
-#include "ptrace.h"
+#include "trace.h"
 
 using namespace chameleon;
 
@@ -76,11 +76,11 @@ static int receiveFileDescriptor(int socket) {
  * @param socket a UNIX domain socket connected to the parent
  */
 [[noreturn]] static void
-execChild(const char *bin, char **argv, int socket) {
+execChild(char **argv, int socket) {
   int uffd;
 
   // Prepare for ptrace on the child (tracee) side
-  if(!PTrace::traceme()) {
+  if(!trace::traceme()) {
     perror("Could not enable ptrace in child");
     close(socket);
     abort();
@@ -88,7 +88,9 @@ execChild(const char *bin, char **argv, int socket) {
 
   // TODO Note: the kernel is modified to update the userfaultfd's context with
   // the task's post execve() mm_struct so the descriptor is valid after
-  // starting the new application
+  // starting the new application.  We should instead use CRIU's compel library
+  // to instead inject code into the target which establishes the userfaultfd &
+  // sends it to the parent before starting the application
 
   // Open the userfaultfd file descriptor and pass it to the parent.  Set the
   // close-on-exec flag so we don't need to close it ourselves.
@@ -103,7 +105,7 @@ execChild(const char *bin, char **argv, int socket) {
     abort();
   }
 
-  execv(bin, argv);
+  execv(argv[0], argv);
   perror("Could not exec application");
   abort();
 }
@@ -122,7 +124,7 @@ ret_t Process::forkAndExec() {
     return ret_t::RecvUFFDFailed;
 
   child = fork();
-  if(child == 0) execChild(argv[0], argv, sockets[1]);
+  if(child == 0) execChild(argv, sockets[1]);
   else if(child < 0) {
     close(sockets[0]);
     close(sockets[1]);
@@ -139,10 +141,11 @@ ret_t Process::forkAndExec() {
 
   DEBUGMSG("received userfaultfd (fd=" << uffd << ") from child" << std::endl);
 
-  // Wait for child to execv() & set up tracing infrastructure
+  // Wait for child to execv() & set up tracing infrastructure.  The kernel
+  // will stop the child with SIGTRAP before execution begins.
   if(wait_internal(false) != ret_t::Success ||
      status != Stopped ||
-     !PTrace::killChildOnExit(pid))
+     !trace::killChildOnExit(pid))
     return ret_t::TraceSetupFailed;
 
   DEBUGMSG("set up child for tracing" << std::endl);
@@ -161,6 +164,7 @@ ret_t Process::wait_internal(bool reinject) {
   if(waitpid(pid, &wstatus, 0) == -1) {
     status = Unknown;
     retval = ret_t::WaitFailed;
+    DEBUGMSG("waiting for child returned an error" << std::endl);
   }
   else {
     if(WIFEXITED(wstatus)) {
@@ -172,13 +176,15 @@ ret_t Process::wait_internal(bool reinject) {
       signal = WTERMSIG(wstatus);
     }
     else if(WIFSTOPPED(wstatus)) {
+      // Don't reinject SIGTRAP -- it's a syscall invoked by the application
       status = Stopped;
       signal = WSTOPSIG(wstatus);
-      reinjectSignal = reinject;
+      reinjectSignal = reinject && (signal != SIGTRAP);
     }
     else {
       status = Unknown;
       retval = ret_t::WaitFailed;
+      DEBUGMSG("unknown wait status" << std::endl);
     }
   }
 
@@ -199,8 +205,8 @@ ret_t Process::resume(bool syscall) {
   case SignalExit: return ret_t::DoesNotExist;
 
   default:
-    if(reinjectSignal) success = PTrace::resume(pid, signal, syscall);
-    else success = PTrace::resume(pid, 0, syscall);
+    if(reinjectSignal) success = trace::resume(pid, signal, syscall);
+    else success = trace::resume(pid, 0, syscall);
     if(success) {
       status = Running;
       return ret_t::Success;
@@ -217,7 +223,7 @@ ret_t Process::continueToNextEvent(bool syscall) {
 
 void Process::detach() {
   close(uffd);
-  PTrace::detach(pid);
+  trace::detach(pid);
   pid = -1;
   status = Ready;
   exit = 0;
@@ -242,15 +248,15 @@ int Process::getSignal() const {
 uintptr_t Process::getPC() const {
   struct user_regs_struct regs;
   if(status != Stopped) return 0;
-  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   return arch::pc(regs);
 }
 
 ret_t Process::setPC(uintptr_t newPC) const {
   struct user_regs_struct regs;
-  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::pc(regs, newPC);
-  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
@@ -258,9 +264,9 @@ ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
                                long a4, long a5, long a6) const {
   struct user_regs_struct regs;
   if(status != Stopped) return ret_t::InvalidState;
-  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::marshalFuncCall(regs, a1, a2, a3, a4, a5, a6);
-  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
@@ -268,28 +274,28 @@ ret_t Process::setSyscallRegs(long syscall, long a1, long a2, long a3,
                               long a4, long a5, long a6) const {
   struct user_regs_struct regs;
   if(status != Stopped) return ret_t::InvalidState;
-  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::marshalSyscall(regs, syscall, a1, a2, a3, a4, a5, a6);
-  if(!PTrace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
 ret_t Process::getSyscallReturnValue(int &retval) const {
   struct user_regs_struct regs;
   if(!stoppedAtSyscall()) return ret_t::InvalidState;
-  if(!PTrace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   retval = arch::syscallRetval(regs);
   if(retval > -4096UL) retval = -retval;
   return ret_t::Success;
 }
 
 ret_t Process::read(uintptr_t addr, uint64_t &data) const {
-  if(!PTrace::getMem(pid, addr, data)) return ret_t::PtraceFailed;
+  if(!trace::getMem(pid, addr, data)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
 ret_t Process::write(uintptr_t addr, uint64_t data) const {
-  if(!PTrace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
+  if(!trace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 

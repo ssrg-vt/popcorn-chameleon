@@ -58,11 +58,11 @@ ret_t Binary::initLibELF() {
   else return ret_t::Success;
 }
 
-static inline ret_t checkCompatibility(Elf *e) {
-  if(elf_kind(e) != ELF_K_ELF) return ret_t::InvalidElf;
-  if(gelf_getclass(e) != ELFCLASS64) return ret_t::InvalidElf;
+static inline bool checkCompatibility(Elf *e) {
+  if(elf_kind(e) != ELF_K_ELF) return false;
+  if(gelf_getclass(e) != ELFCLASS64) return false;
   // TODO other ELF checks?
-  return ret_t::Success;
+  return true;
 }
 
 static bool initializeSegments(Elf *e, std::vector<Binary::Segment> &segments) {
@@ -80,8 +80,8 @@ static bool initializeSegments(Elf *e, std::vector<Binary::Segment> &segments) {
     DEBUGMSG("  File offset: 0x" << segments[i].fileOffset() << std::endl);
     DEBUGMSG("  File size: " << std::dec << segments[i].fileSize() << std::endl);
     DEBUGMSG("  Memory size: " << segments[i].memorySize() << std::endl);
-    DEBUGMSG("  Type: " << segments[i].type() << std::endl);
-    DEBUGMSG("  Flags: " << segments[i].flags() << std::endl);
+    DEBUGMSG("  Type: 0x" << std::hex << segments[i].type() << std::endl);
+    DEBUGMSG("  Flags: 0x" << std::hex << segments[i].flags() << std::endl);
   }
 
   return true;
@@ -97,11 +97,19 @@ ret_t Binary::initialize() {
 
   DEBUGMSG("opened '" << filename << "' for reading" << std::endl);
 
-  if(!(elf = elf_begin(fd, ELF_C_READ, nullptr)) ||
-     checkCompatibility(elf) != ret_t::Success ||
-     elf_getshdrstrndx(elf, &shdrstrndx) ||
-     getSectionByName(".text", code) != ret_t::Success ||
-     !initializeSegments(elf, segments)) {
+  if(!(elf = elf_begin(fd, ELF_C_READ, nullptr))) {
+    retcode = ret_t::ElfReadError;
+    goto error;
+  }
+
+  if(!checkCompatibility(elf)) {
+    retcode = ret_t::InvalidElf;
+    goto error;
+  }
+
+  if(elf_getshdrstrndx(elf, &shdrstrndx) ||
+     !initializeSegments(elf, segments) ||
+     getSectionByName(".text", code) != ret_t::Success) {
     retcode = ret_t::ElfReadError;
     goto error;
   }
@@ -110,7 +118,6 @@ ret_t Binary::initialize() {
     INFO("binary is stripped - no symbol table" << std::endl);
 
   goto finish;
-
 error:
   cleanup();
 finish:

@@ -105,10 +105,8 @@ int main(int argc, char **argv) {
 
   do {
     code = child.continueToNextEvent(false);
-    if(code != ret_t::Success) {
-      child.detach();
+    if(code != ret_t::Success)
       ERROR("could not continue to next event: " << retText(code) << endl);
-    }
 
     switch(child.getStatus()) {
     default: INFO("unknown child status"); break;

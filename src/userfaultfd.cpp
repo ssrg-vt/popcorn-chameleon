@@ -68,18 +68,19 @@ bool uffd::api(int fd, uint64_t *features, uint64_t *ioctls) {
   return true;
 }
 
-bool uffd::registerRegion(int fd, uintptr_t addr, uint64_t size) {
+bool uffd::registerRegion(int fd, uintptr_t addr, uint64_t len) {
   struct uffdio_register ctrl;
 
   ctrl.range.start = PAGE_DOWN(addr);
-  ctrl.range.len = PAGE_UP(size);
+  ctrl.range.len = PAGE_ALIGN_LEN(addr, len);
   ctrl.mode = UFFDIO_REGISTER_MODE_MISSING;
   ctrl.ioctls = 0;
   if(ioctl(fd, UFFDIO_REGISTER, &ctrl) == -1) return false;
 
   DEBUG(
-    DEBUGMSG("registered 0x" << std::hex << addr << " - " << (addr + size)
-             << " (size=" << std::dec << size << ")" << std::endl);
+    DEBUGMSG("registered 0x" << std::hex << ctrl.range.start << " - "
+             << ctrl.range.start + ctrl.range.len << " (size=" << std::dec
+             << ctrl.range.len << ")" << std::endl);
     printIoctls(ctrl.ioctls);
   )
 

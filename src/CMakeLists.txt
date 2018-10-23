@@ -3,7 +3,7 @@ add_executable (chameleon
   binary.cpp
   chameleon.cpp
   process.cpp
-  ptrace.cpp
+  trace.cpp
   transform.cpp
   types.cpp
   userfaultfd.cpp
@@ -17,7 +17,7 @@ if (NOT ELF)
 endif ()
 
 target_include_directories (chameleon PRIVATE "${PROJECT_SOURCE_DIR}/include")
-target_compile_options (chameleon PRIVATE "-std=c++11")
+target_compile_options (chameleon PRIVATE "-std=c++11" "-pthread")
 target_link_libraries (chameleon
   ${ELF}
   ${ZLIB_LIBRARIES}

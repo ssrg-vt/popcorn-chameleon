@@ -11,7 +11,7 @@
 #ifndef _TRANSFORM_H
 #define _TRANSFORM_H
 
-#include <thread>
+#include <pthread.h>
 
 #include "binary.h"
 #include "process.h"
@@ -29,8 +29,10 @@ public:
    * @param batchedFaults maximum number of faults handled at once
    */
   CodeTransformer(Process &proc, size_t batchedFaults = 1)
-    : proc(proc), binary(proc.getArgv()[0]), batchedFaults(batchedFaults) {}
+    : proc(proc), binary(proc.getArgv()[0]), faultHandlerPid(-1),
+      batchedFaults(batchedFaults) {}
   CodeTransformer() = delete;
+  ~CodeTransformer();
 
   /**
    * Initialize the code transformer object.
@@ -64,6 +66,13 @@ public:
    */
   size_t getNumFaultsBatched() const { return batchedFaults; }
 
+  /**
+   * Set the PID of the fault handling thread.  Should only be called from the
+   * fault handling thread.
+   * @param pid the fault handling thread's PID
+   */
+  void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
+
 private:
   /* A previously instantiated process */
   Process &proc;
@@ -72,7 +81,8 @@ private:
   Binary binary;
 
   /* Thread responsible for reading & responding to page faults */
-  std::thread faultHandler;
+  pthread_t faultHandler;
+  pid_t faultHandlerPid;
   size_t batchedFaults; /* Number of faults to handle at once */
 };
 

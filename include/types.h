@@ -33,6 +33,7 @@ namespace chameleon {
 #define TRANSFORM_RETCODES \
   X(InvalidTransformConfig, "invalid transformation configuration") \
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
+  X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
   X(UffdCopyFailed, "userfaultfd copy failed")

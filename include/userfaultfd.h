@@ -25,7 +25,7 @@ bool api(int fd, uint64_t *features, uint64_t *ioctls);
 
 /**
  * Register a memory region for fault handling.  If not already page aligned &
- * page sized, round addr down and len up to the nearest page size.
+ * page sized, rounds addr down and len up to the nearest page size.
  * @param fd userfaultfd file descriptor
  * @param addr starting address of virtual memory region
  * @param len length of virtual memory region
