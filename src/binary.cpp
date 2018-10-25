@@ -1,9 +1,12 @@
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "binary.h"
 #include "log.h"
+#include "utils.h"
 
 using namespace chameleon;
 
@@ -19,21 +22,23 @@ ret_t Binary::Section::initialize(Elf *elf,
   this->name = name;
   this->header = header;
   this->section = section;
-  if(!(this->data = elf_getdata(section, nullptr))) return ret_t::ElfReadError;
 
   DEBUGMSG("Section '" << name << "':" << std::endl);
   DEBUGMSG("  Address: 0x" << std::hex << header.sh_addr << std::endl);
-  DEBUGMSG("  File offset: 0x" << header.sh_offset << std::endl);
-  DEBUGMSG("  Size: " << std::dec << header.sh_size << " bytes" << std::endl);
+  DEBUGMSG("  File offset: 0x" << std::hex << header.sh_offset << std::endl);
+  DEBUGMSG("  Size: " << header.sh_size << " bytes" << std::endl);
 
   return ret_t::Success;
 }
 
-void *Binary::Section::getData(uintptr_t addr) {
-  uintptr_t start = address();
-  if(start <= addr && addr < (start + size()))
-    return (char *)data->d_buf + addr - start;
-  else return nullptr;
+ret_t Binary::SymbolTable::initialize(Elf *elf,
+                                      const char *name,
+                                      GElf_Shdr &header,
+                                      Elf_Scn *section) {
+  ret_t code = Section::initialize(elf, name, header, section);
+  if(code != ret_t::Success) return code;
+  if(!elf_getdata(section, data)) return ret_t::ElfReadError;
+  return ret_t::Success;
 }
 
 // TODO if we end up doing this more than once we should go ahead and cache the
@@ -87,17 +92,27 @@ static bool initializeSegments(Elf *e, std::vector<Binary::Segment> &segments) {
   return true;
 }
 
+static inline ssize_t fileSize(int fd) {
+  struct stat buf;
+  assert(fd >= 0 && "Invalid file descriptor");
+  if(fstat(fd, &buf) == -1) return -1;
+  else return buf.st_size;
+}
+
 ret_t Binary::initialize() {
+  bool foundCodeSeg = false;
   ret_t retcode = ret_t::Success;
 
-  if((fd = open(filename, O_RDONLY)) == -1) {
+  if((fd = open(filename, O_RDONLY)) == -1 ||
+     (size = fileSize(fd)) == -1 ||
+     !(data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0))) {
     retcode = ret_t::OpenFailed;
     goto error;
   }
 
   DEBUGMSG("opened '" << filename << "' for reading" << std::endl);
 
-  if(!(elf = elf_begin(fd, ELF_C_READ, nullptr))) {
+  if(!(elf = elf_memory((char *)data, size))) {
     retcode = ret_t::ElfReadError;
     goto error;
   }
@@ -108,14 +123,36 @@ ret_t Binary::initialize() {
   }
 
   if(elf_getshdrstrndx(elf, &shdrstrndx) ||
-     !initializeSegments(elf, segments) ||
-     getSectionByName(".text", code) != ret_t::Success) {
+     !initializeSegments(elf, segments)) {
     retcode = ret_t::ElfReadError;
     goto error;
   }
 
+  // TODO load in all sections?
+
   if(getSectionByType(SHT_SYMTAB, symtab) != ret_t::Success)
     INFO("binary is stripped - no symbol table" << std::endl);
+
+  // Cache the code section & segment containing the code
+  if(getSectionByName(".text", codeSection) != ret_t::Success) {
+    retcode = ret_t::InvalidElf;
+    goto error;
+  }
+
+  for(auto &seg : segments) {
+    if(seg.contains(codeSection.address())) {
+      // TODO if segments becomes larger we should convert codeSegment to a
+      // reference to avoid copying by value
+      assert(seg.contains(codeSection.address() + codeSection.size()));
+      codeSegment = seg;
+      foundCodeSeg = true;
+    }
+  }
+
+  if(!foundCodeSeg) {
+    retcode = ret_t::InvalidElf;
+    goto error;
+  }
 
   goto finish;
 error:
@@ -127,12 +164,69 @@ finish:
 void Binary::cleanup() {
   if(elf) elf_end(elf);
   elf = nullptr;
+  if(data) munmap(data, size);
+  data = nullptr;
+  size = 0;
   if(fd != -1) close(fd);
   fd = -1;
+  segments.clear();
   DEBUG(
     filename = nullptr;
     shdrstrndx = UINT64_MAX;
   )
+}
+
+const void *Binary::getData(uintptr_t addr, const Segment &segment) const {
+  uintptr_t fileAddr;
+  off_t offset;
+  if(segment.contains(addr)) {
+    offset = addr - segment.address();
+    fileAddr = (uintptr_t)data + segment.fileOffset() + offset;
+    if(binaryContains(fileAddr)) return (void *)fileAddr;
+  }
+  return nullptr;
+}
+
+const void * Binary::getData(uintptr_t addr) const {
+  Segment tmp;
+  if(getSegmentByAddress(addr, tmp) != ret_t::Success) return nullptr;
+  else return getData(addr, tmp);
+}
+
+size_t
+Binary::getRemainingMemSize(uintptr_t addr, const Segment &segment) const {
+  size_t remaining = 0;
+  off_t offset;
+  if(segment.contains(addr)) {
+    offset = addr - segment.address();
+    assert(offset <= segment.memorySize() && "Invalid segment memory size");
+    remaining = segment.memorySize() - offset;
+  }
+  return remaining;
+}
+
+size_t Binary::getRemainingMemSize(uintptr_t addr) const {
+  Segment tmp;
+  if(getSegmentByAddress(addr, tmp) != ret_t::Success) return 0;
+  else return getRemainingMemSize(addr, tmp);
+}
+
+size_t
+Binary::getRemainingFileSize(uintptr_t addr, const Segment &segment) const {
+  size_t remaining = 0;
+  off_t offset;
+  if(segment.contains(addr)) {
+    offset = addr - segment.address();
+    assert(offset <= segment.memorySize() && "Invalid segment memory size");
+    if(offset < segment.fileSize()) remaining = segment.fileSize() - offset;
+  }
+  return remaining;
+}
+
+size_t Binary::getRemainingFileSize(uintptr_t addr) const {
+  Segment tmp;
+  if(getSegmentByAddress(addr, tmp) != ret_t::Success) return 0;
+  else return getRemainingFileSize(addr, tmp);
 }
 
 ret_t Binary::getSectionByName(const char *name, Section &section) {
@@ -164,6 +258,16 @@ ret_t Binary::getSectionByType(uint32_t type, Section &section) {
     }
   }
 
+  return ret_t::NoSuchSection;
+}
+
+ret_t Binary::getSegmentByAddress(uintptr_t addr, Segment &segment) const {
+  for(auto &seg : segments) {
+    if(seg.contains(addr)) {
+      segment = seg;
+      return ret_t::Success;
+    }
+  }
   return ret_t::NoSuchSection;
 }
 

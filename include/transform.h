@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #include "binary.h"
+#include "memoryview.h"
 #include "process.h"
 #include "types.h"
 #include "userfaultfd.h"
@@ -41,17 +42,15 @@ public:
   ret_t initialize();
 
   /**
-   * Remap the code section of the binary to be an anonymous private region
-   * suitable for attaching by userfaultfd.
+   * Populate a MemoryWindow object for the memory contents of the page
+   * containing a given address.  Any non-code sections are separated from code
+   * sections into different MemoryRegions contained inside the window.
    *
-   * Note: this is unnecessary if userfaultfd lets us attach to the code
-   * segment mapped in at application startup.
-   *
-   * @param start starting address of code section
-   * @param len length of code section
+   * @param window a MemoryWindow object to be populated with MemoryRegions
+   * @param address address for which to generate the window
    * @return a return code describing the outcome
    */
-  ret_t remapCodeSegment(uintptr_t start, uint64_t len);
+  ret_t generateMemoryWindow(MemoryWindow &window, uintptr_t address);
 
   /**
    * Return the userfaultfd file descriptor for the attached process.
@@ -65,6 +64,13 @@ public:
    * @return the number of faults handled at once
    */
   size_t getNumFaultsBatched() const { return batchedFaults; }
+
+  /**
+   * Return the fault handling thread's PID.  Only valid after successful calls
+   * to initialize().
+   * @return the fault handling thread's PID or -1 if not initialized
+   */
+  pid_t getFaultHandlerPid() const { return faultHandlerPid; }
 
   /**
    * Set the PID of the fault handling thread.  Should only be called from the
@@ -84,6 +90,19 @@ private:
   pthread_t faultHandler;
   pid_t faultHandlerPid;
   size_t batchedFaults; /* Number of faults to handle at once */
+
+  /**
+   * Remap the code section of the binary to be an anonymous private region
+   * suitable for attaching by userfaultfd.
+   *
+   * Note: this is unnecessary if userfaultfd lets us attach to the code
+   * segment mapped in at application startup.
+   *
+   * @param start starting address of code section
+   * @param len length of code section
+   * @return a return code describing the outcome
+   */
+  ret_t remapCodeSegment(uintptr_t start, uint64_t len);
 };
 
 }

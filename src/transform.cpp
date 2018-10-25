@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstring>
 #include <csignal>
 #include <sys/mman.h>
@@ -6,6 +7,7 @@
 
 #include "arch.h"
 #include "log.h"
+#include "memoryview.h"
 #include "transform.h"
 #include "userfaultfd.h"
 #include "utils.h"
@@ -41,20 +43,21 @@ static inline bool setSignalHandler() {
  * @param msg description of faulting region
  * @return a return code describing the outcome
  */
+static std::vector<char> pageBuf(PAGESZ);
 static inline ret_t
 handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
   uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address);
-  uint64_t PAGE_ALIGNED pagebuf[PAGESZ / sizeof(uint64_t)];
   ret_t code = ret_t::Success;
+  MemoryWindow mem;
 
   assert(msg.event == UFFD_EVENT_PAGEFAULT && "Invalid message type");
   DEBUGMSG("handling fault @ 0x" << std::hex << msg.arg.pagefault.address
            << ", flags=" << msg.arg.pagefault.flags << ", ptid=" << std::dec
            << msg.arg.pagefault.feat.ptid << std::endl);
 
-  // TODO map in actual memory from disk, transform code regions
-  memset(pagebuf, 0, sizeof(pagebuf));
-  if(!uffd::copy(uffd, (uintptr_t)&pagebuf, pageAddr))
+  CT->generateMemoryWindow(mem, msg.arg.pagefault.address);
+  mem.project(pageBuf);
+  if(!uffd::copy(uffd, (uintptr_t)&pageBuf[0], pageAddr))
     code = ret_t::UffdCopyFailed;
 
   return code;
@@ -147,6 +150,73 @@ ret_t CodeTransformer::initialize() {
   return ret_t::Success;
 }
 
+ret_t CodeTransformer::generateMemoryWindow(MemoryWindow &window,
+                                            uintptr_t address) {
+  uintptr_t page = PAGE_DOWN(address), boundary = page + PAGESZ;
+  uintptr_t curAddress;
+  ssize_t len, filelen;
+  const void *data;
+  const Binary::Section &codeSec = binary.getCodeSection();
+  const Binary::Segment &codeSeg = binary.getCodeSegment();
+  MemoryRegionPtr r;
+
+  if(!codeSeg.contains(address)) return ret_t::BadFault;
+  window.clear();
+  window.setStart(page);
+
+  // TODO the implementation below assumes loadable segments are page-aligned,
+  // meaning they start on page boundaries and no two segments reside on the
+  // same page.
+
+  // First: check if the page contains data before the code section.  Note that
+  // the region must be entirely contained on-disk (i.e., no zero-filled region
+  // so file length = memory length) because segments can't have holes and we
+  // know the subsequent code section *must* be on-disk.
+  curAddress = codeSec.address();
+  filelen = curAddress - page;
+  if(filelen > 0) {
+    assert(binary.getRemainingFileSize(page, codeSeg) >= filelen &&
+           "Invalid file format - found holes in segment");
+    data = binary.getData(page, codeSeg);
+    if(!data) return ret_t::MarshalDataFailed;
+    r.reset(new FileRegion(page, filelen, filelen, data));
+    window.insert(r);
+  }
+
+  // Next: add a region for the code section.  Either the code section
+  // reaches/goes past the page boundary or ends before the boundary.
+  filelen = binary.getRemainingFileSize(curAddress, codeSeg);
+  data = binary.getData(curAddress, codeSeg);
+  if(!data) return ret_t::MarshalDataFailed;
+  if((curAddress + codeSec.size()) >= boundary) {
+    // The easy case - code extends to or past the page boundary.  Note that
+    // the on-disk code region *should* extend to the boundary (should not have
+    // zero-padded code section) but handle this case anyway.
+    len = boundary - curAddress;
+    r.reset(new BufferedRegion(curAddress, len, filelen, data));
+    window.insert(r);
+  }
+  else {
+    // The code section doesn't extend to the end of the page, create regions
+    // for the remaining data.
+    len = codeSec.size();
+    r.reset(new BufferedRegion(curAddress, len, filelen, data));
+    window.insert(r);
+
+    // It's possible the segment ends before the page boundary; we don't care.
+    // We'll just zero fill to the boundary regardless.
+    curAddress += codeSec.size();
+    len = boundary - curAddress;
+    filelen = binary.getRemainingFileSize(curAddress, codeSeg);
+    data = binary.getData(curAddress, codeSeg);
+    if(!data) return ret_t::MarshalDataFailed;
+    r.reset(new FileRegion(curAddress, len, filelen, data));
+    window.insert(r);
+  }
+
+  return ret_t::Success;
+}
+
 static inline uint64_t getMask(size_t bytes) {
   uint64_t mask = 0;
   for(size_t i = 0; i < bytes; i++) mask |= (0xff << (i * 8));
@@ -159,7 +229,7 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   size_t syscallSize, roundedLen;
   int prot, flags, retval;
 
-  DEBUGMSG("changing child's code section to be anonymous private mapping for "
+  DEBUGMSG("changing child's code section anonymous private mapping for "
            "userfaultfd" << std::endl);
 
   // Load the system call and starting address instruction bytes

@@ -2,6 +2,7 @@ add_executable (chameleon
   arch.cpp
   binary.cpp
   chameleon.cpp
+  memoryview.cpp
   process.cpp
   trace.cpp
   transform.cpp

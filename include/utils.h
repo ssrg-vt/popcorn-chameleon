@@ -21,5 +21,8 @@
 /* Calculate page-aligned length from non-aligned address and length */
 #define PAGE_ALIGN_LEN( addr, len ) (PAGE_UP(addr + len) - PAGE_DOWN(addr))
 
+/* Mask to only keep page offset bits (i.e., keep lower bits) */
+#define PAGE_OFFSET_BITS( addr ) (addr & (PAGESZ-1))
+
 #endif /* _UTILS_H */
 

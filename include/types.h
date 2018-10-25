@@ -36,7 +36,10 @@ namespace chameleon {
   X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
-  X(UffdCopyFailed, "userfaultfd copy failed")
+  X(UffdCopyFailed, "userfaultfd copy failed") \
+  X(BadFault, "kernel delivered unexpected or unhandled fault to userspace") \
+  X(MarshalDataFailed, "failed to marshal data to handle fault") \
+  X(BadMarshal, "invalid view of memory")
 
 enum ret_t {
   Success = 0,
