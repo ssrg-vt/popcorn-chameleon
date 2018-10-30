@@ -15,7 +15,11 @@
 #include <gelf.h>
 #include <libelf.h>
 #include <vector>
+
 #include "types.h"
+#include "utils.h"
+
+#include "rewrite_metadata.h"
 
 namespace chameleon {
 
@@ -36,10 +40,8 @@ public:
     uintptr_t address() const { return header.sh_addr; }
     uintptr_t fileOffset() const { return header.sh_offset; }
     uintptr_t size() const { return header.sh_size; }
-    bool contains(uintptr_t addr) const {
-      return header.sh_addr <= addr &
-             addr < (header.sh_addr + header.sh_size);
-    }
+    bool contains(uintptr_t addr) const
+    { return CONTAINS(addr, header.sh_addr, header.sh_size); }
 
     /**
      * Initialize the object with an ELF object, name, header and section.
@@ -54,11 +56,26 @@ public:
                              GElf_Shdr &header,
                              Elf_Scn *section);
 
+    /* Field getters - return what you ask for */
+    size_t getEntrySize() const { return entrySize; }
+    size_t getNumEntries() const { return numEntries; }
+    const void *getData() const { return data->d_buf; }
+
+    /**
+     * Set the size of entries & re-calculate the number of entries.
+     * @param entrySize the size of entries
+     */
+    void setEntrySize(size_t entrySize) {
+      this->entrySize = entrySize;
+      numEntries = header.sh_size / entrySize;
+    }
   protected:
     std::string name;
+    size_t entrySize, numEntries;
     Elf *elf;
     GElf_Shdr header;
     Elf_Scn *section;
+    Elf_Data *data;
   };
 
   /**
@@ -67,28 +84,24 @@ public:
   class SymbolTable : public Section {
   public:
     /**
-     * Identical to Section::initialize() except additionally grabs the actual
-     * section contents for symbol lookups.
-     * @param elf pointer to Elf object
-     * @param name the section name
-     * @param header the section header from libelf
-     * @param section the section descriptor from libelf
-     * @return a return code describing the outcome
-     */
-    ret_t initialize(Elf *elf,
-                     const char *name,
-                     GElf_Shdr &header,
-                     Elf_Scn *section) override;
-
-    /**
      * Get the virtual address of a symbol.
      * @param symbol the symbol
      * @return the symbol's virtual address
      */
     uintptr_t getSymbolAddress(const std::string &sym) const;
+  };
 
-  private:
-    Elf_Data *data;
+  /**
+   * A section containing a number of identical sections.
+   */
+  template<typename T>
+  class EntrySection : public Section {
+  public:
+    /**
+     * Get the entries, organized as a vector.
+     * @return a pointer to the vector of entries
+     */
+    const T *getEntries() const { return (const T *)data->d_buf; }
   };
 
   /**
@@ -137,13 +150,31 @@ public:
     bool isExecutable() const { return header.p_flags & Flags::Executable; }
     bool isWritable() const { return header.p_flags & Flags::Writable; }
     bool isReadable() const { return header.p_flags & Flags::Readable; }
-    bool contains(uintptr_t addr) const {
-      return header.p_vaddr <= addr &&
-             addr < (header.p_vaddr + header.p_memsz);
-    }
+    bool contains(uintptr_t addr) const
+    { return CONTAINS(addr, header.p_vaddr, header.p_memsz); }
 
   private:
     GElf_Phdr header;
+  };
+
+  /**
+   * Helper class to iterate over functions in a region.
+   */
+  class FunctionIterator {
+  public:
+    FunctionIterator(const function_record *funcs, size_t len)
+      : cur(0), len(len), funcs(funcs) {}
+
+    bool end() const { return cur >= len; }
+    void operator++() { if(cur < len) cur++; }
+
+    const function_record *operator*() const {
+      if(cur < len) return &this->funcs[cur];
+      else return nullptr;
+    }
+  private:
+    size_t cur, len;
+    const function_record *funcs;
   };
 
   /**
@@ -247,6 +278,12 @@ public:
   uintptr_t getSymbolAddress(std::string &sym)
   { return symtab.getSymbolAddress(sym); }
 
+  /**
+   * Return a function iteration which can be used to iterate over all
+   * functions within the specified range.
+   */
+  FunctionIterator getFunctions(uintptr_t start, uintptr_t end) const;
+
 private:
   /* Raw file access */
   const char *filename;
@@ -254,7 +291,7 @@ private:
   void *data;
   size_t size;
 
-  /* ELF metadata & relevant sections */
+  /* ELF metadata & pertinent information */
   Elf *elf;
   size_t shdrstrndx;
   std::vector<Segment> segments;
@@ -263,6 +300,20 @@ private:
   Section codeSection;
   Segment codeSegment;
   SymbolTable symtab;
+  EntrySection<function_record> functions;
+  EntrySection<stack_slot> stackSlots;
+  EntrySection<unwind_loc> unwind;
+
+  /**
+   * Return a pointer to the file's data at a given offset.
+   * @param offset offset into file
+   * @return pointer into data section or nullptr if invalid
+   */
+  void *dataPtr(uintptr_t offset) const {
+    uintptr_t addr = (uintptr_t)data + offset;
+    if(binaryContains(addr)) return (void *)addr;
+    else return 0;
+  }
 
   /**
    * Return whether an address is within the mapped file's boundaries.  Note:
@@ -271,7 +322,7 @@ private:
    * @return true if contained within or false otherwise
    */
   bool binaryContains(uintptr_t addr) const
-  { return (uintptr_t)data <= addr && addr < ((uintptr_t)data + size); }
+  { return CONTAINS(addr, (uintptr_t)data, size); }
 
   /**
    * Search for a section by name and populate the section object argument.
@@ -297,6 +348,18 @@ private:
    * @return a return code describing the outcome
    */
   ret_t getSegmentByAddress(uintptr_t addr, Segment &segment) const;
+
+  /**
+   * Return an index number to the function record that contains an address.
+   * If no function record contains the address, return the index of the
+   * nearest record that begins after the address (i.e., to the "right") or -1
+   * if no record appears after the address.
+   *
+   * @param addr an address
+   * @return index number of the record that either contains or starts directly
+   *         after the address, or -1 if no record starts after it
+   */
+  ssize_t findFunctionRight(uintptr_t addr) const;
 };
 
 }

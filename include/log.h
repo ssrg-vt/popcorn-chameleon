@@ -19,6 +19,10 @@ extern pid_t masterPID;
   do { std::cout << "[ chameleon " << masterPID << " ] " \
                  << __VA_ARGS__ << std::dec; } while(0);
 
+#define WARN( ... ) \
+  do { std::cerr << "[ chameleon " << masterPID << " ] WARNING: " \
+                 << __VA_ARGS__ << std::dec; } while(0);
+
 /* Print an error message and exit */
 #define ERROR( ... ) \
   do { std::cerr << "[ chameleon " << masterPID << " ] ERROR: " \

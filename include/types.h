@@ -12,11 +12,11 @@ namespace chameleon {
 
 /* Binary file access error codes */
 #define BINARY_RETCODES \
-  X(OpenFailed, "could not open binary") \
-  X(InvalidElf, "invalid ELF file/format") \
   X(ElfFailed, "could not initialize libelf") \
+  X(OpenFailed, "could not open binary") \
   X(ElfReadError, "could not read ELF metadata") \
-  X(NoSuchSection, "could not find ELF section")
+  X(InvalidElf, "invalid ELF file/format") \
+  X(NoSuchSection, "could not find ELF section/segment")
 
 /* Process control error codes */
 #define PROCESS_RETCODES \
@@ -32,14 +32,15 @@ namespace chameleon {
 /* State transformation error codes */
 #define TRANSFORM_RETCODES \
   X(InvalidTransformConfig, "invalid transformation configuration") \
+  X(DisasmSetupFailed, "setting up disassembler failed") \
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
   X(UffdCopyFailed, "userfaultfd copy failed") \
-  X(BadFault, "kernel delivered unexpected or unhandled fault to userspace") \
+  X(BadFault, "kernel delivered unexpected or unhandled fault") \
   X(MarshalDataFailed, "failed to marshal data to handle fault") \
-  X(BadMarshal, "invalid view of memory")
+  X(BadMarshal, "invalid view of memory, found overlapping regions")
 
 enum ret_t {
   Success = 0,

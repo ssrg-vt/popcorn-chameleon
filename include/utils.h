@@ -10,8 +10,12 @@
 
 #include <assert.h>
 
+/* Check if a value is within a region */
+#define CONTAINS( val, start, len ) (start <= val && val < (start + len))
+
 #define PAGESZ 4096UL
 
+/* Align symbol definition to page boundary */
 #define PAGE_ALIGNED __attribute__((aligned(PAGESZ)))
 
 /* Page rounding */

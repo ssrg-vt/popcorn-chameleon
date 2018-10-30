@@ -53,8 +53,10 @@ public:
    * call will wait for the forked tracee's initialization and application
    * execution.  After the tracee receives SIGSTOP (before executing any
    * application code) the tracer will initialize and return with the tracee in
-   * the stopped state.  The function returns an error code indicating whether
-   * the child was able to be set up and launched successfully.
+   * the stopped state.  Initialization includes creating a userfaultfd file
+   * descriptor in the child and passing it to the parent for handling page
+   * faults.  The function returns an error code indicating whether the child
+   * was able to be set up and launched successfully.
    *
    * Note: the call returns with the child process in the stopped state.  Users
    * should call resume() or continueToNextEvent() to start the child process.
@@ -69,8 +71,8 @@ public:
    *
    * Note: users should *not* attempt to interrupt child processes using libc
    * calls (i.e., kill()) on their own, but should *only* interact with the
-   * child through the APIs exposed by Process; doing so will interfere with
-   * child signal delivery.
+   * child through the APIs exposed by Process; circumventing Process' APIs
+   * will interfere with child signal delivery.
    *
    * @return a return code describing the outcome
    */
@@ -93,17 +95,11 @@ public:
    * continue until either the next signal delivery or system call boundary
    * (either going into or coming out of kernel) by the child.  Equivalent to
    * calling resume() followed by wait().
+   *
    * @param syscall whether or not to trace syscalls
    * @return a return code describing the outcome
    */
   ret_t continueToNextEvent(bool syscall);
-
-  /**
-   * Return whether the child stopped at a system call boundary or not.
-   * @return true if the process is stopped at a system call boundary or false
-   *         if stopped for another reason (or is not stopped)
-   */
-  bool stoppedAtSyscall() const { return getSignal() == SIGTRAP; }
 
   /**
    * Detach from a child and clean up internal state; the process object can be
@@ -126,6 +122,8 @@ public:
   status_t getStatus() const { return status; }
   int getUserfaultfd() const { return uffd; }
 
+  /* Note: the following APIs may only be called when the process is stopped */
+
   /**
    * Get the exit code after the child exits normally.
    * @return exit code if status == Exited, INT32_MAX otherwise
@@ -137,6 +135,13 @@ public:
    * @return signal number if status == SignalExit/Stopped, INT32_MAX otherwise
    */
   int getSignal() const;
+
+  /**
+   * Return whether the child stopped at a system call boundary or not.
+   * @return true if the process is stopped at a system call boundary or false
+   *         if stopped for another reason (or is not stopped)
+   */
+  bool stoppedAtSyscall() const { return getSignal() == SIGTRAP; }
 
   /**
    * Get the process' current program counter.

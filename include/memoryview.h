@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <set>
 #include <vector>
 #include <cstdint>
 
@@ -35,21 +34,21 @@ public:
    * @param len length of region in bytes
    */
   MemoryRegion(uintptr_t start, size_t len)
-    : start(start), end(start + len), len(len)
-  { assert(len <= PAGESZ && "Invalid region size"); }
+    : start(start), end(start + len), len(len) {}
   MemoryRegion() : start(UINT64_MAX), end(UINT64_MAX), len(UINT64_MAX) {}
 
   /**
    * Populate the buffer with the region's memory.
+   * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
-   * @param start starting offset within buffer
+   * @param offset starting offset within buffer
    * @return number of bytes copied into buffer
    */
-  virtual size_t populate(std::vector<char> &buffer, size_t start) = 0;
+  virtual size_t populate(uintptr_t address,
+                          std::vector<char> &buffer,
+                          size_t offset) const = 0;
 
-  /* Comparison types & operations for sorting */
-  typedef bool (*comparator)(const std::unique_ptr<MemoryRegion> &lhs,
-                             const std::unique_ptr<MemoryRegion> &rhs);
+  /* Comparison types & functions for sorting */
   static bool compare(const std::unique_ptr<MemoryRegion> &lhs,
                       const std::unique_ptr<MemoryRegion> &rhs)
   { return lhs->start < rhs->start; }
@@ -60,6 +59,13 @@ public:
   uintptr_t getStart() const { return start; }
   uintptr_t getEnd() const { return end; }
   size_t getLength() const { return len; }
+
+  /**
+   * Return whether the region contains a virtual memory address.
+   * @param addr a virtual memory address
+   * @return true if it contains the address, false otherwise
+   */
+  bool contains(uintptr_t addr) const { return CONTAINS(addr, start, len); }
 protected:
   uintptr_t start, end;
   size_t len;
@@ -67,21 +73,21 @@ protected:
 
 typedef std::unique_ptr<MemoryRegion> MemoryRegionPtr;
 
-
 /**
  * class FileRegion
  *
  * Provides a view of memory backed by file.  Maintain a file size separate
  * from region size because ELF executables can represent a subset of a
  * region's memory on disk; the rest of the region is zero-filled at load time.
+ * Note that nothing is allocated as all on-disk data is already mapped into
+ * memory and the remaining will be zero-initialized.  More efficient than
+ * BufferedRegion, but provides a read-only view of the region; use
+ * BufferedRegions for regions that need to be manipulated.
  */
 class FileRegion : public MemoryRegion {
 public:
   /**
-   * Instantiate a file-backed MemoryRegion.  Nothing is allocated as
-   * everything is already mapped into memory (on-disk) or will be
-   * zero-initialized.
-   *
+   * Instantiate a file-backed MemoryRegion.
    * @param start starting address of region
    * @param len length of region in bytes
    * @param fileLen length of on-disk portion of memory region; truncated to
@@ -94,11 +100,14 @@ public:
 
   /**
    * Populate the buffer with the region's memory.
+   * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
-   * @param start starting offset within buffer
+   * @param offset starting offset within buffer
    * @return number of bytes copied into buffer
    */
-  virtual size_t populate(std::vector<char> &buffer, size_t start) override;
+  virtual size_t populate(uintptr_t address,
+                          std::vector<char> &buffer,
+                          size_t offset) const override;
 private:
   size_t fileLen;
   const void *data;
@@ -109,7 +118,7 @@ private:
  *
  * Holds the data representing the memory region in a writable memory buffer.
  * The buffer is instantiated using the on-disk file; any remaining in-memory
- * representation is zero-filled.
+ * representation is zero-filled.  Use for regions that need to be manipulated.
  */
 class BufferedRegion : public MemoryRegion {
 public:
@@ -131,13 +140,15 @@ public:
 
   /**
    * Populate the buffer with the region's memory.
+   * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
-   * @param start starting offset within buffer
+   * @param offset starting offset within buffer
    * @return number of bytes copied into buffer
    */
-  virtual size_t populate(std::vector<char> &buffer, size_t start) override;
+  virtual size_t populate(uintptr_t address,
+                          std::vector<char> &buffer,
+                          size_t offset) const override;
 private:
-  size_t size;
   std::unique_ptr<char[]> data;
 };
 
@@ -151,7 +162,7 @@ private:
  */
 class MemoryWindow {
 public:
-  MemoryWindow() : regions(MemoryRegion::compare), start(0) {}
+  MemoryWindow() { regions.reserve(8); }
 
   /**
    * Remove all regions from the window.
@@ -165,30 +176,47 @@ public:
    *
    * @param region a unique_ptr to a MemoryRegion
    */
-  void insert(MemoryRegionPtr &region) { regions.insert(std::move(region)); }
+  void insert(MemoryRegionPtr &reg) { regions.push_back(std::move(reg)); }
 
   /**
-   * Project the MemoryRegions in the window into the buffer.
+   * Sort regions in the window by starting address.
+   */
+  void sort()
+  { std::sort(regions.begin(), regions.end(), MemoryRegion::compare); }
+
+  /**
+   * Project the MemoryRegions in the window into the buffer, zero-filling any
+   * holes (i.e., not covered by a MemoryRegion) in the window.  Fills the page
+   * starting at address with the window's data.
+   *
+   * Note: it's up to the caller to ensure that the regions are in sorted order
+   * before calling project().  Users can do this by calling sort().
+   *
+   * @param address page address at which to fill
    * @param buffer a buffer into which the MemoryRegion's contents are copied
    * @return a return code describing the outcome
    */
-  ret_t project(std::vector<char> &buffer);
+  ret_t project(uintptr_t address, std::vector<char> &buffer) const;
 
   /**
    * Return the number of regions in the window.
    * @return the number of regions in the window
    */
   size_t size() const { return regions.size(); }
+private:
+  std::vector<MemoryRegionPtr> regions;
 
   /**
-   * Set the starting address for the window.  Needed because this allows
-   * zero-filled regions before the first MemoryRegion's data.
-   * @param start the starting address for the window
+   * Return an index number to the region that contains an address.  If no
+   * region contains the address, return the index of the nearest region that
+   * begins after the address (i.e., to the "right") or -1 if no region appears
+   * after the address.
+   *
+   * @param addr an address
+   * @return index number of the region that either contains or starts directly
+   *         after the address, or -1 if no region starts after it
    */
-  void setStart(uintptr_t start) { this->start = start; }
-private:
-  std::set<MemoryRegionPtr, MemoryRegion::comparator> regions;
-  uintptr_t start;
+  ssize_t findRegionRight(uintptr_t address) const;
 };
 
 }

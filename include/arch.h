@@ -11,9 +11,19 @@
 #include <cstdint>
 #include <cstddef>
 #include <sys/user.h>
+#include <capstone/capstone.h>
+
+#include "types.h"
 
 namespace chameleon {
 namespace arch {
+
+/**
+ * Initialize architecture-specific handle for the disassembly framework.
+ * @param handle handle for disassembly framework
+ * @return a return code describing the outcome
+ */
+ret_t initDisassembler(csh *handle);
 
 /**
  * Return the system call instruction bytes and write the size of the

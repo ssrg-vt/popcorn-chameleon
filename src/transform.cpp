@@ -48,15 +48,13 @@ static inline ret_t
 handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
   uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address);
   ret_t code = ret_t::Success;
-  MemoryWindow mem;
 
   assert(msg.event == UFFD_EVENT_PAGEFAULT && "Invalid message type");
   DEBUGMSG("handling fault @ 0x" << std::hex << msg.arg.pagefault.address
            << ", flags=" << msg.arg.pagefault.flags << ", ptid=" << std::dec
            << msg.arg.pagefault.feat.ptid << std::endl);
 
-  CT->generateMemoryWindow(mem, msg.arg.pagefault.address);
-  mem.project(pageBuf);
+  CT->project(PAGE_DOWN(msg.arg.pagefault.address), pageBuf);
   if(!uffd::copy(uffd, (uintptr_t)&pageBuf[0], pageAddr))
     code = ret_t::UffdCopyFailed;
 
@@ -115,8 +113,9 @@ static void *handleFaultsAsync(void *arg) {
 ///////////////////////////////////////////////////////////////////////////////
 
 CodeTransformer::~CodeTransformer() {
+  cs_close(&disasm);
   faultHandlerExit = true;
-  proc.detach();
+  proc.detach(); // detaching closes the userfaultfd file descriptor
   if(faultHandlerPid > 0) {
     // Interrupt the fault handling thread if the thread was already blocking
     // on a read before closing the userfaultfd file descriptor
@@ -134,9 +133,13 @@ ret_t CodeTransformer::initialize() {
   }
 
   if((retcode = binary.initialize()) != ret_t::Success) return retcode;
+  if((retcode = arch::initDisassembler(&disasm)) != ret_t::Success)
+    return retcode;
   const Binary::Section &code = binary.getCodeSection();
 
   retcode = remapCodeSegment(code.address(), code.size());
+  if(retcode != ret_t::Success) return retcode;
+  retcode = randomizeFunctions(code, binary.getCodeSegment());
   if(retcode != ret_t::Success) return retcode;
 
   if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
@@ -146,73 +149,6 @@ ret_t CodeTransformer::initialize() {
 
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
-
-  return ret_t::Success;
-}
-
-ret_t CodeTransformer::generateMemoryWindow(MemoryWindow &window,
-                                            uintptr_t address) {
-  uintptr_t page = PAGE_DOWN(address), boundary = page + PAGESZ;
-  uintptr_t curAddress;
-  ssize_t len, filelen;
-  const void *data;
-  const Binary::Section &codeSec = binary.getCodeSection();
-  const Binary::Segment &codeSeg = binary.getCodeSegment();
-  MemoryRegionPtr r;
-
-  if(!codeSeg.contains(address)) return ret_t::BadFault;
-  window.clear();
-  window.setStart(page);
-
-  // TODO the implementation below assumes loadable segments are page-aligned,
-  // meaning they start on page boundaries and no two segments reside on the
-  // same page.
-
-  // First: check if the page contains data before the code section.  Note that
-  // the region must be entirely contained on-disk (i.e., no zero-filled region
-  // so file length = memory length) because segments can't have holes and we
-  // know the subsequent code section *must* be on-disk.
-  curAddress = codeSec.address();
-  filelen = curAddress - page;
-  if(filelen > 0) {
-    assert(binary.getRemainingFileSize(page, codeSeg) >= filelen &&
-           "Invalid file format - found holes in segment");
-    data = binary.getData(page, codeSeg);
-    if(!data) return ret_t::MarshalDataFailed;
-    r.reset(new FileRegion(page, filelen, filelen, data));
-    window.insert(r);
-  }
-
-  // Next: add a region for the code section.  Either the code section
-  // reaches/goes past the page boundary or ends before the boundary.
-  filelen = binary.getRemainingFileSize(curAddress, codeSeg);
-  data = binary.getData(curAddress, codeSeg);
-  if(!data) return ret_t::MarshalDataFailed;
-  if((curAddress + codeSec.size()) >= boundary) {
-    // The easy case - code extends to or past the page boundary.  Note that
-    // the on-disk code region *should* extend to the boundary (should not have
-    // zero-padded code section) but handle this case anyway.
-    len = boundary - curAddress;
-    r.reset(new BufferedRegion(curAddress, len, filelen, data));
-    window.insert(r);
-  }
-  else {
-    // The code section doesn't extend to the end of the page, create regions
-    // for the remaining data.
-    len = codeSec.size();
-    r.reset(new BufferedRegion(curAddress, len, filelen, data));
-    window.insert(r);
-
-    // It's possible the segment ends before the page boundary; we don't care.
-    // We'll just zero fill to the boundary regardless.
-    curAddress += codeSec.size();
-    len = boundary - curAddress;
-    filelen = binary.getRemainingFileSize(curAddress, codeSeg);
-    data = binary.getData(curAddress, codeSeg);
-    if(!data) return ret_t::MarshalDataFailed;
-    r.reset(new FileRegion(curAddress, len, filelen, data));
-    window.insert(r);
-  }
 
   return ret_t::Success;
 }
@@ -293,6 +229,92 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   if(proc.setPC(startPC) != ret_t::Success) {
     DEBUGMSG("could not reset PC to entry point" << std::endl);
     return ret_t::RemapCodeFailed;
+  }
+
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
+                                          const Binary::Segment &codeSegment) {
+  uintptr_t segStart, segEnd, secStart, secEnd, curAddr;
+  ssize_t len, filelen;
+  const void *data;
+  MemoryRegionPtr r;
+
+  // Note that by construction of how we're adding regions we don't need to
+  // call codeWindow.sort() to sort the regions within the window.
+
+  // Calculate the first address we care about. Note that we *only* care about
+  // pages with code, i.e., the code segment may contain other sections that
+  // are on different pages that don't concern us.
+  codeWindow.clear();
+  segStart = codeSegment.address();
+  secStart = codeSection.address();
+  curAddr = std::max<uintptr_t>(PAGE_DOWN(secStart), segStart);
+
+  // First, check if the segment contains data before the code section.  Note
+  // that the region must be entirely contained on-disk (i.e., no zero-filled
+  // region so file length = memory length) because segments can't have holes
+  // and we know the subsequent code section *must* be on-disk.
+  len = secStart - curAddr;
+  if(len > 0) {
+    if(binary.getRemainingFileSize(curAddr, codeSegment) <= len) {
+      WARN("invalid file format - found holes in segment" << std::endl);
+      return ret_t::InvalidElf;
+    }
+    data = binary.getData(curAddr, codeSegment);
+    if(!data) return ret_t::MarshalDataFailed;
+    r.reset(new FileRegion(curAddr, len, len, data));
+    codeWindow.insert(r);
+  }
+  else if(len != 0) {
+    WARN("invalid file format - segment start address is after code section "
+         "start address" << std::endl);
+    return ret_t::InvalidElf;
+  }
+
+  // Now, add a region for the code section
+  len = codeSection.size();
+  filelen = binary.getRemainingFileSize(secStart, codeSegment);
+  if(filelen < len)
+    WARN("code section on-disk smaller than in-memory representation ("
+         << filelen << " vs " << codeSection.size() << " bytes)" << std::endl);
+  data = binary.getData(secStart, codeSegment);
+  if(!data) return ret_t::MarshalDataFailed;
+  r.reset(new BufferedRegion(secStart, len, filelen, data));
+  codeWindow.insert(r);
+
+  // Finally, add any segment data after the code section
+  secEnd = secStart + len;
+  segEnd = segStart + codeSegment.memorySize();
+  curAddr = std::min<uintptr_t>(PAGE_UP(secEnd), segEnd);
+  len = curAddr - secEnd;
+  filelen = binary.getRemainingFileSize(secEnd, codeSegment);
+  data = binary.getData(secEnd, codeSegment);
+  if(!data) return ret_t::MarshalDataFailed;
+  r.reset(new FileRegion(secEnd, len, filelen, data));
+  codeWindow.insert(r);
+
+  // TODO go function by function & randomize
+  cs_insn *insn;
+  size_t count;
+  Binary::FunctionIterator it = binary.getFunctions(secStart, secEnd);
+  for(; !it.end(); ++it) {
+    const function_record *func = *it;
+    DEBUGMSG("function @ " << std::hex << func->addr << ", size = " << std::dec
+             << func->code_size << std::endl);
+    count = cs_disasm(disasm, (const uint8_t *)binary.getData(func->addr),
+                      func->code_size, func->addr, 0, &insn);
+    if(count) {
+      DEBUG(
+        size_t j;
+        for(j = 0; j < count; j++) {
+          DEBUGMSG("  0x" << std::hex << insn[j].address << ": "
+                   << insn[j].mnemonic << " " << insn[j].op_str << std::endl);
+        }
+      )
+      cs_free(insn, count);
+    }
   }
 
   return ret_t::Success;

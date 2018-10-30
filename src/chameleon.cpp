@@ -103,6 +103,7 @@ int main(int argc, char **argv) {
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
 
+  INFO("beginning execution of child process" << std::endl);
   do {
     code = child.continueToNextEvent(false);
     if(code != ret_t::Success)

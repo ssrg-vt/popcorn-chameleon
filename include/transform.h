@@ -12,6 +12,7 @@
 #define _TRANSFORM_H
 
 #include <pthread.h>
+#include <capstone/capstone.h>
 
 #include "binary.h"
 #include "memoryview.h"
@@ -42,15 +43,13 @@ public:
   ret_t initialize();
 
   /**
-   * Populate a MemoryWindow object for the memory contents of the page
-   * containing a given address.  Any non-code sections are separated from code
-   * sections into different MemoryRegions contained inside the window.
-   *
-   * @param window a MemoryWindow object to be populated with MemoryRegions
-   * @param address address for which to generate the window
+   * Project the transformed code into the buffer.
+   * @param address page address at which to fill
+   * @param buffer a buffer into which the MemoryRegion's contents are copied
    * @return a return code describing the outcome
    */
-  ret_t generateMemoryWindow(MemoryWindow &window, uintptr_t address);
+  ret_t project(uintptr_t address, std::vector<char> &buffer) const
+  { return codeWindow.project(address, buffer); }
 
   /**
    * Return the userfaultfd file descriptor for the attached process.
@@ -86,6 +85,12 @@ private:
   /* Binary containing transformation metadata */
   Binary binary;
 
+  /* An abstract view of the code segment, used to randomize code */
+  MemoryWindow codeWindow;
+
+  /* Handle for the disassembly framework */
+  csh disasm;
+
   /* Thread responsible for reading & responding to page faults */
   pthread_t faultHandler;
   pid_t faultHandlerPid;
@@ -103,6 +108,17 @@ private:
    * @return a return code describing the outcome
    */
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
+
+  /**
+   * Load the code segment from disk into the memory window and randomize
+   * all functions.
+   *
+   * @param codeSection the code section from the binary
+   * @param codeSegment the code segment from the binary
+   * @return a return code describing the outcome
+   */
+  ret_t randomizeFunctions(const Binary::Section &codeSection,
+                           const Binary::Segment &codeSegment);
 };
 
 }

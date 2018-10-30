@@ -1,8 +1,17 @@
 #include "arch.h"
+#include "log.h"
+#include "types.h"
 
 using namespace chameleon;
 
 #if defined __x86_64__
+
+ret_t arch::initDisassembler(csh *handle) {
+  DEBUGMSG("initializing disassembler for x86-64" << std::endl);
+  if(cs_open(CS_ARCH_X86, CS_MODE_64, handle) != CS_ERR_OK)
+    return ret_t::DisasmSetupFailed;
+  return ret_t::Success;
+}
 
 uint64_t arch::syscall(size_t &size) {
   size = 2;

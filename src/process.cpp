@@ -71,7 +71,6 @@ static int receiveFileDescriptor(int socket) {
 /**
  * Called by forked children to set up introspection machinery and execute the
  * requested application.  The process doesn't return from here.
- * @param bin the binary to execute
  * @param argv the arguments to pass to the new application
  * @param socket a UNIX domain socket connected to the parent
  */
@@ -222,8 +221,8 @@ ret_t Process::continueToNextEvent(bool syscall) {
 }
 
 void Process::detach() {
-  close(uffd);
   trace::detach(pid);
+  close(uffd);
   pid = -1;
   status = Ready;
   exit = 0;
@@ -254,6 +253,7 @@ uintptr_t Process::getPC() const {
 
 ret_t Process::setPC(uintptr_t newPC) const {
   struct user_regs_struct regs;
+  if(status != Stopped) return ret_t::InvalidState;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::pc(regs, newPC);
   if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
