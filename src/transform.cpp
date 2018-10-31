@@ -5,6 +5,10 @@
 #include <sys/syscall.h>
 #include <linux/userfaultfd.h>
 
+#define LINUX
+#define X86_64
+#include <dr_api.h>
+
 #include "arch.h"
 #include "log.h"
 #include "memoryview.h"
@@ -113,7 +117,6 @@ static void *handleFaultsAsync(void *arg) {
 ///////////////////////////////////////////////////////////////////////////////
 
 CodeTransformer::~CodeTransformer() {
-  cs_close(&disasm);
   faultHandlerExit = true;
   proc.detach(); // detaching closes the userfaultfd file descriptor
   if(faultHandlerPid > 0) {
@@ -133,7 +136,7 @@ ret_t CodeTransformer::initialize() {
   }
 
   if((retcode = binary.initialize()) != ret_t::Success) return retcode;
-  if((retcode = arch::initDisassembler(&disasm)) != ret_t::Success)
+  if((retcode = arch::initDisassembler()) != ret_t::Success)
     return retcode;
   const Binary::Section &code = binary.getCodeSection();
 
@@ -296,25 +299,47 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   codeWindow.insert(r);
 
   // TODO go function by function & randomize
-  cs_insn *insn;
-  size_t count;
-  Binary::FunctionIterator it = binary.getFunctions(secStart, secEnd);
+  Binary::func_iterator it = binary.getFunctions(secStart, secEnd);
   for(; !it.end(); ++it) {
     const function_record *func = *it;
-    DEBUGMSG("function @ " << std::hex << func->addr << ", size = " << std::dec
-             << func->code_size << std::endl);
-    count = cs_disasm(disasm, (const uint8_t *)binary.getData(func->addr),
-                      func->code_size, func->addr, 0, &insn);
-    if(count) {
-      DEBUG(
-        size_t j;
-        for(j = 0; j < count; j++) {
-          DEBUGMSG("  0x" << std::hex << insn[j].address << ": "
-                   << insn[j].mnemonic << " " << insn[j].op_str << std::endl);
-        }
-      )
-      cs_free(insn, count);
-    }
+    Binary::slot_iterator si = binary.getStackSlots(func);
+    Binary::unwind_iterator ui = binary.getUnwindLocations(func);
+    DEBUG(
+      DEBUGMSG("function @ " << std::hex << func->addr << ", size = "
+               << std::dec << func->code_size << ", " << si.getLength()
+               << " stack slot(s), " << ui.getLength()
+               << " callee-saved register(s)" << std::endl);
+      for(; !si.end(); ++si) {
+        const stack_slot *slot = *si;
+        DEBUGMSG("  slot @ " << slot->base_reg << " + " << slot->offset
+                 << ", size = " << slot->size
+                 << ", alignment = " << slot->alignment << std::endl);
+      }
+      for(; !ui.end(); ++ui) {
+        const unwind_loc *unwind = *ui;
+        DEBUGMSG("  CSR " << unwind->reg << " at FBP + " << unwind->offset
+                 << std::endl);
+      }
+      si.reset();
+      ui.reset();
+    )
+
+    DEBUG(
+      // TODO grab data from the code region rather than on-disk data
+      size_t count = 0;
+      byte *start = (byte *)binary.getData(func->addr),
+           *end = start + func->code_size;
+      instr_t instr;
+      instr_init(GLOBAL_DCONTEXT, &instr);
+      do {
+        instr_reset(GLOBAL_DCONTEXT, &instr);
+        start = decode(GLOBAL_DCONTEXT, start, &instr);
+        DEBUGMSG(""); instr_disassemble(GLOBAL_DCONTEXT, &instr, 1);
+        DEBUGMSG_RAW(std::endl);
+        count++;
+      } while(start < end);
+      instr_free(GLOBAL_DCONTEXT, &instr);
+    )
   }
 
   return ret_t::Success;

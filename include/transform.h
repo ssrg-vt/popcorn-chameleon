@@ -12,7 +12,10 @@
 #define _TRANSFORM_H
 
 #include <pthread.h>
-#include <capstone/capstone.h>
+
+#define LINUX
+#define X86_64
+#include <dr_api.h>
 
 #include "binary.h"
 #include "memoryview.h"
@@ -87,9 +90,6 @@ private:
 
   /* An abstract view of the code segment, used to randomize code */
   MemoryWindow codeWindow;
-
-  /* Handle for the disassembly framework */
-  csh disasm;
 
   /* Thread responsible for reading & responding to page faults */
   pthread_t faultHandler;

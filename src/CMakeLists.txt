@@ -17,23 +17,22 @@ if (NOT ELF)
   message(FATAL_ERROR "libelf not found - please install libelf")
 endif ()
 
-# Find Capstone installation
-if (NOT CAPSTONE_INSTALL_DIR)
-  set(CAPSTONE_INSTALL_DIR "/usr/lib")
+# Find DynamoRIO installation
+if (NOT DYNAMORIO_INSTALL_DIR)
+  set(DYNAMORIO_INSTALL_DIR "/usr/lib")
 endif ()
-find_path(CAPSTONE_INCLUDE_DIR
-  NAMES capstone/capstone.h
-  PATHS ${CAPSTONE_INSTALL_DIR}/include
+find_path(DYNAMORIO_INCLUDE_DIR
+  NAMES dr_api.h
+  PATHS ${DYNAMORIO_INSTALL_DIR}/include
 )
-find_path(CAPSTONE_LIB_DIR
-  NAMES libcapstone.a
-  PATHS ${CAPSTONE_INSTALL_DIR}/lib
+find_path(DYNAMORIO_LIB_DIR
+  NAMES libdrdecode.a
+  PATHS ${DYNAMORIO_INSTALL_DIR}/lib
 )
-if (${CAPSTONE_INCLUDE_DIR} STREQUAL "CAPSTONE_INCLUDE_DIR-NOTFOUND" OR
-    ${CAPSTONE_LIB_DIR} STREQUAL "CAPSTONE_LIB_DIR-NOTFOUND")
-  message(FATAL_ERROR "Capstone installation not found - please install and "
-                      "set CAPSTONE_INSTALL_DIR (see "
-                      "http://www.capstone-engine.org/)")
+if (${DYNAMORIO_INCLUDE_DIR} STREQUAL "DYNAMORIO_INCLUDE_DIR-NOTFOUND" OR
+    ${DYNAMORIO_LIB_DIR} STREQUAL "DYNAMORIO_LIB_DIR-NOTFOUND")
+  message(FATAL_ERROR "DynamoRIO installation not found - please install and "
+                      "set DYNAMORIO_INSTALL_DIR (see http://dynamorio.org/)")
 endif ()
 
 # Find Secure Popcorn installation
@@ -51,7 +50,7 @@ endif ()
 
 target_include_directories (chameleon PRIVATE
   "${PROJECT_SOURCE_DIR}/include"
-  "${CAPSTONE_INCLUDE_DIR}"
+  "${DYNAMORIO_INCLUDE_DIR}"
   "${POPCORN_INCLUDE_DIR}"
 )
 target_compile_options (chameleon PRIVATE "-std=c++11" "-pthread")
@@ -59,7 +58,8 @@ target_link_libraries (chameleon
   ${ELF}
   ${ZLIB_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
-  ${CAPSTONE_LIB_DIR}/libcapstone.a
+  ${DYNAMORIO_LIB_DIR}/libdrdecode.a
+  ${DYNAMORIO_LIB_DIR}/libdrhelper.a
   -static
 )
 

@@ -158,24 +158,32 @@ public:
   };
 
   /**
-   * Helper class to iterate over functions in a region.
+   * Helper class to iterate over records from a section.
    */
-  class FunctionIterator {
+  template<typename T>
+  class iterator {
   public:
-    FunctionIterator(const function_record *funcs, size_t len)
-      : cur(0), len(len), funcs(funcs) {}
+    iterator(const T *records, size_t len)
+      : cur(0), len(len), records(records) {}
 
+    size_t getLength() const { return len; }
     bool end() const { return cur >= len; }
+
+    void reset() { cur = 0; }
     void operator++() { if(cur < len) cur++; }
 
-    const function_record *operator*() const {
-      if(cur < len) return &this->funcs[cur];
+    const T *operator*() const {
+      if(cur < len) return &this->records[cur];
       else return nullptr;
     }
   private:
     size_t cur, len;
-    const function_record *funcs;
+    const T *records;
   };
+
+  typedef iterator<function_record> func_iterator;
+  typedef iterator<stack_slot> slot_iterator;
+  typedef iterator<unwind_loc> unwind_iterator;
 
   /**
    * Construct a binary object.  Does not initialize the object for reading,
@@ -279,11 +287,29 @@ public:
   { return symtab.getSymbolAddress(sym); }
 
   /**
-   * Return a function iteration which can be used to iterate over all
+   * Return a function iterator which can be used to iterate over all
    * functions within the specified range.
+   * @param start start of range
+   * @param end end of range
+   * @return an iterator for all function records contained in the region
    */
-  FunctionIterator getFunctions(uintptr_t start, uintptr_t end) const;
+  func_iterator getFunctions(uintptr_t start, uintptr_t end) const;
 
+  /**
+   * Return a stack slot iterator which can be used to iterate over all stack
+   * slots records for the function.
+   * @param func a function record
+   * @return a iterator for the function's stack slots
+   */
+  slot_iterator getStackSlots(const function_record *func) const;
+
+  /**
+   * Return an unwind location iterator which can be used to iterate over all
+   * unwind location records for the function.
+   * @param func a function record
+   * @return a iterator for the function's unwind locations
+   */
+  unwind_iterator getUnwindLocations(const function_record *func) const;
 private:
   /* Raw file access */
   const char *filename;

@@ -1,3 +1,7 @@
+#define LINUX
+#define X86_64
+#include <dr_api.h>
+
 #include "arch.h"
 #include "log.h"
 #include "types.h"
@@ -6,11 +10,11 @@ using namespace chameleon;
 
 #if defined __x86_64__
 
-ret_t arch::initDisassembler(csh *handle) {
-  DEBUGMSG("initializing disassembler for x86-64" << std::endl);
-  if(cs_open(CS_ARCH_X86, CS_MODE_64, handle) != CS_ERR_OK)
-    return ret_t::DisasmSetupFailed;
-  return ret_t::Success;
+ret_t arch::initDisassembler() {
+  bool ret = dr_set_isa_mode(GLOBAL_DCONTEXT, DR_ISA_AMD64, nullptr);
+  DEBUG(disassemble_set_syntax(DR_DISASM_ATT));
+  if(!ret) return ret_t::DisasmSetupFailed;
+  else return ret_t::Success;
 }
 
 uint64_t arch::syscall(size_t &size) {

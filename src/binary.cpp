@@ -251,23 +251,48 @@ size_t Binary::getRemainingFileSize(uintptr_t addr) const {
   else return getRemainingFileSize(addr, tmp);
 }
 
-Binary::FunctionIterator
+Binary::func_iterator
 Binary::getFunctions(uintptr_t start, uintptr_t end) const {
   ssize_t idx, count = 0;
   const function_record *record;
 
-  if(end <= start) return FunctionIterator(nullptr, 0);
+  if(end <= start) return func_iterator(nullptr, 0);
 
   // Find the first function containing start or starting directly after it
   idx = findFunctionRight(start);
-  if(idx < 0) return FunctionIterator(nullptr, 0);
+  if(idx < 0) return func_iterator(nullptr, 0);
   record = functions.getEntries();
 
   // Find all remaining functions in the range
   for(count = idx; count < functions.getNumEntries(); count++)
     if(record[count].addr >= end) break;
 
-  return FunctionIterator(&record[idx], count - idx);
+  return func_iterator(&record[idx], count - idx);
+}
+
+template<typename T, typename it>
+static inline it getIterator(const Binary::EntrySection<T> &section,
+                             size_t offset, size_t num) {
+  ssize_t entries = section.getNumEntries(), remaining = entries - offset;
+  if(remaining <= 0) return it(nullptr, 0);
+  if(remaining < num)
+    WARN("function record indicated more entries than available" << std::endl);
+  entries = std::min<ssize_t>(remaining, num);
+  return it(&section.getEntries()[offset], entries);
+}
+
+Binary::slot_iterator
+Binary::getStackSlots(const function_record *func) const {
+  return getIterator<stack_slot, slot_iterator>(stackSlots,
+                                                func->stack_slot.offset,
+                                                func->stack_slot.num);
+}
+
+Binary::unwind_iterator
+Binary::getUnwindLocations(const function_record *func) const {
+  return getIterator<unwind_loc, unwind_iterator>(unwind,
+                                                  func->unwind.offset,
+                                                  func->unwind.num);
 }
 
 ret_t Binary::getSectionByName(const char *name, Section &section) {
