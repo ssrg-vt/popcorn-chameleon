@@ -8,6 +8,8 @@
 #ifndef _TYPES_H
 #define _TYPES_H
 
+#include <cstddef>
+
 namespace chameleon {
 
 /* Binary file access error codes */
@@ -16,7 +18,8 @@ namespace chameleon {
   X(OpenFailed, "could not open binary") \
   X(ElfReadError, "could not read ELF metadata") \
   X(InvalidElf, "invalid ELF file/format") \
-  X(NoSuchSection, "could not find ELF section/segment")
+  X(NoSuchSection, "could not find ELF section/segment") \
+  X(BadMetadata, "invalid metadata encoded in binary")
 
 /* Process control error codes */
 #define PROCESS_RETCODES \
@@ -34,6 +37,7 @@ namespace chameleon {
   X(InvalidTransformConfig, "invalid transformation configuration") \
   X(DisasmSetupFailed, "setting up disassembler failed") \
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
+  X(RandomizeFailed, "could not randomize code section") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
@@ -52,6 +56,37 @@ enum ret_t {
 };
 
 const char *retText(ret_t retcode);
+
+/**
+ * Iterate over contiguous entries of a given type.  Useful for providing a
+ * sliced view of an array with bounds checking.
+ */
+template<typename T>
+class iterator {
+public:
+  iterator(T *entries, size_t len) : cur(0), len(len), entries(entries) {}
+
+  size_t getLength() const { return len; }
+  bool end() const { return cur >= len; }
+
+  void reset() { cur = 0; }
+  void operator++() { cur++; }
+
+  T *operator[](size_t idx) const {
+    if(idx < len) return &entries[idx];
+    else return nullptr;
+  }
+
+  const T *operator*() const {
+    if(cur < len) return &this->entries[cur];
+    else return nullptr;
+  }
+private:
+  size_t cur, len;
+  T *entries;
+};
+
+typedef iterator<unsigned char> byte_iterator;
 
 }
 

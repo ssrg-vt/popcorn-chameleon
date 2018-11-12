@@ -85,8 +85,8 @@ int main(int argc, char **argv) {
 
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
-  DEBUG(printChameleonInfo())
   parseArgs(argc, argv);
+  DEBUG(printChameleonInfo())
 
   // Initialize the child process
   Process child(childArgc, childArgv);
@@ -112,7 +112,9 @@ int main(int argc, char **argv) {
     switch(child.getStatus()) {
     default: INFO("unknown child status"); break;
     case Process::Stopped:
-      INFO("child stopped with signal " << child.getSignal() << endl);
+      INFO("child stopped with signal " << child.getSignal() << " @ 0x" << hex
+           << child.getPC() << endl);
+      DEBUG(child.dumpRegs());
       break;
     case Process::Exited:
       INFO("child exited with code " << child.getExitCode() << endl);

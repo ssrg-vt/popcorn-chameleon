@@ -11,11 +11,10 @@
 #ifndef _TRANSFORM_H
 #define _TRANSFORM_H
 
+#include <random>
+#include <utility>
+#include <unordered_map>
 #include <pthread.h>
-
-#define LINUX
-#define X86_64
-#include <dr_api.h>
 
 #include "binary.h"
 #include "memoryview.h"
@@ -33,9 +32,11 @@ public:
    * @param proc a process
    * @param batchedFaults maximum number of faults handled at once
    */
-  CodeTransformer(Process &proc, size_t batchedFaults = 1)
+  CodeTransformer(Process &proc,
+                  size_t batchedFaults = 1,
+                  size_t slotPadding = 128)
     : proc(proc), binary(proc.getArgv()[0]), faultHandlerPid(-1),
-      batchedFaults(batchedFaults) {}
+      batchedFaults(batchedFaults), slotPadding(slotPadding) {}
   CodeTransformer() = delete;
   ~CodeTransformer();
 
@@ -82,6 +83,75 @@ public:
   void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
 
 private:
+  /**
+   * Metadata describing where function activation information (i.e., on the
+   * stack and in registers) is placed in a randomized version of the function.
+   */
+  class RandomizedFunction {
+  public:
+    RandomizedFunction() : frameSize(UINT32_MAX) {}
+
+    /**
+     * Randomize a function.  If it was previously randomized, drop all
+     * previous information.
+     *
+     * @param binary a Binary object for reading function metadata
+     * @param func a function record
+     * @param seed random number generator seed
+     * @param maxPadding maximum randomized padding added between stack slots
+     * @return a return code describing the outcome
+     */
+    ret_t randomize(const Binary &binary,
+                    const function_record *func,
+                    int seed,
+                    size_t maxPadding);
+  private:
+    /*
+     * Random number generator.  Because we may generate a large number of
+     * random numbers and have limited entropy, use a pseudo-RNG seeded with a
+     * true random number passed to randomize().
+     */
+    std::default_random_engine gen;
+
+    /* Stack slot padding */
+    typedef std::uniform_int_distribution<int>::param_type slotBounds;
+    std::uniform_int_distribution<int> slotDist;
+
+    /* Mapping types */
+    typedef std::pair<int, int> SlotMap;
+
+    /* Frame size after randomization */
+    uint32_t frameSize;
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Note: maintain information as vectors because we interface with C and //
+    // thus need to pass raw arrays.                                         //
+    ///////////////////////////////////////////////////////////////////////////
+
+    /*
+     * Remapping of slots, indexed by their offset from the canonical frame
+     * address (CFA).
+     */
+    std::vector<SlotMap> slots;
+
+    /**
+     * Generate a randomized stack slot padding value.
+     * @return a random number to be used to pad between stack slots
+     */
+    int slotPadding() { return slotDist(gen); }
+
+    /**
+     * Randomize the stack slot offsets for a given function.
+     * @param si stack slot iterator for function
+     * @param func a function record
+     * @return a return code describing the outcome
+     */
+    ret_t randomizeSlots(Binary::slot_iterator &si,
+                         const function_record *func);
+  };
+  typedef std::unordered_map<uintptr_t, RandomizedFunction>
+    RandomizedFunctionMap;
+
   /* A previously instantiated process */
   Process &proc;
 
@@ -90,6 +160,14 @@ private:
 
   /* An abstract view of the code segment, used to randomize code */
   MemoryWindow codeWindow;
+
+  /* Randomization machinery */
+  RandomizedFunctionMap funcMaps; /* Per-function randomization information */
+  size_t slotPadding; /* Maximum padding between subsequent stack slots */
+  // Note: from http://www.pcg-random.org/posts/cpps-random_device.html:
+  //   "std::random_device provides an entropy member function...But popular
+  //    libraries (both GCC's libstdc++ and LLVM's libc++) always return zero"
+  std::random_device rng;
 
   /* Thread responsible for reading & responding to page faults */
   pthread_t faultHandler;
@@ -108,6 +186,14 @@ private:
    * @return a return code describing the outcome
    */
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
+
+  /**
+   * Decode, randomize and re-encode a function.
+   * @param func a function record
+   * @return a return code describing the outcome
+   */
+  ret_t rewriteFunction(const function_record *func,
+                        const RandomizedFunction &info);
 
   /**
    * Load the code segment from disk into the memory window and randomize

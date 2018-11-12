@@ -113,6 +113,100 @@ static void *handleFaultsAsync(void *arg) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// RandomizedFunction implementation
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Convert a stack slot (base register + offset) to an offset from the
+ * canonical frame address (CFA), defined as the highest stack address of a
+ * function activation for stacks that grow down.
+ *
+ * @param frameSize size of the frame in bytes
+ * @param slot stack slot record
+ * @return offset from the CFA, or INT32_MAX if not a valid stack reference
+ */
+static inline int32_t
+canonicalizeSlotOffset(uint32_t frameSize, uint16_t reg, int16_t offset) {
+  switch(arch::getRegType(reg)) {
+  case arch::RegType::FramePointer: return offset + arch::framePointerOffset();
+  case arch::RegType::StackPointer: return -(frameSize - offset);
+  default: return INT32_MAX;
+  }
+}
+
+ret_t
+CodeTransformer::RandomizedFunction::randomizeSlots(Binary::slot_iterator &si,
+                                                 const function_record *func) {
+  size_t nslots = si.getLength(), slotIdx;
+  int curOffset = 0;
+  std::vector<int> workspace;
+  auto slotSort = [](const RandomizedFunction::SlotMap &a,
+                     const RandomizedFunction::SlotMap &b)
+  { return std::get<0>(a) < std::get<0>(b); };
+
+  slots.reserve(nslots);
+  workspace.reserve(nslots);
+
+  // Add the stack slots into the workspace & permute
+  for(slotIdx = 0; !si.end(); ++si, slotIdx++) workspace.emplace_back(slotIdx);
+  std::shuffle(workspace.begin(), workspace.end(), gen);
+
+  DEBUG(if(si.getLength()) DEBUGMSG("Remapping stack slots:" << std::endl););
+
+  // Add mappings for the permuted slots
+  for(slotIdx = 0; slotIdx < si.getLength(); slotIdx++) {
+    const stack_slot *slot = si[workspace[slotIdx]];
+    int origOffset = canonicalizeSlotOffset(func->frame_size,
+                                            slot->base_reg,
+                                            slot->offset);
+    curOffset = ROUND_UP(curOffset + slot->size + slotPadding(),
+                         slot->alignment);
+    slots.emplace_back(origOffset, -curOffset);
+
+    DEBUGMSG("  " << origOffset << " -> " << -curOffset << std::endl);
+  }
+  frameSize = curOffset;
+
+  std::sort(slots.begin(), slots.end(), slotSort);
+  return ret_t::Success;
+}
+
+ret_t
+CodeTransformer::RandomizedFunction::randomize(const Binary &binary,
+                                               const function_record *func,
+                                               int seed,
+                                               size_t maxPadding) {
+  ret_t retcode;
+  Binary::slot_iterator si = binary.getStackSlots(func);
+  Binary::unwind_iterator ui = binary.getUnwindLocations(func);
+  gen.seed(seed);
+  slotDist.param(slotBounds(0, maxPadding));
+
+  DEBUG(
+    DEBUGMSG("frame size = " << func->frame_size << " bytes, "
+             << si.getLength() << " stack slot(s), " << ui.getLength()
+             << " unwind location(s)" << std::endl);
+    for(; !si.end(); ++si) {
+      const stack_slot *slot = *si;
+      DEBUGMSG("  slot @ " << slot->base_reg << " + " << slot->offset
+               << ", size = " << slot->size
+               << ", alignment = " << slot->alignment << std::endl);
+    }
+    for(; !ui.end(); ++ui) {
+      const unwind_loc *unwind = *ui;
+      DEBUGMSG("  Register " << unwind->reg << " at FBP + " << unwind->offset
+               << std::endl);
+    }
+    si.reset();
+    ui.reset();
+  )
+
+  if((retcode = randomizeSlots(si, func)) != ret_t::Success) return retcode;
+
+  return ret_t::Success;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -134,6 +228,10 @@ ret_t CodeTransformer::initialize() {
     DEBUGMSG("Currently can only handle 1 fault at a time" << std::endl);
     return ret_t::InvalidTransformConfig;
   }
+
+  // Try to give the user some warning for excessive stack padding
+  if(slotPadding >= PAGESZ)
+    WARN("Large padding added between slots: " << slotPadding << std::endl);
 
   if((retcode = binary.initialize()) != ret_t::Success) return retcode;
   if((retcode = arch::initDisassembler()) != ret_t::Success)
@@ -237,11 +335,46 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   return ret_t::Success;
 }
 
+ret_t CodeTransformer::rewriteFunction(const function_record *func,
+                                       const RandomizedFunction &info) {
+  size_t count = 0;
+  byte_iterator funcData = codeWindow.getData(func->addr);
+  byte *start = funcData[0], *end = start + func->code_size;
+  instr_t instr;
+
+  if(funcData.getLength() < func->code_size) {
+    DEBUGMSG("Code length encoded in metadata larger than available size: "
+             << funcData.getLength() << " vs. " << func->code_size
+             << std::endl);
+    return ret_t::BadMetadata;
+  }
+
+  if(!start) {
+    DEBUGMSG("Invalid code iterator" << std::endl);
+    return ret_t::RandomizeFailed;
+  }
+
+  instr_init(GLOBAL_DCONTEXT, &instr);
+  do {
+    instr_reset(GLOBAL_DCONTEXT, &instr);
+    start = decode(GLOBAL_DCONTEXT, start, &instr);
+    DEBUGMSG(""); instr_disassemble(GLOBAL_DCONTEXT, &instr, 1);
+    DEBUGMSG_RAW(std::endl);
+    count++;
+  } while(start < end);
+  instr_free(GLOBAL_DCONTEXT, &instr);
+
+  DEBUGMSG("Rewrote " << count << " instructions" << std::endl);
+
+  return ret_t::Success;
+}
+
 ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
                                           const Binary::Segment &codeSegment) {
   uintptr_t segStart, segEnd, secStart, secEnd, curAddr;
   ssize_t len, filelen;
   const void *data;
+  ret_t code;
   MemoryRegionPtr r;
 
   // Note that by construction of how we're adding regions we don't need to
@@ -287,14 +420,12 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   r.reset(new BufferedRegion(secStart, len, filelen, data));
   codeWindow.insert(r);
 
-  // Finally, add any segment data after the code section
+  // Finally, add any segment data/zeroed memory after the code section
   secEnd = secStart + len;
-  segEnd = segStart + codeSegment.memorySize();
-  curAddr = std::min<uintptr_t>(PAGE_UP(secEnd), segEnd);
+  curAddr = PAGE_UP(secEnd);
   len = curAddr - secEnd;
   filelen = binary.getRemainingFileSize(secEnd, codeSegment);
   data = binary.getData(secEnd, codeSegment);
-  if(!data) return ret_t::MarshalDataFailed;
   r.reset(new FileRegion(secEnd, len, filelen, data));
   codeWindow.insert(r);
 
@@ -302,44 +433,16 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   Binary::func_iterator it = binary.getFunctions(secStart, secEnd);
   for(; !it.end(); ++it) {
     const function_record *func = *it;
-    Binary::slot_iterator si = binary.getStackSlots(func);
-    Binary::unwind_iterator ui = binary.getUnwindLocations(func);
-    DEBUG(
-      DEBUGMSG("function @ " << std::hex << func->addr << ", size = "
-               << std::dec << func->code_size << ", " << si.getLength()
-               << " stack slot(s), " << ui.getLength()
-               << " callee-saved register(s)" << std::endl);
-      for(; !si.end(); ++si) {
-        const stack_slot *slot = *si;
-        DEBUGMSG("  slot @ " << slot->base_reg << " + " << slot->offset
-                 << ", size = " << slot->size
-                 << ", alignment = " << slot->alignment << std::endl);
-      }
-      for(; !ui.end(); ++ui) {
-        const unwind_loc *unwind = *ui;
-        DEBUGMSG("  CSR " << unwind->reg << " at FBP + " << unwind->offset
-                 << std::endl);
-      }
-      si.reset();
-      ui.reset();
-    )
 
-    DEBUG(
-      // TODO grab data from the code region rather than on-disk data
-      size_t count = 0;
-      byte *start = (byte *)binary.getData(func->addr),
-           *end = start + func->code_size;
-      instr_t instr;
-      instr_init(GLOBAL_DCONTEXT, &instr);
-      do {
-        instr_reset(GLOBAL_DCONTEXT, &instr);
-        start = decode(GLOBAL_DCONTEXT, start, &instr);
-        DEBUGMSG(""); instr_disassemble(GLOBAL_DCONTEXT, &instr, 1);
-        DEBUGMSG_RAW(std::endl);
-        count++;
-      } while(start < end);
-      instr_free(GLOBAL_DCONTEXT, &instr);
-    )
+    DEBUGMSG("function @ " << std::hex << func->addr << ", size = "
+             << std::dec << func->code_size << std::endl);
+
+    RandomizedFunctionMap::iterator it =
+      funcMaps.emplace(func->addr, RandomizedFunction()).first;
+    code = it->second.randomize(binary, func, rng(), slotPadding);
+    if(code != ret_t::Success) return code;
+    code = rewriteFunction(func, it->second);
+    if(code != ret_t::Success) return code;
   }
 
   return ret_t::Success;

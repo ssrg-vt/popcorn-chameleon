@@ -48,6 +48,14 @@ public:
                           std::vector<char> &buffer,
                           size_t offset) const = 0;
 
+  /**
+   * Get an iterator to the underlying data store at a given address.
+   * @param addr a program virtual address
+   * @return an iterator for accessing the underlying data
+   */
+  virtual byte_iterator getData(uintptr_t address)
+  { return byte_iterator(nullptr, 0); }
+
   /* Comparison types & functions for sorting */
   static bool compare(const std::unique_ptr<MemoryRegion> &lhs,
                       const std::unique_ptr<MemoryRegion> &rhs)
@@ -148,8 +156,15 @@ public:
   virtual size_t populate(uintptr_t address,
                           std::vector<char> &buffer,
                           size_t offset) const override;
+
+  /**
+   * Get an iterator to the underlying data store at a given address.
+   * @param addr a program virtual address
+   * @return an iterator for accessing the underlying data
+   */
+  virtual byte_iterator getData(uintptr_t address) override;
 private:
-  std::unique_ptr<char[]> data;
+  std::unique_ptr<unsigned char[]> data;
 };
 
 /**
@@ -199,10 +214,21 @@ public:
   ret_t project(uintptr_t address, std::vector<char> &buffer) const;
 
   /**
+   * Get an iterator pointing to the data stored at a given address.  Used to
+   * read and modify the virtual address space.  Note that non-trivial
+   * iterators are only returned if the underlying data store is modifiable,
+   * e.g., a BufferedRegion.
+   *
+   * @param address a program virtual address
+   * @return an iterator for accessing the underlying data
+   */
+  byte_iterator getData(uintptr_t address);
+
+  /**
    * Return the number of regions in the window.
    * @return the number of regions in the window
    */
-  size_t size() const { return regions.size(); }
+  size_t numRegions() const { return regions.size(); }
 private:
   std::vector<MemoryRegionPtr> regions;
 

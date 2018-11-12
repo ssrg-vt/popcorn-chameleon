@@ -299,3 +299,8 @@ ret_t Process::write(uintptr_t addr, uint64_t data) const {
   return ret_t::Success;
 }
 
+void Process::dumpRegs() const {
+  struct user_regs_struct regs;
+  if(trace::getRegs(pid, regs)) arch::dumpRegs(regs);
+}
+

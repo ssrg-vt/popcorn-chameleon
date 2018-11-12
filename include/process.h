@@ -205,6 +205,11 @@ public:
    */
   ret_t write(uintptr_t addr, uint64_t data) const;
 
+  /**
+   * Dump register contents to an output stream.
+   */
+  void dumpRegs() const;
+
 private:
   /* Arguments */
   int argc;

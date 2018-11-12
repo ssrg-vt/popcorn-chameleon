@@ -48,10 +48,23 @@ if (${POPCORN_INCLUDE_DIR} STREQUAL "POPCORN_INCLUDE_DIR-NOTFOUND")
                       "please install and set POPCORN_INSTALL_DIR")
 endif ()
 
+# Pull in the target's register descriptions
+EXECUTE_PROCESS(COMMAND uname -m COMMAND tr -d '\n' OUTPUT_VARIABLE ARCH)
+find_path(POPCORN_REGDESC_DIR
+  NAMES regs.h
+  PATHS ${POPCORN_INSTALL_DIR}/${ARCH}/include/arch/${ARCH}
+)
+if (${POPCORN_REGDESC_DIR} STREQUAL "POPCORN_REGDESC_DIR-NOTFOUND")
+  message(FATAL_ERROR "Could not find ISA-specific register descriptions for "
+                      "${ARCH} - please make sure the Popcorn compiler was "
+                      "installed correctly at ${POPCORN_INSTALL_DIR}")
+endif ()
+
 target_include_directories (chameleon PRIVATE
   "${PROJECT_SOURCE_DIR}/include"
   "${DYNAMORIO_INCLUDE_DIR}"
   "${POPCORN_INCLUDE_DIR}"
+  "${POPCORN_REGDESC_DIR}"
 )
 target_compile_options (chameleon PRIVATE "-std=c++11" "-pthread")
 target_link_libraries (chameleon

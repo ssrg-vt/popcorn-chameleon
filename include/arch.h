@@ -18,11 +18,34 @@ namespace chameleon {
 namespace arch {
 
 /**
+ * Architecture-agnostic register classification.
+ */
+enum RegType {
+  FramePointer,
+  StackPointer,
+  None
+};
+
+/**
  * Initialize architecture-specific information for the
  * decoder/encoder/disassembler library.
  * @return a return code describing the outcome
  */
 ret_t initDisassembler();
+
+/**
+ * Classify an architecture-specific register as an architecture-agnostic type.
+ * @param reg register encoded in the ISA's DWARF debugging register format
+ * @return the register type
+ */
+enum RegType getRegType(uint16_t reg);
+
+/**
+ * Return the architecture-specific frame pointer offset from the frame's
+ * canonical frame address (CFA).
+ * @return frame pointer's offset from the CFA
+ */
+int32_t framePointerOffset();
 
 /**
  * Return the system call instruction bytes and write the size of the
@@ -70,6 +93,12 @@ void marshalSyscall(struct user_regs_struct &regs, long syscall,
  * @return system call return value
  */
 int syscallRetval(struct user_regs_struct &regs);
+
+/**
+ * Dump register contents to a stream.
+ * @param regs a pre-populated register set
+ */
+void dumpRegs(struct user_regs_struct &regs);
 
 }
 }

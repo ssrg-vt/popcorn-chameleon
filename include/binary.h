@@ -157,33 +157,10 @@ public:
     GElf_Phdr header;
   };
 
-  /**
-   * Helper class to iterate over records from a section.
-   */
-  template<typename T>
-  class iterator {
-  public:
-    iterator(const T *records, size_t len)
-      : cur(0), len(len), records(records) {}
-
-    size_t getLength() const { return len; }
-    bool end() const { return cur >= len; }
-
-    void reset() { cur = 0; }
-    void operator++() { if(cur < len) cur++; }
-
-    const T *operator*() const {
-      if(cur < len) return &this->records[cur];
-      else return nullptr;
-    }
-  private:
-    size_t cur, len;
-    const T *records;
-  };
-
-  typedef iterator<function_record> func_iterator;
-  typedef iterator<stack_slot> slot_iterator;
-  typedef iterator<unwind_loc> unwind_iterator;
+  /* Metadata iterators */
+  typedef iterator<const function_record> func_iterator;
+  typedef iterator<const stack_slot> slot_iterator;
+  typedef iterator<const unwind_loc> unwind_iterator;
 
   /**
    * Construct a binary object.  Does not initialize the object for reading,

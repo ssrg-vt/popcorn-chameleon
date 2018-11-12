@@ -36,7 +36,7 @@ BufferedRegion::BufferedRegion(uintptr_t start,
                                const void *data)
     : MemoryRegion(start, len) {
   fileLen = std::min<size_t>(len, fileLen);
-  this->data.reset(new char[len]);
+  this->data.reset(new unsigned char[len]);
   memcpy(this->data.get(), data, fileLen);
   memset(&this->data[fileLen], 0, len - fileLen);
 }
@@ -47,8 +47,14 @@ size_t BufferedRegion::populate(uintptr_t address,
   ssize_t regOffset = address - start;
   ssize_t copyLen = std::min<ssize_t>(buffer.size() - offset, len - regOffset);
   assert(copyLen >= 0 && "Invalid offset or address not contained in region");
-  memcpy(&buffer[offset], this->data.get(), copyLen);
+  memcpy(&buffer[offset], &(this->data.get()[regOffset]), copyLen);
   return copyLen;
+}
+
+byte_iterator BufferedRegion::getData(uintptr_t address) {
+  ssize_t regOffset = address - start;
+  if(regOffset >= 0) return byte_iterator(&data[regOffset], len - regOffset);
+  else return byte_iterator(nullptr, 0);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -59,15 +65,15 @@ ret_t
 MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
   ssize_t regNum = findRegionRight(address), offset = 0,
           bufSize = buffer.size(), len;
-  std::vector<MemoryRegionPtr>::const_iterator r;
+  std::vector<MemoryRegionPtr>::const_iterator start, r;
 
   if(regNum < 0) {
     memset(&buffer[0], 0, buffer.size());
     return ret_t::Success;
   }
-  r = regions.begin() + regNum;
 
-  for(; r != regions.end() && offset < bufSize; r++) {
+  start = regions.begin() + regNum;
+  for(r = start; r != regions.end() && offset < bufSize; r++) {
     // Copy any bytes before the region into the buffer
     len = (*r)->getStart() - address;
     if(len > 0) {
@@ -75,7 +81,7 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
       offset += len;
       address += len;
     }
-    else if(len < 0) {
+    else if(len < 0 && r != start) {
       WARN("overlapping memory regions in window" << std::endl);
       return ret_t::BadMarshal;
     }
@@ -90,6 +96,13 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
   if(offset < bufSize) memset(&buffer[offset], 0, offset - bufSize);
 
   return ret_t::Success;
+}
+
+byte_iterator MemoryWindow::getData(uintptr_t address) {
+  ssize_t regNum = findRegionRight(address);
+  if(regNum < 0 || !regions[regNum]->contains(address))
+    return byte_iterator(nullptr, 0);
+  else return regions[regNum]->getData(address);
 }
 
 ssize_t MemoryWindow::findRegionRight(uintptr_t address) const {
