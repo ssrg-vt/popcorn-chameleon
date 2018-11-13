@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <pthread.h>
 
+/* Note: arch.h includes DynamoRIO APIs */
+#include "arch.h"
 #include "binary.h"
 #include "memoryview.h"
 #include "process.h"
@@ -89,7 +91,7 @@ private:
    */
   class RandomizedFunction {
   public:
-    RandomizedFunction() : frameSize(UINT32_MAX) {}
+    RandomizedFunction() : calleeSaveSize(0), frameSize(UINT32_MAX) {}
 
     /**
      * Randomize a function.  If it was previously randomized, drop all
@@ -105,6 +107,40 @@ private:
                     const function_record *func,
                     int seed,
                     size_t maxPadding);
+
+    /**
+     * Function information - return what you ask for.
+     */
+    uint32_t getCalleeSaveSize() const { return calleeSaveSize; }
+    uint32_t getFrameSize() const { return frameSize; }
+
+    /**
+     * Get frame space for non-callee-saved frame space.
+     * @return frame space not devoted to callee-saved registers
+     */
+    uint32_t getNonCalleeSaveSize() const
+    { return frameSize - calleeSaveSize; }
+
+    /**
+     * Return whether an offset is contained in the function's callee-saved
+     * area.
+     * @param offset a canonicalized offset
+     * @return true if contained in the callee-saved area, false otherwise
+     */
+    bool inCalleeSaved(int offset) const
+    { return (-offset) <= calleeSaveSize; }
+
+    /**
+     * Get the randomized offset for a stack slot
+     *
+     * Note: the original stack slot offset must be canonicalized (i.e.,
+     * converted to offset from CFA) before passing to the function
+     *
+     * @param orig the original stack slot offset (canonicalized)
+     * @return the canonicalized randomized offset, or INT32_MAX if orig
+     *         doesn't correspond to any stack slot
+     */
+    int getRandomizedOffset(int orig) const;
   private:
     /*
      * Random number generator.  Because we may generate a large number of
@@ -121,6 +157,7 @@ private:
     typedef std::pair<int, int> SlotMap;
 
     /* Frame size after randomization */
+    uint32_t calleeSaveSize;
     uint32_t frameSize;
 
     ///////////////////////////////////////////////////////////////////////////
@@ -133,6 +170,22 @@ private:
      * address (CFA).
      */
     std::vector<SlotMap> slots;
+
+    /**
+     * Comparison function for sorting & searching.
+     * @param a first slot mapping
+     * @param a second slot mapping
+     * @return true if a's first element is less than b's first element
+     */
+    static bool slotCmp(const SlotMap &a, const SlotMap &b)
+    { return a.first < b.first; }
+
+    /**
+     * Get the size, in bytes, of the callee-saved register area.
+     * @param ui an iterator over the unwinding records
+     * @return size in bytes of callee-saved register area
+     */
+    static uint32_t getCalleeSaveSize(Binary::unwind_iterator &ui);
 
     /**
      * Generate a randomized stack slot padding value.
@@ -165,8 +218,11 @@ private:
   RandomizedFunctionMap funcMaps; /* Per-function randomization information */
   size_t slotPadding; /* Maximum padding between subsequent stack slots */
   // Note: from http://www.pcg-random.org/posts/cpps-random_device.html:
+  //
   //   "std::random_device provides an entropy member function...But popular
   //    libraries (both GCC's libstdc++ and LLVM's libc++) always return zero"
+  //
+  // Hence we can't check if it's a true RNG from the entropy() function.
   std::random_device rng;
 
   /* Thread responsible for reading & responding to page faults */
@@ -188,8 +244,32 @@ private:
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
 
   /**
+   * Rewrite stack slot reference operands to refer to the randomized location.
+   * Templated because DynamoRIO differentiates between source & destination
+   * operands, but we do the same operations regardless.
+   *
+   * @template NumOp function to get the number of operands
+   * @template GetOp function to get an operand
+   * @template SetOp function to set an operand
+   * @param info randomization information for a function
+   * @param frameSize currently calculated frame size
+   * @param instr an instruction
+   * @param doEncode output argument set to true if instruction needs to be
+   *                 re-encoded (i.e., we rewrote an operand)
+   * @return a return code describing the outcome
+   */
+  template<int (*NumOp)(instr_t *),
+           opnd_t (*GetOp)(instr_t *, unsigned),
+           void (*SetOp)(instr_t *, unsigned, opnd_t)>
+  ret_t rewriteOperands(const RandomizedFunction &info,
+                        uint32_t frameSize,
+                        instr_t &instr,
+                        bool &doEncode);
+
+  /**
    * Decode, randomize and re-encode a function.
    * @param func a function record
+   * @param info randomization information for a function
    * @return a return code describing the outcome
    */
   ret_t rewriteFunction(const function_record *func,

@@ -42,6 +42,7 @@ namespace chameleon {
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
   X(UffdCopyFailed, "userfaultfd copy failed") \
+  X(EncodeFailed, "re-encoding transformed instruction failed") \
   X(BadFault, "kernel delivered unexpected or unhandled fault") \
   X(MarshalDataFailed, "failed to marshal data to handle fault") \
   X(BadMarshal, "invalid view of memory, found overlapping regions")

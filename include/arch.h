@@ -8,6 +8,11 @@
 #ifndef _ARCH_H
 #define _ARCH_H
 
+#define LINUX
+#define X86_64
+#include <dr_api.h>
+#include <dr_ir_opnd.h>
+
 #include <cstdint>
 #include <cstddef>
 #include <sys/user.h>
@@ -27,18 +32,24 @@ enum RegType {
 };
 
 /**
- * Initialize architecture-specific information for the
- * decoder/encoder/disassembler library.
- * @return a return code describing the outcome
- */
-ret_t initDisassembler();
-
-/**
  * Classify an architecture-specific register as an architecture-agnostic type.
  * @param reg register encoded in the ISA's DWARF debugging register format
  * @return the register type
  */
 enum RegType getRegType(uint16_t reg);
+
+/**
+ * Return the size in bytes of a callee-saved register.
+ * @param reg register encoded in the ISA's DWARF debugging register format
+ * @return size in bytes of the amount of callee-save space used for reg
+ */
+uint16_t getCalleeSaveSize(uint16_t reg);
+
+/**
+ * Initial frame size when entering a function.
+ * @return the initial frame size
+ */
+uint32_t initialFrameSize();
 
 /**
  * Return the architecture-specific frame pointer offset from the frame's
@@ -99,6 +110,42 @@ int syscallRetval(struct user_regs_struct &regs);
  * @param regs a pre-populated register set
  */
 void dumpRegs(struct user_regs_struct &regs);
+
+///////////////////////////////////////////////////////////////////////////////
+// DynamoRIO interface
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Initialize architecture-specific information for the
+ * decoder/encoder/disassembler library.
+ * @return a return code describing the outcome
+ */
+ret_t initDisassembler();
+
+/**
+ * Same as above except take as input a DynamoRIO-encoded register.
+ * @param reg register encoded in DynamoRIO's register format
+ * @return the register type
+ */
+enum RegType getRegTypeDR(reg_id_t reg);
+
+/**
+ * Return DynamoRIO's encoding for a register type.
+ * @param reg chameleon's register type
+ * @return DynamoRIO's register encoding
+ */
+reg_id_t getDRRegType(enum RegType reg);
+
+/**
+ * Get the update amount for frame size.
+ * @param instr the instruction
+ * @param newSize the new size with which to rewrite ISA-specific frame setup
+ *                instructions to accomodate randomized stack slots
+ * @param doEncode output argument set to true if instruction needs to be
+ *                 re-encoded (i.e., we rewrote an operand)
+ * @return amount, in bytes, the frame is updated
+ */
+int32_t getFrameSizeUpdate(instr_t &instr, uint32_t newSize, bool &doEncode);
 
 }
 }

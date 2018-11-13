@@ -41,10 +41,19 @@ extern pid_t masterPID;
 
 /* Functionality to be executed only in debug builds */
 # define DEBUG( ... ) do { __VA_ARGS__; } while(0);
+
+/* Verbose debugging - only enable if requested at command-line */
+extern bool verboseDebug;
+# define DEBUGMSG_VERBOSE( ... ) if(verboseDebug) DEBUGMSG( __VA_ARGS__ )
+# define DEBUGMSG_VERBOSE_RAW( ... ) if(verboseDebug) DEBUGMSG_RAW( __VA_ARGS__ )
+# define DEBUG_VERBOSE( ... ) if(verboseDebug) DEBUG( __VA_ARGS__ )
 #else
 # define DEBUGMSG( ... ) {}
 # define DEBUGMSG_RAW( ... ) {}
 # define DEBUG( ... ) {}
+# define DEBUGMSG_VERBOSE( ... ) {}
+# define DEBUGMSG_VERBOSE_RAW( ... ) {}
+# define DEBUG_VERBOSE( ... ) {}
 #endif
 
 #endif /* _LOG_H */

@@ -5,15 +5,8 @@
 #include <sys/syscall.h>
 #include <linux/userfaultfd.h>
 
-#define LINUX
-#define X86_64
-#include <dr_api.h>
-
-#include "arch.h"
 #include "log.h"
-#include "memoryview.h"
 #include "transform.h"
-#include "userfaultfd.h"
 #include "utils.h"
 
 using namespace chameleon;
@@ -122,42 +115,74 @@ static void *handleFaultsAsync(void *arg) {
  * function activation for stacks that grow down.
  *
  * @param frameSize size of the frame in bytes
- * @param slot stack slot record
+ * @param reg the base register
+ * @param offset the displacement from the base register
  * @return offset from the CFA, or INT32_MAX if not a valid stack reference
  */
 static inline int32_t
-canonicalizeSlotOffset(uint32_t frameSize, uint16_t reg, int16_t offset) {
-  switch(arch::getRegType(reg)) {
+canonicalizeSlotOffset(uint32_t frameSize, arch::RegType reg, int16_t offset) {
+  switch(reg) {
   case arch::RegType::FramePointer: return offset + arch::framePointerOffset();
   case arch::RegType::StackPointer: return -(frameSize - offset);
   default: return INT32_MAX;
   }
 }
 
+/**
+ * Convert an offset from the canonical frame address (CFA) to an offset from
+ * a base register.
+ *
+ * @param frameSize size of the frame in bytes
+ * @param reg the base register
+ * @param offset canonicalized frame offset
+ * @return offset from the base register, or INT32_MAX if not a valid stack
+ *         reference
+ */
+static inline int32_t
+slotOffsetFromRegister(uint32_t frameSize, arch::RegType reg, int16_t offset) {
+  switch(reg) {
+  case arch::RegType::FramePointer: return offset - arch::framePointerOffset();
+  case arch::RegType::StackPointer: return frameSize - (-offset);
+  default: return INT32_MAX;
+  }
+}
+
+uint32_t
+CodeTransformer::RandomizedFunction::getCalleeSaveSize(Binary::unwind_iterator &ui) {
+  uint32_t total = 0;
+  for(; !ui.end(); ++ui) total += arch::getCalleeSaveSize((*ui)->reg);
+  ui.reset();
+  return total;
+}
+
 ret_t
 CodeTransformer::RandomizedFunction::randomizeSlots(Binary::slot_iterator &si,
                                                  const function_record *func) {
   size_t nslots = si.getLength(), slotIdx;
-  int curOffset = 0;
+  int curOffset = calleeSaveSize;
   std::vector<int> workspace;
-  auto slotSort = [](const RandomizedFunction::SlotMap &a,
-                     const RandomizedFunction::SlotMap &b)
-  { return std::get<0>(a) < std::get<0>(b); };
 
   slots.reserve(nslots);
   workspace.reserve(nslots);
+
+  // TODO need to check for overflow, i.e., for functions with a bunch of slots
+  // and large padding between, need to ensure we don't overflow memory
+  // addressing constraints
+
+  // TODO need preprocess function to determine any stack slots which cannot be
+  // randomized, e.g., those that are created via push/pop instructions
 
   // Add the stack slots into the workspace & permute
   for(slotIdx = 0; !si.end(); ++si, slotIdx++) workspace.emplace_back(slotIdx);
   std::shuffle(workspace.begin(), workspace.end(), gen);
 
-  DEBUG(if(si.getLength()) DEBUGMSG("Remapping stack slots:" << std::endl););
+  DEBUG(if(si.getLength()) DEBUGMSG("Remapped stack slots:" << std::endl);)
 
   // Add mappings for the permuted slots
   for(slotIdx = 0; slotIdx < si.getLength(); slotIdx++) {
     const stack_slot *slot = si[workspace[slotIdx]];
     int origOffset = canonicalizeSlotOffset(func->frame_size,
-                                            slot->base_reg,
+                                            arch::getRegType(slot->base_reg),
                                             slot->offset);
     curOffset = ROUND_UP(curOffset + slot->size + slotPadding(),
                          slot->alignment);
@@ -167,7 +192,7 @@ CodeTransformer::RandomizedFunction::randomizeSlots(Binary::slot_iterator &si,
   }
   frameSize = curOffset;
 
-  std::sort(slots.begin(), slots.end(), slotSort);
+  std::sort(slots.begin(), slots.end(), slotCmp);
   return ret_t::Success;
 }
 
@@ -201,9 +226,18 @@ CodeTransformer::RandomizedFunction::randomize(const Binary &binary,
     ui.reset();
   )
 
+  calleeSaveSize = getCalleeSaveSize(ui);
   if((retcode = randomizeSlots(si, func)) != ret_t::Success) return retcode;
 
   return ret_t::Success;
+}
+
+int CodeTransformer::RandomizedFunction::getRandomizedOffset(int orig) const {
+  SlotMap tmpSlot(orig, 0);
+  std::vector<SlotMap>::const_iterator it =
+    std::lower_bound(slots.begin(), slots.end(), tmpSlot, slotCmp);
+  if(it == slots.end() || it->first != orig) return INT32_MAX;
+  else return it->second;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -335,12 +369,78 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   return ret_t::Success;
 }
 
+/**
+ * Return the canonicalized stack offset of an operand if it's a base +
+ * displacement memory reference into the stack.  If it's not a memory
+ * reference or not a reference to the stack, return >= 0.
+ *
+ * Note: this function assumes the stack grows down
+ *
+ * @param frameSize current frame size as we're walking through the function
+ * @param op a DynamoRIO operand
+ * @return the canonicalized offset represented as a negative number or >= 0 if
+ *         not a stack slot reference
+ */
+static inline int getStackOffset(uint32_t frameSize, opnd_t op) {
+  // TODO Note: from dr_ir_opnd.h about opnd_get_disp():
+  //   "On ARM, the displacement is always a non-negative value, and the
+  //   presence or absence of #DR_OPND_NEGATED in opnd_get_flags() determines
+  //   whether to add or subtract from the base register"
+  int offset = 0;
+  enum arch::RegType type;
+  if(opnd_is_base_disp(op)) {
+    type = arch::getRegTypeDR(opnd_get_base(op));
+    offset = opnd_get_disp(op);
+    offset = canonicalizeSlotOffset(frameSize, type, offset);
+    if(offset >= 0 || (-offset) > frameSize) offset = 0;
+  }
+  return offset;
+}
+
+template<int (*NumOp)(instr_t *),
+         opnd_t (*GetOp)(instr_t *, unsigned),
+         void (*SetOp)(instr_t *, unsigned, opnd_t)>
+ret_t CodeTransformer::rewriteOperands(const RandomizedFunction &info,
+                                       uint32_t frameSize,
+                                       instr_t &instr,
+                                       bool &doEncode) {
+  size_t i;
+  int32_t offset, randOffset, randRegOffset;
+  opnd_t op;
+  enum arch::RegType type;
+
+  // TODO references into arrays & structs also include an index/scale
+  // operand.  But we're only changing the beginning offset of the slot,
+  // so those operands should be okay as-is.  Verify this is true.
+  for(i = 0; i < NumOp(&instr); i++) {
+    op = GetOp(&instr, i);
+    offset = getStackOffset(frameSize, op);
+    if(offset < 0 && !info.inCalleeSaved(offset)) {
+      randOffset = info.getRandomizedOffset(offset);
+      if(randOffset == INT32_MAX) return ret_t::BadMetadata;
+      type = arch::getRegTypeDR(opnd_get_base(op));
+      randRegOffset = slotOffsetFromRegister(frameSize, type, randOffset);
+      opnd_set_disp(&op, randRegOffset);
+      SetOp(&instr, i, op);
+      doEncode = true;
+      DEBUGMSG_VERBOSE(" -> Remap source stack offset " << offset << " -> "
+                       << randOffset << std::endl);
+    }
+  }
+
+  return ret_t::Success;
+}
+
 ret_t CodeTransformer::rewriteFunction(const function_record *func,
                                        const RandomizedFunction &info) {
+  bool doEncode;
+  int32_t offset, randOffset;
+  uint32_t frameSize = arch::initialFrameSize();
   size_t count = 0;
   byte_iterator funcData = codeWindow.getData(func->addr);
-  byte *start = funcData[0], *end = start + func->code_size;
+  byte *start = funcData[0], *end = start + func->code_size, *instStart;
   instr_t instr;
+  ret_t code;
 
   if(funcData.getLength() < func->code_size) {
     DEBUGMSG("Code length encoded in metadata larger than available size: "
@@ -354,17 +454,53 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
     return ret_t::RandomizeFailed;
   }
 
+  // Note: we need to keep track of the frame's size as it gets expanded
+  // (through the prologue) and shrunk (epilogue) so that we can canonicalize
+  // stack slot references depending on the current offset
+
   instr_init(GLOBAL_DCONTEXT, &instr);
   do {
     instr_reset(GLOBAL_DCONTEXT, &instr);
+    instStart = start;
     start = decode(GLOBAL_DCONTEXT, start, &instr);
-    DEBUGMSG(""); instr_disassemble(GLOBAL_DCONTEXT, &instr, 1);
-    DEBUGMSG_RAW(std::endl);
-    count++;
+    doEncode = false;
+
+    DEBUG_VERBOSE(
+      DEBUGMSG_VERBOSE(""); instr_disassemble(GLOBAL_DCONTEXT, &instr, 1);
+      DEBUGMSG_VERBOSE_RAW(std::endl);
+    )
+
+    // Rewrite stack slot reference operands to their randomized locations
+    code = rewriteOperands<instr_num_srcs, instr_get_src, instr_set_src>
+                          (info, frameSize, instr, doEncode);
+    if(code != ret_t::Success) return code;
+    code = rewriteOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
+                          (info, frameSize, instr, doEncode);
+    if(code != ret_t::Success) return code;
+
+    // Keep track of updates to stack pointer (see note above) & rewrite stack
+    // frame resizing operands to account for randomized slots
+    if(instr_writes_to_reg(&instr,
+                           arch::getDRRegType(arch::RegType::StackPointer),
+                           DR_QUERY_DEFAULT)) {
+      offset = arch::getFrameSizeUpdate(instr,
+                                        info.getNonCalleeSaveSize(),
+                                        doEncode);
+      frameSize += offset;
+      if(offset) DEBUGMSG_VERBOSE(" -> stack pointer update: " << offset
+                                  << " (current size = " << frameSize << ")"
+                                  << std::endl);
+    }
+
+    if(doEncode) {
+      instStart = instr_encode(GLOBAL_DCONTEXT, &instr, instStart);
+      if(instStart != start) return ret_t::EncodeFailed;
+      count++;
+    }
   } while(start < end);
   instr_free(GLOBAL_DCONTEXT, &instr);
 
-  DEBUGMSG("Rewrote " << count << " instructions" << std::endl);
+  DEBUGMSG("Rewrote " << count << " instruction(s)" << std::endl);
 
   return ret_t::Success;
 }
@@ -377,8 +513,9 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   ret_t code;
   MemoryRegionPtr r;
 
-  // Note that by construction of how we're adding regions we don't need to
-  // call codeWindow.sort() to sort the regions within the window.
+  // First order of business - set up the memory window to handle page faults.
+  // Note: by construction of how we're adding regions we don't need to call
+  // codeWindow.sort() to sort the regions within the window.
 
   // Calculate the first address we care about. Note that we *only* care about
   // pages with code, i.e., the code segment may contain other sections that
@@ -429,12 +566,12 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   r.reset(new FileRegion(secEnd, len, filelen, data));
   codeWindow.insert(r);
 
-  // TODO go function by function & randomize
+  // Randomize every function for which we have transformation metadata
   Binary::func_iterator it = binary.getFunctions(secStart, secEnd);
   for(; !it.end(); ++it) {
     const function_record *func = *it;
 
-    DEBUGMSG("function @ " << std::hex << func->addr << ", size = "
+    DEBUGMSG("Randomizing function @ " << std::hex << func->addr << ", size = "
              << std::dec << func->code_size << std::endl);
 
     RandomizedFunctionMap::iterator it =

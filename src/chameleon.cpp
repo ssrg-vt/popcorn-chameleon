@@ -15,6 +15,9 @@ using namespace chameleon;
 pid_t masterPID;
 static int childArgc;
 static char **childArgv;
+#ifndef NDEBUG
+bool verboseDebug = false;
+#endif
 
 static bool checkCompatibility() {
   // TODO check we're on a supported architecture, i.e., AArch64 or x86-64
@@ -31,6 +34,9 @@ static void printHelp(const char *bin) {
                  "specify a binary and any arguments" << endl << endl
        << "Options:" << endl
        << "  -h : print help and exit" << endl
+#ifndef NDEBUG
+       << "  -d : print even more debugging information than normal" << endl
+#endif
        << "  -v : print Popcorn Chameleon version and exit" << endl;
 }
 
@@ -59,10 +65,13 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hv")) != -1) {
+  while((c = getopt(argc, argv, "hdv")) != -1) {
     switch(c) {
-    default:
+    default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
+#ifndef NDEBUG
+    case 'd': verboseDebug = true; break;
+#endif
     case 'v': printChameleonInfo(); exit(0); break;
     }
   }
