@@ -84,6 +84,14 @@ public:
    */
   void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
 
+  /**
+   * DynamoRIO operand size in bytes.
+   * @param op an operand
+   * @return the size of the operand in bytes, or UINT32_MAX if unknown
+   */
+  static unsigned getOperandSize(opnd_t op)
+  { return opnd_size_in_bytes(opnd_get_size(op)); }
+
 private:
   /**
    * Metadata describing where function activation information (i.e., on the
@@ -91,7 +99,13 @@ private:
    */
   class RandomizedFunction {
   public:
-    RandomizedFunction() : calleeSaveSize(0), frameSize(UINT32_MAX) {}
+    /**
+     * Instruct the randomizer to not randomize a particular slot.
+     * @param offset a canonicalized offset
+     * @param size the size of the slot
+     */
+    void doNotRandomize(int offset, unsigned size)
+    { dontRandomize[offset] = size; }
 
     /**
      * Randomize a function.  If it was previously randomized, drop all
@@ -109,26 +123,88 @@ private:
                     size_t maxPadding);
 
     /**
-     * Function information - return what you ask for.
+     * Function information - return what you ask for.  These getters
+     * correspond to the original version of the frame.
      */
-    uint32_t getCalleeSaveSize() const { return calleeSaveSize; }
+    uint32_t getCalleeSaveAreaSize() const { return calleeSaveSize; }
+    uint32_t getImmovableAreaSize() const { return immovableSize; }
+    uint32_t getCallAreaSize() const { return callSize; }
     uint32_t getFrameSize() const { return frameSize; }
+    uint32_t getRandomizedFrameSize() const { return randomizedFrameSize; }
 
     /**
-     * Get frame space for non-callee-saved frame space.
-     * @return frame space not devoted to callee-saved registers
+     * Get frame space for movable stack slots.
+     * @return frame space devoted randomized objects
      */
-    uint32_t getNonCalleeSaveSize() const
-    { return frameSize - calleeSaveSize; }
+    uint32_t getMovableAreaSize() const
+    { return frameSize - calleeSaveSize - immovableSize - callSize; }
 
     /**
-     * Return whether an offset is contained in the function's callee-saved
-     * area.
+     * Typically compilers allocate space for callee-saved registers/immovable
+     * slots by pushing registers onto the stack and then bulk-allocating the
+     * remaining frame space with a single math operation.  This function
+     * returns the bulk frame update size for the randomized frame.
+     *
+     * @return bulk frame update size for randomized frame
+     */
+    uint32_t getRandomizedBulkFrameUpdate() const
+    { return randomizedFrameSize - calleeSaveSize - immovableSize; }
+
+    /**
+     * Get offsets to the start of various stack areas.
+     */
+    int32_t getCalleeSaveAreaOffset() const { return -calleeSaveSize; }
+    int32_t getImmovableAreaOffset() const
+    { return -(calleeSaveSize + immovableSize); }
+    int32_t getMovableAreaOffset() const
+    { return -(calleeSaveSize + immovableSize + getMovableAreaSize()); }
+    int32_t getCallAreaOffset() const { return -(frameSize); }
+
+    /**
+     * Return whether an offset is contained in the callee-saved area of the
+     * original frame.
      * @param offset a canonicalized offset
      * @return true if contained in the callee-saved area, false otherwise
      */
-    bool inCalleeSaved(int offset) const
-    { return (-offset) <= calleeSaveSize; }
+    bool inCalleeSaveArea(int offset) const
+    { return offset < 0 && offset >= getCalleeSaveAreaOffset(); }
+
+    /**
+     * Return whether an offset is contained in the immovable object area of
+     * the original frame.
+     * @param offset a canonicalized offset
+     * @return true if contained in the immovable area, false otherwise
+     */
+    bool inImmovableArea(int offset) const
+    { return offset < getCalleeSaveAreaOffset() &&
+             offset >= getImmovableAreaOffset(); }
+
+    /**
+     * Return whether an offset is contained in the movable object area of the
+     * original frame.
+     * @param offset a canonicalized offset
+     * @return true if contained in the movable area, false otherwise
+     */
+    bool inMovableArea(int offset) const
+    { return offset < getImmovableAreaOffset() &&
+             offset >= getMovableAreaOffset(); }
+
+    /**
+     * Return whether an offset is contained in the call area of the original
+     * frame.
+     * @param offset a canonicalized offset
+     * @return true if contained in the call area, false otherwise
+     */
+    bool inCallArea(int offset) const
+    { return offset < getMovableAreaOffset() &&
+             offset >= getCallAreaOffset(); }
+
+    /**
+     * Return whether an offset is contained in the original frame.
+     * @param offset a canonicalized offset
+     * @return true if contained in the frame, false otherwise
+     */
+    bool inFrame(int offset) const { return abs(offset) <= frameSize; }
 
     /**
      * Get the randomized offset for a stack slot
@@ -153,12 +229,48 @@ private:
     typedef std::uniform_int_distribution<int>::param_type slotBounds;
     std::uniform_int_distribution<int> slotDist;
 
-    /* Mapping types */
-    typedef std::pair<int, int> SlotMap;
+    /*
+     * Slot remapping.  Contains the following tuple elements:
+     *  - original offset
+     *  - randomized offset
+     *  - slot size
+     */
+    typedef std::tuple<int, int, unsigned> SlotMap;
 
-    /* Frame size after randomization */
-    uint32_t calleeSaveSize;
-    uint32_t frameSize;
+    /*
+     * Stack area sizes in the original version of the frame.  There are
+     * multiple stack areas which contain objects that may or may not be
+     * "movable":
+     *
+     * |-----------------------|
+     * |                       | ^
+     * |   Callee-save area    | |
+     * |                       | |
+     * |-----------------------| | Immutable
+     * |                       | |
+     * |    Immovable area     | |
+     * |                       | v
+     * |-----------------------|
+     * |                       | ^
+     * |     Movable area      | | Movable/randomizable
+     * |     (stack slots)     | |
+     * |                       | v
+     * |-----------------------|
+     * |                       | ^
+     * |       Call area       | | Immutable
+     * | (arguments, red zone) | |
+     * |                       | v
+     * |-----------------------|
+     */
+    // Note: we assume *all* immovable objects are in a contiguous regions
+    // adjacent to the callee-saved region.
+    // TODO do we need to keep area sizes for randomized versions of the frame?
+    std::unordered_map<int32_t, uint32_t> dontRandomize;
+    uint32_t calleeSaveSize; /* callee-saved area size */
+    uint32_t immovableSize; /* immovable stack slot area size */
+    uint32_t callSize; /* call area (arguments, red zone) size */
+    uint32_t frameSize; /* original frame size */
+    uint32_t randomizedFrameSize; /* frame size after randomization */
 
     ///////////////////////////////////////////////////////////////////////////
     // Note: maintain information as vectors because we interface with C and //
@@ -172,20 +284,58 @@ private:
     std::vector<SlotMap> slots;
 
     /**
-     * Comparison function for sorting & searching.
-     * @param a first slot mapping
-     * @param a second slot mapping
+     * Tuple element accessor functions.
+     */
+    static int getOriginalOffset(const SlotMap &s) { return std::get<0>(s); }
+    static int getRandomizedOffset(const SlotMap &s) { return std::get<1>(s); }
+    static unsigned getSlotSize(const SlotMap &s) { return std::get<2>(s); }
+
+    /**
+     * Comparison function for sorting & searching a slot.  Searches based on
+     * the original offset.
+     *
+     * @param first slot mapping
+     * @param second slot mapping
      * @return true if a's first element is less than b's first element
      */
     static bool slotCmp(const SlotMap &a, const SlotMap &b)
-    { return a.first < b.first; }
+    { return getOriginalOffset(a) < getOriginalOffset(b); }
 
     /**
-     * Get the size, in bytes, of the callee-saved register area.
+     * Return whether the slot contains a given offset.  Uses the slot's
+     * original offset.
+     *
+     * @param slot a slot mapping
+     * @param offset a canonicalized stack offset
+     * @return true if the slot contains the offset or false otherwise
+     */
+    static bool slotContains(const SlotMap *slot, int offset)
+    { return CONTAINS(offset, getOriginalOffset(*slot), getSlotSize(*slot)); }
+
+    /**
+     * Return whether an offset would appear in a slot before the specified
+     * slot in a sorted ordering of stack slots.
+     *
+     * @param slot a slot mapping
+     * @param offset a canonicalized stack offset
+     * @return true if the offset would appear before the slot or false
+     *         otherwise
+     */
+    static bool lessThanSlot(const SlotMap *slot, int offset)
+    { return offset < getOriginalOffset(*slot); }
+
+    /**
+     * Calculate the size, in bytes, of the callee-saved register area.
      * @param ui an iterator over the unwinding records
      * @return size in bytes of callee-saved register area
      */
-    static uint32_t getCalleeSaveSize(Binary::unwind_iterator &ui);
+    static uint32_t calculateCalleeSaveSize(Binary::unwind_iterator &ui);
+
+    /**
+     * Calculate the size, in bytes, of the immovable area.
+     * @return size in bytes of the immovable area
+     */
+    uint32_t calculateImmovableSize() const;
 
     /**
      * Generate a randomized stack slot padding value.
@@ -244,6 +394,17 @@ private:
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
 
   /**
+   * Analyze the operands of an instruction and determine any randomization
+   * restrictions.
+   * @param info randomization information for a function
+   * @param frameSize currently calculated frame size
+   * @param instr an instruction
+   */
+  ret_t analyzeOffsetLimits(RandomizedFunction &info,
+                            uint32_t frameSize,
+                            instr_t *instr);
+
+  /**
    * Rewrite stack slot reference operands to refer to the randomized location.
    * Templated because DynamoRIO differentiates between source & destination
    * operands, but we do the same operations regardless.
@@ -252,10 +413,10 @@ private:
    * @template GetOp function to get an operand
    * @template SetOp function to set an operand
    * @param info randomization information for a function
-   * @param frameSize currently calculated frame size
+   * @param frameSize currently calculated original frame size
+   * @param newFrameSize currently calculated rewritten frame size
    * @param instr an instruction
-   * @param doEncode output argument set to true if instruction needs to be
-   *                 re-encoded (i.e., we rewrote an operand)
+   * @param changed output argument set to true if instruction was changed
    * @return a return code describing the outcome
    */
   template<int (*NumOp)(instr_t *),
@@ -263,8 +424,9 @@ private:
            void (*SetOp)(instr_t *, unsigned, opnd_t)>
   ret_t rewriteOperands(const RandomizedFunction &info,
                         uint32_t frameSize,
-                        instr_t &instr,
-                        bool &doEncode);
+                        uint32_t newFrameSize,
+                        instr_t *instr,
+                        bool &changed);
 
   /**
    * Decode, randomize and re-encode a function.
@@ -273,7 +435,7 @@ private:
    * @return a return code describing the outcome
    */
   ret_t rewriteFunction(const function_record *func,
-                        const RandomizedFunction &info);
+                        RandomizedFunction &info);
 
   /**
    * Load the code segment from disk into the memory window and randomize

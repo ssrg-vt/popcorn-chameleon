@@ -11,7 +11,6 @@
 #define LINUX
 #define X86_64
 #include <dr_api.h>
-#include <dr_ir_opnd.h>
 
 #include <cstdint>
 #include <cstddef>
@@ -50,6 +49,13 @@ uint16_t getCalleeSaveSize(uint16_t reg);
  * @return the initial frame size
  */
 uint32_t initialFrameSize();
+
+/**
+ * Align a frame size to meet the ISA's ABI requirements.
+ * @param size a frame size
+ * @return the aligned frame size
+ */
+uint32_t alignFrameSize(uint32_t size);
 
 /**
  * Return the architecture-specific frame pointer offset from the frame's
@@ -137,15 +143,37 @@ enum RegType getRegTypeDR(reg_id_t reg);
 reg_id_t getDRRegType(enum RegType reg);
 
 /**
- * Get the update amount for frame size.
+ * Get the amount of space allocated/de-allocated on the stack by an
+ * instruction.
  * @param instr the instruction
- * @param newSize the new size with which to rewrite ISA-specific frame setup
- *                instructions to accomodate randomized stack slots
- * @param doEncode output argument set to true if instruction needs to be
- *                 re-encoded (i.e., we rewrote an operand)
- * @return amount, in bytes, the frame is updated
+ * @return size, in bytes, of the frame allocation
  */
-int32_t getFrameSizeUpdate(instr_t &instr, uint32_t newSize, bool &doEncode);
+int32_t getFrameUpdateSize(instr_t *instr);
+
+/**
+ * Get offset restrictions, if any, for a base + displacement operand.
+ * @param op the operand
+ * @return offset restriction (as an offset range) from the base register
+ */
+range getOffsetRestriction(opnd_t op);
+
+/**
+ * For instructions that modify the frame size, return whether the instruction
+ * can be rewritten (without changing its encoded size) with a different size.
+ *
+ * @param instr the instruction
+ * @return true if the frame size update can be changed or false otherwise
+ */
+bool canTransformFrameUpdate(instr_t *instr);
+
+/**
+ * Rewrite a frame update instruction with a new size.
+ * @param instr the instruction
+ * @param newSize the new frame allocation size
+ * @param changed output argument set to true if the instruction was changed
+ * @return a return code describing the outcome
+ */
+ret_t rewriteFrameUpdate(instr_t *instr, int32_t newSize, bool &changed);
 
 }
 }

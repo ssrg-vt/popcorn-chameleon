@@ -351,18 +351,6 @@ private:
    * @return a return code describing the outcome
    */
   ret_t getSegmentByAddress(uintptr_t addr, Segment &segment) const;
-
-  /**
-   * Return an index number to the function record that contains an address.
-   * If no function record contains the address, return the index of the
-   * nearest record that begins after the address (i.e., to the "right") or -1
-   * if no record appears after the address.
-   *
-   * @param addr an address
-   * @return index number of the record that either contains or starts directly
-   *         after the address, or -1 if no record starts after it
-   */
-  ssize_t findFunctionRight(uintptr_t addr) const;
 };
 
 }

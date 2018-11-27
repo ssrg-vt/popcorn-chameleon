@@ -8,7 +8,9 @@
 #ifndef _TYPES_H
 #define _TYPES_H
 
+#include <utility>
 #include <cstddef>
+#include <cstdint>
 
 namespace chameleon {
 
@@ -37,6 +39,7 @@ namespace chameleon {
   X(InvalidTransformConfig, "invalid transformation configuration") \
   X(DisasmSetupFailed, "setting up disassembler failed") \
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
+  X(AnalysisFailed, "could not analyze code to ensure correctness") \
   X(RandomizeFailed, "could not randomize code section") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
@@ -88,6 +91,9 @@ private:
 };
 
 typedef iterator<unsigned char> byte_iterator;
+
+/* A range of values.  The first element *must* be smaller than the second. */
+typedef std::pair<int64_t, int64_t> range;
 
 }
 

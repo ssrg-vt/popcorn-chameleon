@@ -251,6 +251,25 @@ size_t Binary::getRemainingFileSize(uintptr_t addr) const {
   else return getRemainingFileSize(addr, tmp);
 }
 
+/**
+ * Return whether the address is contained within a function.
+ * @param func the function record
+ * @param addr the virtual address
+ * @return true if contained or false otherwise
+ */
+static bool funcContains(const function_record *func, uintptr_t addr)
+{ return CONTAINS(addr, func->addr, func->code_size); }
+
+/**
+ * Return whether the address comes before the start of the function in the
+ * virtual address space.
+ * @param func the function record
+ * @param addr the virtual address
+ * @return true if addr comes before the function or false otherwise
+ */
+static bool lessThanFunc(const function_record *func, uintptr_t addr)
+{ return addr < func->addr; }
+
 Binary::func_iterator
 Binary::getFunctions(uintptr_t start, uintptr_t end) const {
   ssize_t idx, count = 0;
@@ -259,7 +278,8 @@ Binary::getFunctions(uintptr_t start, uintptr_t end) const {
   if(end <= start) return func_iterator(nullptr, 0);
 
   // Find the first function containing start or starting directly after it
-  idx = findFunctionRight(start);
+  idx = findRight<function_record, uintptr_t, funcContains, lessThanFunc>
+                 (functions.getEntries(), functions.getNumEntries(), start);
   if(idx < 0) return func_iterator(nullptr, 0);
   record = functions.getEntries();
 
@@ -335,23 +355,5 @@ ret_t Binary::getSegmentByAddress(uintptr_t addr, Segment &segment) const {
     }
   }
   return ret_t::NoSuchSection;
-}
-
-ssize_t Binary::findFunctionRight(uintptr_t addr) const {
-  ssize_t low = 0, high = functions.getNumEntries() - 1, mid;
-  const function_record *records = functions.getEntries();
-
-  if(high < 0) return -1;
-  do {
-    mid = (high + low) / 2;
-    if(CONTAINS(addr, records[mid].addr, records[mid].code_size)) return mid;
-    else if(addr < records[mid].addr) high = mid - 1;
-    else low = mid + 1;
-  } while(high >= low);
-
-  // Didn't find the record, return the next highest one (if available)
-  if(addr < records[mid].addr) return mid;
-  else if(mid < functions.getNumEntries() - 1) return mid + 1;
-  else return -1;
 }
 

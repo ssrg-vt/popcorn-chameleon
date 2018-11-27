@@ -231,18 +231,6 @@ public:
   size_t numRegions() const { return regions.size(); }
 private:
   std::vector<MemoryRegionPtr> regions;
-
-  /**
-   * Return an index number to the region that contains an address.  If no
-   * region contains the address, return the index of the nearest region that
-   * begins after the address (i.e., to the "right") or -1 if no region appears
-   * after the address.
-   *
-   * @param addr an address
-   * @return index number of the region that either contains or starts directly
-   *         after the address, or -1 if no region starts after it
-   */
-  ssize_t findRegionRight(uintptr_t address) const;
 };
 
 }

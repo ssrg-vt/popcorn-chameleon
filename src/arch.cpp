@@ -1,35 +1,12 @@
 #include "arch.h"
 #include "log.h"
+#include "transform.h"
 #include "types.h"
+#include "utils.h"
 
 #include "regs.h"
-#include <dr_ir_opcodes.h>
 
 using namespace chameleon;
-
-/**
- * Get the size of a DynamoRIO operand in bytes.
- * @param op an operand
- * @return size of the operand in bytes
- */
-static inline unsigned getOperandSize(opnd_t op) {
-  switch(opnd_get_size(op)) {
-  case OPSZ_0: return 0;
-  case OPSZ_1: return 1;
-  case OPSZ_2: return 2;
-  case OPSZ_4: return 4;
-  case OPSZ_6: return 6;
-  case OPSZ_8: return 8;
-  case OPSZ_10: return 10;
-  case OPSZ_16: return 16;
-  case OPSZ_14: return 14;
-  case OPSZ_28: return 28;
-  case OPSZ_94: return 94;
-  case OPSZ_108: return 108;
-  case OPSZ_512: return 512;
-  default: WARN("Unknown operand size" << std::endl); return 0;
-  }
-}
 
 #if defined __x86_64__
 
@@ -50,6 +27,8 @@ uint16_t arch::getCalleeSaveSize(uint16_t reg) {
 }
 
 uint32_t arch::initialFrameSize() { return 8; }
+
+uint32_t arch::alignFrameSize(uint32_t size) { return ROUND_UP(size, 16); }
 
 int32_t arch::framePointerOffset() { return -16; }
 
@@ -94,30 +73,30 @@ int arch::syscallRetval(struct user_regs_struct &regs) {
   #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
 
 void arch::dumpRegs(struct user_regs_struct &regs) {
-  INFO(DUMP_REG(regs, rax) << std::endl)
-  INFO(DUMP_REG(regs, rbx) << std::endl)
-  INFO(DUMP_REG(regs, rcx) << std::endl)
-  INFO(DUMP_REG(regs, rdx) << std::endl)
-  INFO(DUMP_REG(regs, rsi) << std::endl)
-  INFO(DUMP_REG(regs, rdi) << std::endl)
-  INFO(DUMP_REG(regs, rbp) << std::endl)
-  INFO(DUMP_REG(regs, rsp) << std::endl)
-  INFO(DUMP_REG(regs, r8) << std::endl)
-  INFO(DUMP_REG(regs, r9) << std::endl)
-  INFO(DUMP_REG(regs, r10) << std::endl)
-  INFO(DUMP_REG(regs, r11) << std::endl)
-  INFO(DUMP_REG(regs, r12) << std::endl)
-  INFO(DUMP_REG(regs, r13) << std::endl)
-  INFO(DUMP_REG(regs, r14) << std::endl)
-  INFO(DUMP_REG(regs, r15) << std::endl)
-  INFO(DUMP_REG(regs, rip) << std::endl)
-  INFO(DUMP_REG(regs, cs) << std::endl)
-  INFO(DUMP_REG(regs, ds) << std::endl)
-  INFO(DUMP_REG(regs, es) << std::endl)
-  INFO(DUMP_REG(regs, fs) << std::endl)
-  INFO(DUMP_REG(regs, fs_base) << std::endl)
-  INFO(DUMP_REG(regs, gs) << std::endl)
-  INFO(DUMP_REG(regs, gs_base) << std::endl)
+  INFO(DUMP_REG(regs, rax) << std::endl);
+  INFO(DUMP_REG(regs, rbx) << std::endl);
+  INFO(DUMP_REG(regs, rcx) << std::endl);
+  INFO(DUMP_REG(regs, rdx) << std::endl);
+  INFO(DUMP_REG(regs, rsi) << std::endl);
+  INFO(DUMP_REG(regs, rdi) << std::endl);
+  INFO(DUMP_REG(regs, rbp) << std::endl);
+  INFO(DUMP_REG(regs, rsp) << std::endl);
+  INFO(DUMP_REG(regs, r8) << std::endl);
+  INFO(DUMP_REG(regs, r9) << std::endl);
+  INFO(DUMP_REG(regs, r10) << std::endl);
+  INFO(DUMP_REG(regs, r11) << std::endl);
+  INFO(DUMP_REG(regs, r12) << std::endl);
+  INFO(DUMP_REG(regs, r13) << std::endl);
+  INFO(DUMP_REG(regs, r14) << std::endl);
+  INFO(DUMP_REG(regs, r15) << std::endl);
+  INFO(DUMP_REG(regs, rip) << std::endl);
+  INFO(DUMP_REG(regs, cs) << std::endl);
+  INFO(DUMP_REG(regs, ds) << std::endl);
+  INFO(DUMP_REG(regs, es) << std::endl);
+  INFO(DUMP_REG(regs, fs) << std::endl);
+  INFO(DUMP_REG(regs, fs_base) << std::endl);
+  INFO(DUMP_REG(regs, gs) << std::endl);
+  INFO(DUMP_REG(regs, gs_base) << std::endl);
   INFO(DUMP_REG(regs, ss) << std::endl);
 }
 
@@ -146,28 +125,17 @@ reg_id_t arch::getDRRegType(enum RegType reg) {
 /**
  * Return the immediate value used with the stack pointer in a math operation.
  * @param instr the instruction
- * @param newSize the new size with which to rewrite frame setup immediates to
- *                accomodate randomized stack slots
  * @return the immediate value added to the stack pointer, or 0 if it's not a
  *         immediate used with the stack pointer
  */
-static inline int32_t
-stackPointerMathImm(instr_t &instr, int32_t newSize, bool &doEncode) {
+static int32_t stackPointerMathImm(instr_t *instr) {
   bool valid = true;
   int32_t update = 0;
   opnd_t op;
 
-  for(int i = 0; i < instr_num_srcs(&instr); i++) {
-    op = instr_get_src(&instr, i);
-    if(opnd_is_immed_int(op)) {
-      // TODO make newSize have same signedness as update
-      update = opnd_get_immed_int(op);
-      if(newSize > update) {
-        op = opnd_create_immed_int(newSize, opnd_get_size(op));
-        instr_set_src(&instr, i, op);
-        doEncode = true;
-      }
-    }
+  for(int i = 0; i < instr_num_srcs(instr); i++) {
+    op = instr_get_src(instr, i);
+    if(opnd_is_immed_int(op)) update = opnd_get_immed_int(op);
     else if(opnd_is_reg(op)) {
       // Ensure the register operand is the stack pointer
       if(opnd_get_reg(op) != DR_REG_XSP) {
@@ -185,17 +153,18 @@ stackPointerMathImm(instr_t &instr, int32_t newSize, bool &doEncode) {
   return update;
 }
 
-int32_t
-arch::getFrameSizeUpdate(instr_t &instr, uint32_t newSize, bool &doEncode) {
-  switch(instr_get_opcode(&instr)) {
+int32_t arch::getFrameUpdateSize(instr_t *instr) {
+  switch(instr_get_opcode(instr)) {
   // Updating stack pointer by an immediate
-  case OP_sub: return stackPointerMathImm(instr, newSize, doEncode);
-  case OP_add: return -stackPointerMathImm(instr, newSize, doEncode);
+  case OP_sub: return stackPointerMathImm(instr);
+  case OP_add: return -stackPointerMathImm(instr);
 
   // Pushing/popping values from the stack
-  case OP_push: return getOperandSize(instr_get_src(&instr, 0));
+  case OP_push:
+    return CodeTransformer::getOperandSize(instr_get_src(instr, 0));
   case OP_pushf: return 8;
-  case OP_pop: return -getOperandSize(instr_get_dst(&instr, 0));
+  case OP_pop:
+    return -CodeTransformer::getOperandSize(instr_get_dst(instr, 0));
   case OP_popf: return -8;
 
   // Instructions that modify the stack pointer in a way we don't care about
@@ -204,6 +173,79 @@ arch::getFrameSizeUpdate(instr_t &instr, uint32_t newSize, bool &doEncode) {
 
   default: WARN("Unhandled update to stack pointer" << std::endl); return 0;
   }
+}
+
+range arch::getOffsetRestriction(opnd_t op) {
+  if(opnd_is_base_disp(op)) {
+    // Because x86-64 is so *darn* flexible, the compiler can encode
+    // displacements with varying bit-widths depending on the needed size
+    int disp = opnd_get_disp(op);
+    if(INT8_MIN <= disp && disp <= INT8_MAX && !opnd_is_disp_force_full(op))
+      return range(INT8_MIN, INT8_MAX);
+    else if(INT32_MIN <= disp && disp <= INT32_MAX)
+      return range(INT32_MIN, INT32_MAX);
+    else return range(INT64_MIN, INT64_MAX);
+  }
+  return range(INT32_MIN, INT32_MAX);
+}
+
+bool arch::canTransformFrameUpdate(instr_t *instr) {
+  switch(instr_get_opcode(instr)) {
+  case OP_sub: case OP_add: return true;
+  default: return false;
+  }
+}
+
+/**
+ * Rewrite a stack pointer + immediate math instruction with a new immediate.
+ * @param instr the instruction
+ * @param newImm the new immediate
+ * @return true if successfully rewritten or false otherwise
+ */
+static bool rewriteStackPointerMathImm(instr_t *instr, int32_t newImm) {
+  bool valid = true;
+  opnd_t op;
+
+  for(int i = 0; i < instr_num_srcs(instr); i++) {
+    op = instr_get_src(instr, i);
+    if(opnd_is_immed_int(op)) {
+      op = opnd_create_immed_int(newImm, opnd_get_size(op));
+      instr_set_src(instr, i, op);
+    }
+    else if(opnd_is_reg(op)) {
+      // Ensure the register operand is the stack pointer
+      if(opnd_get_reg(op) != DR_REG_XSP) {
+        valid = false;
+        break;
+      }
+    }
+    else {
+      // Unknown operand type
+      valid = false;
+      break;
+    }
+  }
+
+  return valid;
+}
+
+ret_t
+arch::rewriteFrameUpdate(instr_t *instr, int32_t newSize, bool &changed) {
+  changed = false;
+  switch(instr_get_opcode(instr)) {
+  case OP_sub:
+    if(!rewriteStackPointerMathImm(instr, newSize))
+      return ret_t::RandomizeFailed;
+    changed = true;
+    break;
+  case OP_add:
+    if(!rewriteStackPointerMathImm(instr, -newSize))
+      return ret_t::RandomizeFailed;
+    changed = true;
+    break;
+  default: break;
+  }
+  return ret_t::Success;
 }
 
 #else

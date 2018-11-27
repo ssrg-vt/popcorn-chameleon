@@ -61,12 +61,35 @@ byte_iterator BufferedRegion::getData(uintptr_t address) {
 // MemoryWindow implementation
 ///////////////////////////////////////////////////////////////////////////////
 
+/**
+ * Return whether the address is contained within a region.
+ * @param region the region object
+ * @param addr the virtual address
+ * @return true if contained or false otherwise
+ */
+static bool regionContains(const MemoryRegionPtr *region, uintptr_t addr)
+{ return (*region)->contains(addr); }
+
+/**
+ * Return whether the address comes before the start of the region in the
+ * virtual address space.
+ * @param region the region object
+ * @param addr the virtual address
+ * @return true if addr comes before the region or false otherwise
+ */
+static bool lessThanRegion(const MemoryRegionPtr *region, uintptr_t addr)
+{ return addr < (*region)->getStart(); }
+
 ret_t
 MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
-  ssize_t regNum = findRegionRight(address), offset = 0,
-          bufSize = buffer.size(), len;
+  ssize_t regNum, offset = 0, bufSize = buffer.size(), len;
   std::vector<MemoryRegionPtr>::const_iterator start, r;
 
+  regNum = findRight<MemoryRegionPtr,
+                     uintptr_t,
+                     regionContains,
+                     lessThanRegion>
+                    (&regions[0], regions.size(), address);
   if(regNum < 0) {
     memset(&buffer[0], 0, buffer.size());
     return ret_t::Success;
@@ -99,26 +122,13 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
 }
 
 byte_iterator MemoryWindow::getData(uintptr_t address) {
-  ssize_t regNum = findRegionRight(address);
+  ssize_t regNum = findRight<MemoryRegionPtr,
+                             uintptr_t,
+                             regionContains,
+                             lessThanRegion>
+                            (&regions[0], regions.size(), address);
   if(regNum < 0 || !regions[regNum]->contains(address))
     return byte_iterator(nullptr, 0);
   else return regions[regNum]->getData(address);
-}
-
-ssize_t MemoryWindow::findRegionRight(uintptr_t address) const {
-  ssize_t low = 0, high = regions.size() - 1, mid;
-
-  if(high < 0) return -1;
-  do {
-    mid = (high + low) / 2;
-    if(regions[mid]->contains(address)) return mid;
-    else if(address < regions[mid]->getStart()) high = mid - 1;
-    else low = mid + 1;
-  } while(high >= low);
-
-  // Didn't find the record, return the next highest one (if available)
-  if(address < regions[mid]->getStart()) return mid;
-  else if(mid < regions.size() - 1) return mid + 1;
-  else return -1;
 }
 
