@@ -85,10 +85,8 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
   ssize_t regNum, offset = 0, bufSize = buffer.size(), len;
   std::vector<MemoryRegionPtr>::const_iterator start, r;
 
-  regNum = findRight<MemoryRegionPtr,
-                     uintptr_t,
-                     regionContains,
-                     lessThanRegion>
+  regNum = findRight<MemoryRegionPtr, uintptr_t,
+                     regionContains, lessThanRegion>
                     (&regions[0], regions.size(), address);
   if(regNum < 0) {
     memset(&buffer[0], 0, buffer.size());
@@ -122,13 +120,11 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
 }
 
 byte_iterator MemoryWindow::getData(uintptr_t address) {
-  ssize_t regNum = findRight<MemoryRegionPtr,
-                             uintptr_t,
-                             regionContains,
-                             lessThanRegion>
+  ssize_t regNum = findRight<MemoryRegionPtr, uintptr_t,
+                             regionContains, lessThanRegion>
                             (&regions[0], regions.size(), address);
-  if(regNum < 0 || !regions[regNum]->contains(address))
-    return byte_iterator(nullptr, 0);
-  else return regions[regNum]->getData(address);
+  if(regNum >= 0 && regions[regNum]->contains(address))
+    return regions[regNum]->getData(address);
+  else return byte_iterator(nullptr, 0);
 }
 

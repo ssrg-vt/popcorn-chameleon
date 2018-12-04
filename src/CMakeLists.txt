@@ -4,6 +4,7 @@ add_executable (chameleon
   chameleon.cpp
   memoryview.cpp
   process.cpp
+  randomize.cpp
   trace.cpp
   transform.cpp
   types.cpp

@@ -16,10 +16,15 @@
 #include <cstddef>
 #include <sys/user.h>
 
+#include "randomize.h"
 #include "types.h"
 
 namespace chameleon {
 namespace arch {
+
+///////////////////////////////////////////////////////////////////////////////
+// Register information & handling
+///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Architecture-agnostic register classification.
@@ -43,34 +48,6 @@ enum RegType getRegType(uint16_t reg);
  * @return size in bytes of the amount of callee-save space used for reg
  */
 uint16_t getCalleeSaveSize(uint16_t reg);
-
-/**
- * Initial frame size when entering a function.
- * @return the initial frame size
- */
-uint32_t initialFrameSize();
-
-/**
- * Align a frame size to meet the ISA's ABI requirements.
- * @param size a frame size
- * @return the aligned frame size
- */
-uint32_t alignFrameSize(uint32_t size);
-
-/**
- * Return the architecture-specific frame pointer offset from the frame's
- * canonical frame address (CFA).
- * @return frame pointer's offset from the CFA
- */
-int32_t framePointerOffset();
-
-/**
- * Return the system call instruction bytes and write the size of the
- * instruction to the argument.
- * @param size size of the syscall instruction in bytes
- * @return the bytes constituting the syscall instruction
- */
-uint64_t syscall(size_t &size);
 
 /**
  * Extract the program counter from a register set.
@@ -118,6 +95,55 @@ int syscallRetval(struct user_regs_struct &regs);
 void dumpRegs(struct user_regs_struct &regs);
 
 ///////////////////////////////////////////////////////////////////////////////
+// Stack frame information & handling
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Initial frame size when entering a function.
+ * @return the initial frame size
+ */
+uint32_t initialFrameSize();
+
+/**
+ * Align a frame size to meet the ISA's ABI requirements.
+ * @param size a frame size
+ * @return the aligned frame size
+ */
+uint32_t alignFrameSize(uint32_t size);
+
+/**
+ * Return the architecture-specific frame pointer offset from the frame's
+ * canonical frame address (CFA).
+ * @return frame pointer's offset from the CFA
+ */
+int32_t framePointerOffset();
+
+///////////////////////////////////////////////////////////////////////////////
+// Instruction information
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Return the system call instruction bytes and write the size of the
+ * instruction to the argument.
+ * @param size size of the syscall instruction in bytes
+ * @return the bytes constituting the syscall instruction
+ */
+uint64_t syscall(size_t &size);
+
+///////////////////////////////////////////////////////////////////////////////
+// Randomization implementation
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Return a RandomizedFunction object specialized for the current ISA.
+ * @param binary a Binary object
+ * @param func a function record object
+ * @return a RandomizedFunction object
+ */
+RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
+                                            const function_record *func);
+
+///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO interface
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -151,20 +177,21 @@ reg_id_t getDRRegType(enum RegType reg);
 int32_t getFrameUpdateSize(instr_t *instr);
 
 /**
- * Get offset restrictions, if any, for a base + displacement operand.
- * @param op the operand
- * @return offset restriction (as an offset range) from the base register
+ * Get offset restrictions, if any, for an operand.
+ * @param instr the instruction
+ * @param res output operand populated with any restrictions
+ * @return true if there is a restriction for the instruction or false if not
  */
-range getOffsetRestriction(opnd_t op);
+bool getRestriction(instr_t *instr, RandRestriction &res);
 
 /**
- * For instructions that modify the frame size, return whether the instruction
- * can be rewritten (without changing its encoded size) with a different size.
- *
+ * Get offset restrictions, if any, for an operand.
  * @param instr the instruction
- * @return true if the frame size update can be changed or false otherwise
+ * @param op the operand from the instruction
+ * @param res output operand populated with any restrictions
+ * @return true if there is a restriction for the operand or false if not
  */
-bool canTransformFrameUpdate(instr_t *instr);
+bool getRestriction(instr_t *instr, opnd_t op, RandRestriction &res);
 
 /**
  * Rewrite a frame update instruction with a new size.

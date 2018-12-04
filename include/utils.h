@@ -10,8 +10,13 @@
 
 #include <assert.h>
 
-/* Check if a value is within a region */
-#define CONTAINS( val, start, len ) (start <= val && val < (start + len))
+/*
+ * Check if a value is within a region.  Note that all values must either be
+ * signed integers or must be within a signed 64-bit integer range.
+ */
+#define CONTAINS( val, start, len ) \
+  ((int64_t)start <= (int64_t)val && \
+   (int64_t)val < ((int64_t)start + (int64_t)len))
 
 /* Rounding for positive values and positive power-of-2 sizes */
 #define ROUND_DOWN( val, size ) ((val) & -(size))
@@ -39,7 +44,7 @@ namespace chameleon {
  * matching record, or the record directly to the right in a sorted ordering if
  * no record matches.  Slightly more flexible than STL's binary search as users
  * can directly define the matching function, meaning it can be used to search
- * for values where the records have a range, i.e., a code range corresponding
+ * for values where the records have a range, e.g., a code range corresponding
  * to a function.
  *
  * Note: the records must have been previously sorted.

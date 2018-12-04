@@ -93,7 +93,7 @@ private:
 typedef iterator<unsigned char> byte_iterator;
 
 /* A range of values.  The first element *must* be smaller than the second. */
-typedef std::pair<int64_t, int64_t> range;
+typedef std::pair<int64_t, int64_t> range_t;
 
 }
 
