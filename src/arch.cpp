@@ -187,11 +187,12 @@ const char *x86RegionName[] {
  * to the callee-save region
  */
 // TODO we don't do any checking regarding if a single stack slot is accessed
-// via both frame and stack pointer
+// via both frame and stack pointer or crosses regions and thus could
+// potentially fall into one or more regions
 class x86RandomizedFunction : public RandomizedFunction {
 public:
   x86RandomizedFunction(const Binary &binary, const function_record *func)
-    : RandomizedFunction(binary, func) {
+    : RandomizedFunction(binary, func), alignment(16) {
     int offset;
     size_t size, regionSize = 0;
 
@@ -226,6 +227,8 @@ public:
     regions.push_back(std::move(csr));
   }
 
+  virtual uint32_t getFrameAlignment() const override { return alignment; }
+
   virtual ret_t addRestriction(const RandRestriction &res) override {
     bool foundSlot = false;
     int offset = res.offset;
@@ -253,9 +256,13 @@ public:
     switch(res.flags) {
     case x86Restriction::F_Immovable:
       if(!regions[x86Region::R_CalleeSave]->contains(offset)) {
-        regions[x86Region::R_Immovable]->addSlot(offset, size, alignment);
-        DEBUGMSG(" -> cannot randomize slot @ " << offset << " (size = "
-                 << size << ")" << std::endl);
+        // Some functions (e.g., Popcorn's migration library) access offsets
+        // beyond the frame size in the metadata; ignore thoses accesses.
+        if(abs(offset) <= func->frame_size) {
+          regions[x86Region::R_Immovable]->addSlot(offset, size, alignment);
+          DEBUGMSG(" -> cannot randomize slot @ " << offset << " (size = "
+                   << size << ")" << std::endl);
+        }
       }
       else DEBUGMSG(" -> callee-saved register @ " << offset << " (size = "
                     << size << ")" << std::endl);
@@ -288,7 +295,7 @@ public:
 
       break;
     default:
-      DEBUGMSG("Invalid x86 restriction type: " << res.flags << std::endl);
+      DEBUGMSG("invalid x86 restriction type: " << res.flags << std::endl);
       code = ret_t::AnalysisFailed;
       break;
     }
@@ -383,15 +390,18 @@ public:
         curOffset = bottom.original;
       }
       else {
-        DEBUGMSG("Removing empty "
-                 << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
-                 << " region" << std::endl);
+        DEBUGMSG_VERBOSE("removing empty "
+                         << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
+                         << " region" << std::endl);
         regions.erase(regions.begin() + i);
       }
     }
 
     return code;
   }
+
+private:
+  uint32_t alignment;
 };
 
 RandomizedFunctionPtr
@@ -496,6 +506,9 @@ bool arch::getRestriction(instr_t *instr, opnd_t op, RandRestriction &res) {
 
   default: break;
   }
+
+  // TODO if moving YMM/ZMM registers to/from the stack, do we need to increase
+  // alignment to 32 or 64 bytes, respectively?
 
   if(opnd_is_base_disp(op)) {
     // Because x86-64 is so darn flexible, the compiler can encode

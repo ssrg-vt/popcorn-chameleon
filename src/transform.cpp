@@ -122,7 +122,7 @@ ret_t CodeTransformer::initialize() {
   ret_t retcode;
 
   if(batchedFaults != 1) {
-    DEBUGMSG("Currently can only handle 1 fault at a time" << std::endl);
+    DEBUGMSG("currently can only handle 1 fault at a time" << std::endl);
     return ret_t::InvalidTransformConfig;
   }
 
@@ -340,11 +340,8 @@ ret_t CodeTransformer::rewriteOperands(const RandomizedFunctionPtr &info,
     if(offset && info->transformOffset(offset)) {
       randOffset = info->getRandomizedOffset(offset);
       if(randOffset == INT32_MAX) {
-        DEBUG(
-          DEBUGMSG("Couldn't find slot for offset " << offset << " in ");
-          instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR);
-          DEBUGMSG_RAW(std::endl);
-        )
+        DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
+                       instr);
         return ret_t::BadMetadata;
       }
       randRegOffset = slotOffsetFromRegister(newFrameSize, type, randOffset);
@@ -352,8 +349,8 @@ ret_t CodeTransformer::rewriteOperands(const RandomizedFunctionPtr &info,
       SetOp(instr, i, op);
       changed = true;
 
-      DEBUGMSG(" -> remap stack offset " << offset << " -> " << randOffset
-               << std::endl);
+      DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
+                       << randOffset << std::endl);
     }
   }
 
@@ -365,7 +362,7 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
   bool doEncode, changed;
   int32_t update, offset, randOffset;
   uint32_t frameSize = arch::initialFrameSize(),
-           rewrittenFrameSize = arch::initialFrameSize(),
+           randFrameSize = arch::initialFrameSize(),
            count = 0;
   RandRestriction res;
   byte_iterator funcData = codeWindow.getData(func->addr);
@@ -376,14 +373,14 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
   ret_t code = ret_t::Success;
 
   if(funcData.getLength() < func->code_size) {
-    DEBUGMSG("Code length encoded in metadata larger than available size: "
+    DEBUGMSG("code length encoded in metadata larger than available size: "
              << funcData.getLength() << " vs. " << func->code_size
              << std::endl);
     return ret_t::BadMetadata;
   }
 
   if(!start) {
-    DEBUGMSG("Invalid code iterator" << std::endl);
+    DEBUGMSG("invalid code iterator" << std::endl);
     return ret_t::RandomizeFailed;
   }
 
@@ -396,6 +393,8 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
     start = decode(GLOBAL_DCONTEXT, start, instr);
     instrlist_append(instrs, instr);
 
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("", instr));
+
     code = analyzeOperands(info, frameSize, instr);
     if(code != ret_t::Success) goto out;
 
@@ -406,14 +405,9 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
     if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
       update = arch::getFrameUpdateSize(instr);
       if(update) {
-        DEBUG (
-          DEBUGMSG("");
-          instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR);
-          DEBUGMSG_RAW(std::endl);
-          DEBUGMSG(" -> stack pointer update: " << update
-                   << " (current size = " << frameSize + update << ")"
-                   << std::endl);
-        )
+        DEBUGMSG_VERBOSE(" -> stack pointer update: " << update
+                         << " (current size = " << frameSize + update << ")"
+                         << std::endl);
 
         if(arch::getRestriction(instr, res)) {
           // If growing the frame, the referenced slot includes the update
@@ -432,19 +426,19 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
   }
 
   if(frameSize != arch::initialFrameSize()) {
-    DEBUGMSG("Function at 0x" << std::hex << func->addr
-             << " does not clean up frame (not intended to return?)" << std::endl);
+    DEBUGMSG("function at 0x" << std::hex << func->addr
+             << " does not clean up frame (not intended to return?)"
+             << std::endl);
     frameSize = arch::initialFrameSize();
   }
 
-  DEBUG_VERBOSE(
-    DEBUGMSG_VERBOSE("");
-    instrlist_disassemble(GLOBAL_DCONTEXT, (app_pc)func->addr, instrs, STDERR);
-  )
+  DEBUGMSG_VERBOSE("randomizing function" << std::endl);
 
   // Randomize the function's layout according to the metadata
   code = info->randomize(rng(), slotPadding);
   if(code != ret_t::Success) goto out;
+
+  DEBUGMSG_VERBOSE("re-writing/re-assembling instructions" << std::endl);
 
   // Apply the randomization by rewriting instructions
   instr = instrlist_first(instrs);
@@ -452,12 +446,14 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
   while(instr) {
     changed = false;
 
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("", instr));
+
     // Rewrite stack slot reference operands to their randomized locations
     code = rewriteOperands<instr_num_srcs, instr_get_src, instr_set_src>
-                          (info, frameSize, rewrittenFrameSize, instr, changed);
+                          (info, frameSize, randFrameSize, instr, changed);
     if(code != ret_t::Success) goto out;
     code = rewriteOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
-                          (info, frameSize, rewrittenFrameSize, instr, changed);
+                          (info, frameSize, randFrameSize, instr, changed);
     if(code != ret_t::Success) goto out;
 
     // Keep track of stack pointer updates & rewrite frame update instructions
@@ -468,42 +464,38 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
         offset = (update > 0) ? update : 0;
         offset = canonicalizeSlotOffset(frameSize + offset,
                                         arch::RegType::StackPointer, 0);
-        if(info->transformBulkFrameUpdate(offset)) {
-          assert((-offset) <= func->frame_size);
+        if(info->transformBulkFrameUpdate(offset) &&
+           abs(offset) <= func->frame_size) {
           offset = info->getRandomizedBulkFrameUpdate();
           offset = update > 0 ? offset : -offset;
           code = arch::rewriteFrameUpdate(instr, offset, changed);
           if(code != ret_t::Success) goto out;
-          rewrittenFrameSize += offset;
+          randFrameSize += offset;
 
-          DEBUGMSG(" -> rewrite frame update: " << update << " -> " << offset
-                   << std::endl);
+          DEBUGMSG_VERBOSE(" -> rewrite frame update: " << update << " -> "
+                           << offset << std::endl);
         }
-        else rewrittenFrameSize += update;
+        else randFrameSize += update;
         frameSize += update;
       }
     }
 
     if(changed) {
       count++;
-      DEBUG(
-        DEBUGMSG(" -> rewrote: ");
-        instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR);
-        DEBUGMSG_RAW(std::endl);
-      )
+      DEBUG_VERBOSE(DEBUGMSG_INSTR(" -> rewrote: ", instr));
     }
 
     doEncode |= changed;
     instr = instr_get_next(instr);
   }
 
-  DEBUGMSG("Rewrote " << count << " instruction(s)" << std::endl);
+  DEBUGMSG("rewrote " << count << " instruction(s)" << std::endl);
 
   if(doEncode) {
     // TODO should has_instr_jmp_targets (last argument) be true?
     start = instrlist_encode(GLOBAL_DCONTEXT, instrs, funcData[0], false);
     if(!start || start != end) {
-      DEBUGMSG("Expected end = " << std::hex << (void *)end << " but got "
+      DEBUGMSG("expected end = " << std::hex << (void *)end << " but got "
                << (void *)start << std::endl);
       code = ret_t::RandomizeFailed;
     }
@@ -541,7 +533,7 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   len = secStart - curAddr;
   if(len > 0) {
     if(binary.getRemainingFileSize(curAddr, codeSegment) <= len) {
-      WARN("invalid file format - found holes in segment" << std::endl);
+      WARN("Invalid file format - found holes in segment" << std::endl);
       return ret_t::InvalidElf;
     }
     data = binary.getData(curAddr, codeSegment);
@@ -550,7 +542,7 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
     codeWindow.insert(r);
   }
   else if(len != 0) {
-    WARN("invalid file format - segment start address is after code section "
+    WARN("Invalid file format - segment start address is after code section "
          "start address" << std::endl);
     return ret_t::InvalidElf;
   }
@@ -559,7 +551,7 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   len = codeSection.size();
   filelen = binary.getRemainingFileSize(secStart, codeSegment);
   if(filelen < len)
-    WARN("code section on-disk smaller than in-memory representation ("
+    WARN("Code section on-disk smaller than in-memory representation ("
          << filelen << " vs " << codeSection.size() << " bytes)" << std::endl);
   data = binary.getData(secStart, codeSegment);
   if(!data) return ret_t::MarshalDataFailed;
@@ -580,7 +572,7 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   for(; !it.end(); ++it) {
     const function_record *func = *it;
 
-    DEBUGMSG("Randomizing function @ " << std::hex << func->addr << ", size = "
+    DEBUGMSG("randomizing function @ " << std::hex << func->addr << ", size = "
              << std::dec << func->code_size << std::endl);
 
     RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);

@@ -38,6 +38,12 @@ extern pid_t masterPID;
   } while(0);
 # define DEBUGMSG_RAW( ... ) \
   do { std::cerr << __VA_ARGS__ << std::dec; } while(0);
+# define DEBUGMSG_INSTR( msg, instr ) \
+  do { \
+    DEBUGMSG(msg); \
+    instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR); \
+    DEBUGMSG_RAW(std::endl); \
+  } while(0);
 
 /* Functionality to be executed only in debug builds */
 # define DEBUG( ... ) do { __VA_ARGS__; } while(0);
@@ -50,6 +56,7 @@ extern bool verboseDebug;
 #else
 # define DEBUGMSG( ... ) {}
 # define DEBUGMSG_RAW( ... ) {}
+# define DEBUGMSG_INSTR( instr ) {}
 # define DEBUG( ... ) {}
 # define DEBUGMSG_VERBOSE( ... ) {}
 # define DEBUGMSG_VERBOSE_RAW( ... ) {}

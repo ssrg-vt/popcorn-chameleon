@@ -30,14 +30,15 @@ ret_t Binary::Section::initialize(Elf *elf,
   else entrySize = numEntries = 0;
   if(!(data = elf_getdata(section, nullptr))) return ret_t::ElfReadError;
 
-  DEBUGMSG("Section '" << name << "':" << std::endl);
-  DEBUGMSG("  Address: 0x" << std::hex << header.sh_addr << std::endl);
-  DEBUGMSG("  File offset: 0x" << std::hex << header.sh_offset << std::endl);
-  DEBUGMSG("  Size: " << header.sh_size << " bytes" << std::endl);
-  DEBUG(
+  DEBUGMSG_VERBOSE("Section '" << name << "':" << std::endl);
+  DEBUGMSG_VERBOSE("  Address: 0x" << std::hex << header.sh_addr << std::endl);
+  DEBUGMSG_VERBOSE("  File offset: 0x" << std::hex << header.sh_offset
+                   << std::endl);
+  DEBUGMSG_VERBOSE("  Size: " << header.sh_size << " bytes" << std::endl);
+  DEBUG_VERBOSE(
     if(this->entrySize)
-      DEBUGMSG("  Entries: " << numEntries << " (size = " << entrySize
-               << " bytes)" << std::endl);
+      DEBUGMSG_VERBOSE("  Entries: " << numEntries << " (size = " << entrySize
+                       << " bytes)" << std::endl);
   )
 
   return ret_t::Success;
@@ -81,15 +82,19 @@ static bool initializeSegments(Elf *e, std::vector<Binary::Segment> &segments) {
     if(gelf_getphdr(e, i, &header) != &header) return false;
     segments.emplace_back(header);
 
-    DEBUGMSG("Segment " << i << ":" << std::endl);
-    DEBUGMSG("  Address: 0x" << std::hex << segments[i].address()
-             << std::endl);
-    DEBUGMSG("  File offset: 0x" << segments[i].fileOffset() << std::endl);
-    DEBUGMSG("  File size: " << std::dec << segments[i].fileSize()
-             << std::endl);
-    DEBUGMSG("  Memory size: " << segments[i].memorySize() << std::endl);
-    DEBUGMSG("  Type: 0x" << std::hex << segments[i].type() << std::endl);
-    DEBUGMSG("  Flags: 0x" << std::hex << segments[i].flags() << std::endl);
+    DEBUGMSG_VERBOSE("Segment " << i << ":" << std::endl);
+    DEBUGMSG_VERBOSE("  Address: 0x" << std::hex << segments[i].address()
+                     << std::endl);
+    DEBUGMSG_VERBOSE("  File offset: 0x" << segments[i].fileOffset()
+                     << std::endl);
+    DEBUGMSG_VERBOSE("  File size: " << std::dec << segments[i].fileSize()
+                     << std::endl);
+    DEBUGMSG_VERBOSE("  Memory size: " << segments[i].memorySize()
+                     << std::endl);
+    DEBUGMSG_VERBOSE("  Type: 0x" << std::hex << segments[i].type()
+                     << std::endl);
+    DEBUGMSG_VERBOSE("  Flags: 0x" << std::hex << segments[i].flags()
+                     << std::endl);
   }
 
   return true;
@@ -296,7 +301,7 @@ static inline it getIterator(const Binary::EntrySection<T> &section,
   ssize_t entries = section.getNumEntries(), remaining = entries - offset;
   if(remaining <= 0) return it(nullptr, 0);
   if(remaining < num)
-    WARN("function record indicated more entries than available" << std::endl);
+    WARN("Function record indicated more entries than available" << std::endl);
   entries = std::min<ssize_t>(remaining, num);
   return it(&section.getEntries()[offset], entries);
 }

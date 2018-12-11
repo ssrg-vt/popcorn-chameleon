@@ -52,6 +52,17 @@ static bool slotMapCmp(const SlotMap &a, const SlotMap &b)
 { return a.original < b.original; }
 
 /**
+ * Comparison function for sorting a SlotMap.  Searches based on the original
+ * offset in a reverse ordering, i.e., higher offsets first.
+ *
+ * @param first slot mapping
+ * @param second slot mapping
+ * @return true if a's first element is greater than b's first element
+ */
+static bool slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
+{ return a.original > b.original; }
+
+/**
  * Return whether the SlotMap contains a given offset.  Uses the slot's
  * original offset.
  *
@@ -78,6 +89,9 @@ static bool lessThanSlotMap(const SlotMap *slot, int offset)
 // Randomization utilities
 ///////////////////////////////////////////////////////////////////////////////
 
+/**
+ * A bunch of randomization utilities bundled in an object for easy access.
+ */
 struct RandUtil {
   /*
    * Random number generator.  Because we may generate a large number of
@@ -129,6 +143,13 @@ public:
    * Sort the slots so they can be searched.
    */
   void sortSlots() { std::sort(slots.begin(), slots.end(), slotMapCmp); }
+
+  /**
+   * Sort the slots in reverse ordering.  Note that they *must* be re-sorted
+   * using sortSlots() to be searchable!
+   */
+  void sortSlotsReverse()
+  { std::sort(slots.begin(), slots.end(), slotMapCmpReverse); }
 
   /**
    * Randomize the slots in a region.  Calculates the new offset & size.
@@ -230,6 +251,8 @@ public:
  * randomizable) but no padding can be added between slots.  This means that
  * the randomized version of the section has the same (or less) size as the
  * original region.
+ *
+ * Note: the current implementation assumes power-of-2 alignments!
  */
 class PermutableRegion : public StackRegion {
 public:
@@ -291,6 +314,12 @@ class RandomizedFunction {
 public:
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary, const function_record *func);
+
+  /**
+   * Get alignment requirements for the frame.
+   * @return frame alignment requirements
+   */
+  virtual uint32_t getFrameAlignment() const = 0;
 
   /**
    * Add a randomization restriction for a given slot.

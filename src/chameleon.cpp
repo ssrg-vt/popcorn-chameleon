@@ -129,6 +129,7 @@ int main(int argc, char **argv) {
       INFO("child exited with code " << child.getExitCode() << endl);
       break;
     case Process::SignalExit:
+      // TODO dump the instruction at which the child exited
       INFO("child terminated with signal " << child.getSignal() << endl);
       break;
     }

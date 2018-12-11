@@ -103,7 +103,7 @@ MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {
       address += len;
     }
     else if(len < 0 && r != start) {
-      WARN("overlapping memory regions in window" << std::endl);
+      WARN("Overlapping memory regions in window" << std::endl);
       return ret_t::BadMarshal;
     }
 
