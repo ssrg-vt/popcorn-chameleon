@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "arch.h"
 #include "log.h"
 #include "randomize.h"
 #include "transform.h"
@@ -34,31 +35,8 @@ void StackRegion::addSlot(int offset, uint32_t size, uint32_t alignment) {
   slots.emplace_back(std::move(newSlot));
 }
 
-int StackRegion::getRandomizedOffset(int orig) {
-  int offset = INT32_MAX;
-  ssize_t idx = findRight<SlotMap, int, slotMapContains, lessThanSlotMap>
-                         (&slots[0], slots.size(), orig);
-  if(idx >= 0 && slotMapContains(&slots[idx], orig))
-    offset = orig - slots[idx].original + slots[idx].randomized;
-  return offset;
-}
-
-/**
- * Calculate randomized slot offsets and add padding by calling the provided
- * template function.
- *
- * @template Pad an object that implements the slotPadding() function which
- *           returns an integer amount of padding to add between slots
- * @param slots vector of randomized slots
- * @param startIdx the index into the vector at which to start calculating
- * @param startOffset the starting offset
- * @return the randomized offset of the last stack slot
- */
 template<typename Pad>
-static inline int calculateOffsets(std::vector<SlotMap> &slots,
-                                   size_t startIdx,
-                                   int startOffset,
-                                   Pad &pad) {
+int StackRegion::calculateOffsets(size_t startIdx, int startOffset, Pad &pad) {
   startOffset = abs(startOffset);
   for(size_t i = startIdx; i < slots.size(); i++) {
     startOffset = ROUND_UP(startOffset + slots[i].size + pad.slotPadding(),
@@ -68,14 +46,20 @@ static inline int calculateOffsets(std::vector<SlotMap> &slots,
   return -startOffset;
 }
 
-/* Class which returns a zero for slot padding. */
-struct ZeroPad { int slotPadding() { return 0; } };
+int StackRegion::getRandomizedOffset(int orig) {
+  int offset = INT32_MAX;
+  ssize_t idx = findRight<SlotMap, int, slotMapContains, lessThanSlotMap>
+                         (&slots[0], slots.size(), orig);
+  if(idx >= 0 && slotMapContains(&slots[idx], orig))
+    offset = orig - slots[idx].original + slots[idx].randomized;
+  return offset;
+}
 
 void ImmutableRegion::randomize(int start, RandUtil &ru) {
   ZeroPad pad;
 
   sortSlotsReverse();
-  randomizedOffset = calculateOffsets<ZeroPad>(slots, 0, start, pad);
+  randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
   randomizedSize = origSize;
 
   DEBUG_VERBOSE(
@@ -265,7 +249,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   for(auto &bucket : buckets)
     for(auto slot = bucket.slots.rbegin(); slot != bucket.slots.rend(); slot++)
       if(slot->original != 0) slots.emplace_back(*slot);
-  randomizedOffset = calculateOffsets<ZeroPad>(slots, 0, start, pad);
+  randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
 
   // If permutation failed, resort to original ordering
   if(randomizedOffset < origOffset) {
@@ -299,7 +283,7 @@ void RandomizableRegion::randomize(int start, RandUtil &ru) {
 
   // Randomize slots with padding
   std::shuffle(slots.begin(), slots.end(), ru.gen);
-  curOffset = calculateOffsets<RandUtil>(slots, 0, start, ru);
+  curOffset = calculateOffsets<RandUtil>(0, start, ru);
 
   DEBUG_VERBOSE(
     DEBUGMSG_VERBOSE("randomized slots:" << std::endl);

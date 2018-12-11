@@ -10,6 +10,7 @@ const char *chameleon::retText(ret_t retcode) {
   BINARY_RETCODES
   PROCESS_RETCODES
   TRANSFORM_RETCODES
+  MISC_RETCODES
 #undef X
   }
 }

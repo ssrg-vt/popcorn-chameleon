@@ -152,10 +152,22 @@ public:
   { std::sort(slots.begin(), slots.end(), slotMapCmpReverse); }
 
   /**
+   * Calculate randomized slot offsets and add padding by calling the provided
+   * template function.
+   *
+   * @template Pad an object that implements the slotPadding() function which
+   *           returns an integer amount of padding to add between slots
+   * @param startIdx the index into the vector at which to start calculating
+   * @param startOffset the starting offset
+   * @return the randomized offset of the last stack slot
+   */
+  template<typename Pad>
+  int calculateOffsets(size_t startIdx, int startOffset, Pad &pad);
+
+  /**
    * Randomize the slots in a region.  Calculates the new offset & size.
    * @param start the starting offset of the region
    * @param ru a random number generator
-   * @return a return code describing the outcome
    */
   virtual void randomize(int start, RandUtil &ru) = 0;
 
@@ -218,6 +230,11 @@ protected:
 typedef std::unique_ptr<StackRegion> StackRegionPtr;
 
 /**
+ * Calss which returns a zero for slot padding.
+ */
+struct ZeroPad { int slotPadding() { return 0; } };
+
+/**
  * Stack region comparison function for sorting.  Sort by original offset.
  * @param a first stack region
  * @param b second stack region
@@ -241,7 +258,6 @@ public:
    *
    * @param start the starting offset of the region
    * @param ru a random number generator
-   * @return a return code describing the outcome
    */
   virtual void randomize(int start, RandUtil &ru) override;
 };
@@ -265,7 +281,6 @@ public:
    *
    * @param start the starting offset of the region
    * @param ru a random number generator
-   * @return a return code describing the outcome
    */
   virtual void randomize(int start, RandUtil &ru) override;
 };
@@ -284,7 +299,6 @@ public:
    *
    * @param start the starting offset of the region
    * @param ru a random number generator
-   * @return a return code describing the outcome
    */
   virtual void randomize(int start, RandUtil &ru) override;
 };
@@ -388,6 +402,21 @@ public:
    *         doesn't correspond to any stack slot
    */
   int getRandomizedOffset(int orig) const;
+
+  /**
+   * Hook to allow ISA-specific implementations to do any other transformations
+   * not captured by replacing memory reference operands.
+   *
+   * @param frameSize current frame size
+   * @param randFrameSize current randomized frame size
+   * @param instr an instruction
+   * @param changed output argument set to true if the instruction was changed
+   * @return a return code describing the outcome
+   */
+  virtual ret_t transformInstr(uint32_t frameSize,
+                               uint32_t randFrameSize,
+                               instr_t *instr,
+                               bool &changed) const {}
 
 protected:
   /* Binary & function metadata */

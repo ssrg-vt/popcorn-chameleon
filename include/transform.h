@@ -184,7 +184,7 @@ private:
    * @template SetOp function to set an operand
    * @param info randomization information for a function
    * @param frameSize currently calculated original frame size
-   * @param newFrameSize currently calculated rewritten frame size
+   * @param randFrameSize currently calculated randomized frame size
    * @param instr an instruction
    * @param changed output argument set to true if instruction was changed
    * @return a return code describing the outcome
@@ -194,7 +194,7 @@ private:
            void (*SetOp)(instr_t *, unsigned, opnd_t)>
   ret_t rewriteOperands(const RandomizedFunctionPtr &info,
                         uint32_t frameSize,
-                        uint32_t newFrameSize,
+                        uint32_t randFrameSize,
                         instr_t *instr,
                         bool &changed);
 

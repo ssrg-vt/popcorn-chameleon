@@ -326,7 +326,7 @@ template<int (*NumOp)(instr_t *),
          void (*SetOp)(instr_t *, unsigned, opnd_t)>
 ret_t CodeTransformer::rewriteOperands(const RandomizedFunctionPtr &info,
                                        uint32_t frameSize,
-                                       uint32_t newFrameSize,
+                                       uint32_t randFrameSize,
                                        instr_t *instr,
                                        bool &changed) {
   size_t i;
@@ -344,7 +344,7 @@ ret_t CodeTransformer::rewriteOperands(const RandomizedFunctionPtr &info,
                        instr);
         return ret_t::BadMetadata;
       }
-      randRegOffset = slotOffsetFromRegister(newFrameSize, type, randOffset);
+      randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
       opnd_set_disp_ex(&op, randRegOffset, false, false, false);
       SetOp(instr, i, op);
       changed = true;
@@ -456,6 +456,10 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
                           (info, frameSize, randFrameSize, instr, changed);
     if(code != ret_t::Success) goto out;
 
+    // Allow each ISA-specific randomized function have its way
+    code = info->transformInstr(frameSize, randFrameSize, instr, changed);
+    if(code != ret_t::Success) goto out;
+
     // Keep track of stack pointer updates & rewrite frame update instructions
     // with randomized size
     if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
@@ -513,6 +517,7 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
   const void *data;
   ret_t code;
   MemoryRegionPtr r;
+  Timer t;
 
   // First order of business - set up the memory window to handle page faults.
   // Note: by construction of how we're adding regions we don't need to call
@@ -578,9 +583,18 @@ ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
     RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);
     RandomizedFunctionMap::iterator it =
       funcMaps.emplace(func->addr, std::move(info)).first;
+
+    t.start();
     code = rewriteFunction(func, it->second);
     if(code != ret_t::Success) return code;
+    t.end(true);
+
+    DEBUGMSG_VERBOSE("randomizing function took " << t.elapsed(Timer::Micro)
+                     << " us" << std::endl);
   }
+
+  INFO("Randomization time: " << t.totalElapsed(Timer::Micro) << " us"
+       << std::endl);
 
   return ret_t::Success;
 }

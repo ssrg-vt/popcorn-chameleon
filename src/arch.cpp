@@ -22,6 +22,45 @@ enum arch::RegType arch::getRegType(uint16_t reg) {
   }
 }
 
+const char *arch::getRegName(uint16_t reg) {
+  switch(reg) {
+  case RAX: return "rax";
+  case RDX: return "rdx";
+  case RCX: return "rcx";
+  case RBX: return "rbx";
+  case RSI: return "rsi";
+  case RDI: return "rdi";
+  case RBP: return "rbp";
+  case RSP: return "rsp";
+  case R8: return "r8";
+  case R9: return "r9";
+  case R10: return "r10";
+  case R11: return "r11";
+  case R12: return "r12";
+  case R13: return "r13";
+  case R14: return "r14";
+  case R15: return "r15";
+  case RIP: return "rip";
+  case XMM0: return "xmm0";
+  case XMM1: return "xmm1";
+  case XMM2: return "xmm2";
+  case XMM3: return "xmm3";
+  case XMM4: return "xmm4";
+  case XMM5: return "xmm5";
+  case XMM6: return "xmm6";
+  case XMM7: return "xmm7";
+  case XMM8: return "xmm8";
+  case XMM9: return "xmm9";
+  case XMM10: return "xmm10";
+  case XMM11: return "xmm11";
+  case XMM12: return "xmm12";
+  case XMM13: return "xmm13";
+  case XMM14: return "xmm14";
+  case XMM15: return "xmm15";
+  default: return "unknown";
+  }
+}
+
 uint16_t arch::getCalleeSaveSize(uint16_t reg) {
   switch(reg) {
   case RBX: case RBP: case R12: case R13: case R14: case R15: case RIP:
@@ -146,6 +185,113 @@ const char *x86RegionName[] {
   "callee-save",
 };
 
+/**
+ * Region for x86's callee-saved register stack region.  Permutes the order in
+ * which registers are pushed/popped in the function's prologue/epilogue.
+ */
+class x86CalleeSaveRegion : public StackRegion {
+public:
+  /* Location at which a register is saved */
+  typedef std::pair<int, uint16_t> RegOffset;
+
+  x86CalleeSaveRegion(int32_t flags) : StackRegion(flags) {}
+
+  /**
+   * Add mapping between callee-saved register and its save location.
+   * @param offset a canonicalized offset
+   * @param reg the register saved at the offset
+   */
+  void addRegisterSaveLoc(int offset, uint16_t reg)
+  { registerLocs.emplace_back(offset, reg); }
+
+  /**
+   * Comparison function used to sort register save locations; sorts offsets
+   * similarly to slotMapCmp().
+   *
+   * @param a first RegOffset
+   * @param b second RegOffset
+   * @return true if a comes before b in a sorted ordering of register save
+   *         locations or false otherwise
+   */
+  static bool locCmp(const RegOffset &a, const RegOffset &b)
+  { return a.first < b.first; }
+
+  /**
+   * Sort register save locations.  *Must* match 1:1 with slots vector so when
+   * looking up stack offset we can use the same index to find which register
+   * is saved at the offset.
+   */
+  void sortRegisterSaveLocs()
+  { std::sort(registerLocs.begin(), registerLocs.end(), locCmp); }
+
+  /**
+   * Randomize the order callee-saved registers are pushed/popped from the
+   * stack.
+   *
+   * @param start the starting offset of the region
+   * @param ru a random number generator
+   * @return a return code describing the outcome
+   */
+  virtual void randomize(int start, RandUtil &ru) override {
+    size_t i;
+    ZeroPad pad;
+
+    // We can't randomize the return address or saved RBP location; move them
+    // to the front and randomize the remaining locations.
+    sortSlotsReverse();
+    std::shuffle(slots.begin() + 2, slots.end(), ru.gen);
+    randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
+    randomizedSize = origSize;
+    sortSlots();
+    sortRegisterSaveLocs();
+
+    DEBUG_VERBOSE(
+      DEBUGMSG_VERBOSE("permuted callee-save slots:" << std::endl);
+      for(i = 0; i < slots.size(); i++) {
+        DEBUGMSG_VERBOSE("  " << slots[i].original << " ("
+                         << arch::getRegName(registerLocs[i].second) << ") -> "
+                         << slots[i].randomized << std::endl);
+      }
+    )
+  }
+
+  /**
+   * Get the register to be saved at a particular slot after randomization.
+   * @param offset a canonicalized stack offset
+   * @return the DynamoRIO register ID of the register to be saved
+   */
+  reg_id_t getRandomizedCalleeSaveReg(int offset) const {
+    size_t i;
+    // TODO randomize() sorts registers by original offset, but we need to
+    // search by randomized offset; sort by randomized offset instead?
+    for(i = 0; i < slots.size(); i++)
+      if(slots[i].randomized == offset)
+        return dwarfToDR(registerLocs[i].second);
+    return DR_REG_NULL;
+  }
+
+private:
+  std::vector<RegOffset> registerLocs;
+
+  /**
+   * Return the DynamoRIO register ID corresponding to a DWARF-encoded
+   * register ID.
+   * @param dwarf dwarf-encoded register ID
+   * @return corresponding DynamoRIO register ID
+   */
+  static reg_id_t dwarfToDR(uint16_t dwarf) {
+    switch(dwarf) {
+    default: return DR_REG_NULL;
+    case RBX: return DR_REG_XBX;
+    case RBP: return DR_REG_XBP;
+    case R12: return DR_REG_R12;
+    case R13: return DR_REG_R13;
+    case R14: return DR_REG_R14;
+    case R15: return DR_REG_R15;
+    }
+  }
+};
+
 #define REGION_TYPE( flags ) (flags & 0xf)
 
 /**
@@ -197,10 +343,8 @@ public:
     size_t size, regionSize = 0;
 
     // Add the callee-save slots to the callee-save area
-    // TODO create an x86-specific permutation region which can modify the
-    // prologue/epilogue created via pushing/popping registers
     Binary::unwind_iterator ui = binary.getUnwindLocations(func);
-    StackRegionPtr csr(new ImmutableRegion(x86Region::R_CalleeSave));
+    x86CalleeSaveRegion *cs = new x86CalleeSaveRegion(x86Region::R_CalleeSave);
     for(; !ui.end(); ++ui) {
       // Note: currently all unwind locations are encoded as offsets from the
       // frame base pointer
@@ -210,11 +354,12 @@ public:
         CodeTransformer::canonicalizeSlotOffset(func->frame_size,
                                                 arch::RegType::FramePointer,
                                                 loc->offset);
-      csr->addSlot(offset, size, size);
+      cs->addSlot(offset, size, size);
+      cs->addRegisterSaveLoc(offset, loc->reg);
       regionSize += size;
     }
-    csr->setRegionOffset(-regionSize);
-    csr->setRegionSize(regionSize);
+    cs->setRegionOffset(-regionSize);
+    cs->setRegionSize(regionSize);
 
     // Add x86-specific regions ordered by lowest stack address first.
     // TODO is it possible to have immovable stack slots interspersed with
@@ -224,7 +369,7 @@ public:
     regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
     regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
-    regions.push_back(std::move(csr));
+    regions.push_back(StackRegionPtr(cs));
   }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
@@ -357,6 +502,29 @@ public:
     return false;
   }
 
+  virtual ret_t transformInstr(uint32_t frameSize,
+                               uint32_t randFrameSize,
+                               instr_t *instr,
+                               bool &changed) const override {
+    ret_t code = ret_t::Success;
+
+    // Note: frameSize does *not* include push/pop update
+    switch(instr_get_opcode(instr)) {
+    case OP_push:
+      code = swapCalleeSaveReg<instr_get_src, instr_set_src>
+                              (frameSize, instr, -8, changed);
+      break;
+    case OP_pop:
+      code = swapCalleeSaveReg<instr_get_dst, instr_set_dst>
+                              (frameSize, instr, 0, changed);
+      break;
+    default: break;
+    }
+
+    return code;
+  }
+
+protected:
   virtual ret_t populateSlots() override {
     int curOffset = 0;
     ssize_t i;
@@ -402,6 +570,48 @@ public:
 
 private:
   uint32_t alignment;
+
+  /**
+   * Rewrite prologue/epilogue push/pop sequences according to the randomized
+   * callee-save register area.
+   *
+   * @template GetOp function to get an operand
+   * @template SetOp function to set an operand
+   * @param frameSize currently calculated original frame size
+   * @param instr an instruction
+   * @param offset a canonicalized stack slot offset
+   * @param changed output argument set to true if instruction was changed
+   */
+  template<opnd_t (*GetOp)(instr_t *, unsigned),
+           void (*SetOp)(instr_t *, unsigned, opnd_t)>
+  ret_t swapCalleeSaveReg(uint32_t frameSize,
+                          instr_t *instr,
+                          int offset,
+                          bool &changed) const {
+    const StackRegionPtr *region;
+    const x86CalleeSaveRegion *cs;
+    reg_id_t randReg;
+    opnd_t op;
+
+    offset =
+      CodeTransformer::canonicalizeSlotOffset(frameSize,
+                                              arch::RegType::StackPointer,
+                                              offset);
+    region = findRegion(offset);
+    if(region && REGION_TYPE((*region)->getFlags()) == x86Region::R_CalleeSave) {
+      assert(opnd_is_reg(GetOp(instr, 0)) && "Invalid push or pop");
+      cs = static_cast<const x86CalleeSaveRegion *>((*region).get());
+      randReg = cs->getRandomizedCalleeSaveReg(offset);
+      if(randReg == DR_REG_NULL) return ret_t::BadMetadata;
+      else if(randReg != DR_REG_XBP) {
+        op = opnd_create_reg(randReg);
+        SetOp(instr, 0, op);
+        changed = true;
+      }
+    }
+
+    return ret_t::Success;
+  }
 };
 
 RandomizedFunctionPtr

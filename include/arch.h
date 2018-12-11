@@ -43,6 +43,13 @@ enum RegType {
 enum RegType getRegType(uint16_t reg);
 
 /**
+ * Get human-readable name for a register.
+ * @param reg register encoded in the ISA's DWARF debugging register format
+ * @return the register name
+ */
+const char *getRegName(uint16_t reg);
+
+/**
  * Return the size in bytes of a callee-saved register.
  * @param reg register encoded in the ISA's DWARF debugging register format
  * @return size in bytes of the amount of callee-save space used for reg

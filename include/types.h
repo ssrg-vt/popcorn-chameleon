@@ -11,6 +11,7 @@
 #include <utility>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 
 namespace chameleon {
 
@@ -50,12 +51,17 @@ namespace chameleon {
   X(MarshalDataFailed, "failed to marshal data to handle fault") \
   X(BadMarshal, "invalid view of memory, found overlapping regions")
 
+/* Other miscellaneous error codes */
+#define MISC_RETCODES \
+  X(NoTimestamp, "could not get timestamp")
+
 enum ret_t {
   Success = 0,
 #define X(code, desc) code, 
   BINARY_RETCODES
   PROCESS_RETCODES
   TRANSFORM_RETCODES
+  MISC_RETCODES
 #undef X
 };
 
@@ -94,6 +100,100 @@ typedef iterator<unsigned char> byte_iterator;
 
 /* A range of values.  The first element *must* be smaller than the second. */
 typedef std::pair<int64_t, int64_t> range_t;
+
+/**
+ * Timer utility for measuring execution times.
+ */
+class Timer {
+public:
+  /* Unit of elapsed time. */
+  enum Unit {
+    Nano,
+    Micro,
+    Milli,
+    Second,
+  };
+
+  Timer() : s(0), e(0), accum(0) {}
+
+  /**
+   * Convert a struct timespec to nanoseconds.
+   * @param ts a struct timespec
+   * @return time in nanoseconds
+   */
+  static uint64_t timespecToNano(struct timespec &ts)
+  { return (ts.tv_sec * 1000000000ULL) + ts.tv_nsec; }
+
+  /**
+   * Get a timestamp in nanoseconds.
+   * @return timestamp in nanoseconds or UINT64_MAX if timestamp API failed
+   */
+  static uint64_t timestamp() {
+    struct timespec ts;
+    if(clock_gettime(CLOCK_MONOTONIC, &ts) == -1) return UINT64_MAX;
+    else return timespecToNano(ts);
+  }
+
+  /**
+   * Take a starting timestamp.
+   * @return a return code describing the outcome
+   */
+  ret_t start() {
+    s = timestamp();
+    return s != UINT64_MAX ? ret_t::Success : ret_t::NoTimestamp;
+  }
+
+  /**
+   * Take an ending timestamp & accumulate elapsed time if requested.  Users
+   * should have already called start(), otherwise subsequent calls to the
+   * timer (or accumulations) may return garbage.
+   *
+   * @param doAccumulate whether or not to accumulate elapsed time
+   * @return a return code describing the outcome
+   */
+  ret_t end(bool doAccumulate = false) {
+    e = timestamp();
+    if(e != UINT64_MAX) {
+      if(doAccumulate) accum = e - s;
+      return ret_t::Success;
+    }
+    else return ret_t::NoTimestamp;
+  }
+
+  /**
+   * Convert elapsed time in nanoseconds to another unit.
+   * @param nano elapsed time in nanoseconds
+   * @param unit preferred unit type
+   * @return elapsed time in new units
+   */
+  static uint64_t toUnit(uint64_t nano, Unit unit) {
+    switch(unit) {
+    default: /* fall through */
+    case Nano: return nano;
+    case Micro: return nano / 1000ULL;
+    case Milli: return nano / 1000000ULL;
+    case Second: return nano / 1000000000ULL;
+    }
+  }
+
+  /**
+   * Return the time elapased between calls to start() and end().
+   * @param u preferred unit type
+   * @return elapsed time in nanoseconds
+   */
+  uint64_t elapsed(Unit u) { return toUnit(e - s, u); }
+
+  /**
+   * Return the total elapsed time from all calls to elapsed().
+   * @param u preferred unit type
+   * @return total elapsed time in nanoseconds
+   */
+  uint64_t totalElapsed(Unit u) { return toUnit(accum, u); }
+
+private:
+  uint64_t s, e;  /* starting & ending timestamps */
+  uint64_t accum; /* accumulated time */
+};
 
 }
 
