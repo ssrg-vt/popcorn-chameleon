@@ -29,6 +29,9 @@ extern pid_t masterPID;
                  << __VA_ARGS__; exit(1); } while(0);
 
 #ifndef NDEBUG
+/* I can't ever remember how to use NDEBUG, define an easier-to-use macro */
+#define DEBUG_BUILD 1
+
 /* Debug printing */
 # define DEBUGMSG( ... ) \
   do { \

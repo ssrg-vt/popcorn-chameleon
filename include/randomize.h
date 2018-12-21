@@ -328,6 +328,8 @@ class RandomizedFunction {
 public:
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary, const function_record *func);
+  ~RandomizedFunction()
+  {  if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
    * Get alignment requirements for the frame.
@@ -336,12 +338,36 @@ public:
   virtual uint32_t getFrameAlignment() const = 0;
 
   /**
+   * Get the function's metadata record.
+   * @return the function record
+   */
+  const function_record *getFunctionRecord() const { return func; }
+
+  /**
+   * Get & set the function's instructions.  After setting the instruction
+   * list, the RandomizedFunction takes ownership of the list & contained
+   * instructions.  Users can modify the instructions (including
+   * adding/removing instructions) but *must not* delete the list itself.
+   */
+  const instrlist_t *getInstructions() const { return instrs; }
+  instrlist_t *getInstructions() { return instrs; }
+  void setInstructions(instrlist_t *instrs) { this->instrs = instrs; }
+
+  /**
    * Add a randomization restriction for a given slot.
    * @param offset a canonicalized stack offset
    * @param res restriction information about the slot
    * @return a return code describing the outcome
    */
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
+
+  /**
+   * Populate stack regions with stack slots from metadata after analyzing
+   * restrictions.  Just to emphasize, this should be called *after* analysis.
+   *
+   * @return a return code describing the outcome
+   */
+  virtual ret_t populateSlots() = 0;
 
   /**
    * Randomize a function.  If it was previously randomized, drop all previous
@@ -416,12 +442,15 @@ public:
   virtual ret_t transformInstr(uint32_t frameSize,
                                uint32_t randFrameSize,
                                instr_t *instr,
-                               bool &changed) const {}
+                               bool &changed) const { return ret_t::Success; }
 
 protected:
   /* Binary & function metadata */
   const Binary &binary;
   const function_record *func;
+
+  /* Disassembled instructions */
+  instrlist_t *instrs;
 
   /*
    * Canonicalized slots from metadata for searching.  Randomized versions of
@@ -455,12 +484,6 @@ protected:
    */
   StackRegionPtr *findRegion(int offset);
   const StackRegionPtr *findRegion(int offset) const;
-
-  /**
-   * Populate stack regions with stack slots from metadata after analyzing
-   * restrictions.
-   */
-  virtual ret_t populateSlots() = 0;
 };
 
 typedef std::unique_ptr<RandomizedFunction> RandomizedFunctionPtr;

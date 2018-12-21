@@ -19,7 +19,7 @@ size_t FileRegion::populate(uintptr_t address,
   curLen = fileLen - regOffset;
   if(curLen > 0) {
     copyLen = std::min<size_t>(buffer.size() - offset, curLen);
-    memcpy(&buffer[offset], (char *)data + regOffset, copyLen);
+    memcpy(&buffer[offset], *data + regOffset, copyLen);
     offset += curLen;
   }
 
@@ -33,11 +33,12 @@ size_t FileRegion::populate(uintptr_t address,
 BufferedRegion::BufferedRegion(uintptr_t start,
                                size_t len,
                                size_t fileLen,
-                               const void *data)
+                               byte_iterator data)
     : MemoryRegion(start, len) {
+  assert(data.getLength() >= fileLen && "Invalid BufferedRegion");
   fileLen = std::min<size_t>(len, fileLen);
   this->data.reset(new unsigned char[len]);
-  memcpy(this->data.get(), data, fileLen);
+  memcpy(this->data.get(), *data, fileLen);
   memset(&this->data[fileLen], 0, len - fileLen);
 }
 
@@ -54,7 +55,7 @@ size_t BufferedRegion::populate(uintptr_t address,
 byte_iterator BufferedRegion::getData(uintptr_t address) {
   ssize_t regOffset = address - start;
   if(regOffset >= 0) return byte_iterator(&data[regOffset], len - regOffset);
-  else return byte_iterator(nullptr, 0);
+  else return byte_iterator::empty();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -125,6 +126,6 @@ byte_iterator MemoryWindow::getData(uintptr_t address) {
                             (&regions[0], regions.size(), address);
   if(regNum >= 0 && regions[regNum]->contains(address))
     return regions[regNum]->getData(address);
-  else return byte_iterator(nullptr, 0);
+  else return byte_iterator::empty();
 }
 

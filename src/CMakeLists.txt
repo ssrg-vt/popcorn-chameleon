@@ -67,7 +67,7 @@ target_include_directories (chameleon PRIVATE
   "${POPCORN_INCLUDE_DIR}"
   "${POPCORN_REGDESC_DIR}"
 )
-target_compile_options (chameleon PRIVATE "-std=c++11" "-pthread")
+target_compile_options (chameleon PRIVATE "-std=c++11" "-pthread" "-Wall")
 target_link_libraries (chameleon
   ${ELF}
   ${ZLIB_LIBRARIES}

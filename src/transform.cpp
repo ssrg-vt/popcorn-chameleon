@@ -14,7 +14,6 @@ using namespace chameleon;
 ///////////////////////////////////////////////////////////////////////////////
 
 static volatile bool faultHandlerExit = false;
-static size_t faultsHandled = 0;
 
 /**
  * Set up signal handler for SIGINT.  Required because the calls to read() in
@@ -64,10 +63,11 @@ handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
 static void *handleFaultsAsync(void *arg) {
   CodeTransformer *CT = (CodeTransformer *)arg;
   int uffd = CT->getUserfaultfd();
-  size_t nfaults = CT->getNumFaultsBatched(), toHandle, i;
+  size_t nfaults = CT->getNumFaultsBatched(), toHandle, i, handled = 0;
   ssize_t bytesRead;
   pid_t me = syscall(SYS_gettid);
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
+  Timer t;
 
   assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
@@ -83,6 +83,7 @@ static void *handleFaultsAsync(void *arg) {
   while(!faultHandlerExit) {
     bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);
     if(bytesRead >= 0) {
+      t.start();
       toHandle = bytesRead / sizeof(struct uffd_msg);
       for(i = 0; i < toHandle; i++) {
         // TODO for Linux 4.11+, handle UFFD_EVENT_FORK, UFFD_EVENT_REMAP,
@@ -90,8 +91,13 @@ static void *handleFaultsAsync(void *arg) {
         if(msg[i].event != UFFD_EVENT_PAGEFAULT) continue;
         if(handleFault(CT, uffd, msg[i]) != ret_t::Success) {
           INFO("could not handle fault, limping ahead..." << std::endl);
+          continue;
         }
+        handled++;
       }
+      t.end(true);
+      DEBUGMSG_VERBOSE("fault handling time: " << t.elapsed(Timer::Micro)
+                       << " us for " << toHandle << " fault(s)" << std::endl);
     }
     else if(errno != EINTR) DEBUGMSG("read failed (return=" << bytesRead
                                      << "), trying again..." << std::endl);
@@ -99,6 +105,8 @@ static void *handleFaultsAsync(void *arg) {
   delete [] msg;
 
   DEBUGMSG("fault handler " << me << " exiting" << std::endl);
+  INFO("Total fault handling time: " << t.totalElapsed(Timer::Micro)
+       << " us for " << handled << " fault(s)" << std::endl);
 
   return nullptr;
 }
@@ -133,16 +141,23 @@ ret_t CodeTransformer::initialize() {
   if((retcode = binary.initialize()) != ret_t::Success) return retcode;
   if((retcode = arch::initDisassembler()) != ret_t::Success)
     return retcode;
-  const Binary::Section &code = binary.getCodeSection();
+  const Binary::Section &codeSec = binary.getCodeSection();
+  const Binary::Segment &codeSeg = binary.getCodeSegment();
 
-  retcode = remapCodeSegment(code.address(), code.size());
+  retcode = remapCodeSegment(codeSec.address(), codeSec.size());
   if(retcode != ret_t::Success) return retcode;
-  retcode = randomizeFunctions(code, binary.getCodeSegment());
+  retcode = populateCodeWindow(codeSec, codeSeg);
+  if(retcode != ret_t::Success) return retcode;
+  retcode = analyzeFunctions();
+  if(retcode != ret_t::Success) return retcode;
+  retcode = randomizeFunctions();
   if(retcode != ret_t::Success) return retcode;
 
   if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
     return ret_t::UffdHandshakeFailed;
-  if(!uffd::registerRegion(proc.getUserfaultfd(), code.address(), code.size()))
+  if(!uffd::registerRegion(proc.getUserfaultfd(),
+                           codeSec.address(),
+                           codeSec.size()))
     return ret_t::UffdRegisterFailed;
 
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
@@ -252,6 +267,74 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   return ret_t::Success;
 }
 
+ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
+                                          const Binary::Segment &codeSegment) {
+  uintptr_t segStart, curAddr;
+  ssize_t len, filelen;
+  byte_iterator data;
+  MemoryRegionPtr r;
+  Timer t;
+  t.start();
+
+  // Note: by construction of how we're adding regions we don't need to call
+  // codeWindow.sort() to sort the regions within the window.
+
+  // Calculate the first address we care about. Note that we *only* care about
+  // pages with code, i.e., the code segment may contain other sections that
+  // are on different pages that don't concern us.
+  codeWindow.clear();
+  segStart = codeSegment.address();
+  codeStart = codeSection.address();
+  curAddr = std::max<uintptr_t>(PAGE_DOWN(codeStart), segStart);
+
+  // First, check if the segment contains data before the code section.  Note
+  // that the region must be entirely contained on-disk (i.e., no zero-filled
+  // region so file length = memory length) because segments can't have holes
+  // and we know the subsequent code section *must* be on-disk.
+  len = codeStart - curAddr;
+  if(len > 0) {
+    if(binary.getRemainingFileSize(curAddr, codeSegment) <= len) {
+      WARN("Invalid file format - found holes in segment" << std::endl);
+      return ret_t::InvalidElf;
+    }
+    data = binary.getData(curAddr, codeSegment);
+    if(!data) return ret_t::MarshalDataFailed;
+    r.reset(new FileRegion(curAddr, len, len, data));
+    codeWindow.insert(r);
+  }
+  else if(len != 0) {
+    WARN("Invalid file format - segment start address is after code section "
+         "start address" << std::endl);
+    return ret_t::InvalidElf;
+  }
+
+  // Now, add a region for the code section
+  len = codeSection.size();
+  filelen = binary.getRemainingFileSize(codeStart, codeSegment);
+  if(filelen < len)
+    WARN("Code section on-disk smaller than in-memory representation ("
+         << filelen << " vs " << codeSection.size() << " bytes)" << std::endl);
+  data = binary.getData(codeStart, codeSegment);
+  if(!data) return ret_t::MarshalDataFailed;
+  r.reset(new BufferedRegion(codeStart, len, filelen, data));
+  codeWindow.insert(r);
+
+  // Finally, add any segment data/zeroed memory after the code section
+  codeEnd = codeStart + len;
+  curAddr = PAGE_UP(codeEnd);
+  len = curAddr - codeEnd;
+  filelen = binary.getRemainingFileSize(codeEnd, codeSegment);
+  data = binary.getData(codeEnd, codeSegment);
+  r.reset(new FileRegion(codeEnd, len, filelen, data));
+  codeWindow.insert(r);
+
+  t.end();
+  INFO("Code window setup time: " << t.elapsed(Timer::Micro) << " us"
+       << std::endl);
+
+  return ret_t::Success;
+}
+
 /**
  * Return the canonicalized stack offset of an operand if it's a base +
  * displacement memory reference into the stack.  If it's not a memory
@@ -282,6 +365,8 @@ static inline int getStackOffset(uint32_t frameSize,
   return offset;
 }
 
+template<int (*NumOp)(instr_t *),
+         opnd_t (*GetOp)(instr_t *, unsigned)>
 ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
                                        uint32_t frameSize,
                                        instr_t *instr) {
@@ -292,84 +377,30 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
   RandRestriction res;
   ret_t code = ret_t::Success;
 
-  for(i = 0; i < instr_num_srcs(instr); i++) {
-    op = instr_get_src(instr, i);
-    offset = getStackOffset(frameSize, op, type);
-    if(offset && arch::getRestriction(instr, op, res)) {
-      res.offset = offset;
-      if((code = info->addRestriction(res)) != ret_t::Success) return code;
-    }
-  }
-
-  for(i = 0; i < instr_num_dsts(instr); i++) {
-    op = instr_get_dst(instr, i);
-    offset = getStackOffset(frameSize, op, type);
-    if(offset && arch::getRestriction(instr, op, res)) {
-      res.offset = offset;
-      if((code = info->addRestriction(res)) != ret_t::Success) return code;
-    }
-  }
-
-  return code;
-}
-
-// TODO 1: we currently assume the compiler generates references to stack slots
-// independently of other stack slots, i.e., it doesn't generate intermediate
-// values which are then used to generate references to 2 or more slots.  This
-// may not be true with increasing optimization levels, see X86OptimizeLEAs.cpp
-// in newer versions of LLVM.
-// TODO 2: references into arrays & structs also include an index and scale
-// operand.  But we're only changing the beginning offset of the slot, so those
-// operands should be okay as-is.  Verify this is true.
-template<int (*NumOp)(instr_t *),
-         opnd_t (*GetOp)(instr_t *, unsigned),
-         void (*SetOp)(instr_t *, unsigned, opnd_t)>
-ret_t CodeTransformer::rewriteOperands(const RandomizedFunctionPtr &info,
-                                       uint32_t frameSize,
-                                       uint32_t randFrameSize,
-                                       instr_t *instr,
-                                       bool &changed) {
-  size_t i;
-  int32_t offset, randOffset, randRegOffset;
-  opnd_t op;
-  enum arch::RegType type;
-
   for(i = 0; i < NumOp(instr); i++) {
     op = GetOp(instr, i);
     offset = getStackOffset(frameSize, op, type);
-    if(offset && info->transformOffset(offset)) {
-      randOffset = info->getRandomizedOffset(offset);
-      if(randOffset == INT32_MAX) {
-        DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
-                       instr);
-        return ret_t::BadMetadata;
-      }
-      randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
-      opnd_set_disp_ex(&op, randRegOffset, false, false, false);
-      SetOp(instr, i, op);
-      changed = true;
-
-      DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
-                       << randOffset << std::endl);
+    if(offset && arch::getRestriction(instr, op, res)) {
+      res.offset = offset;
+      if((code = info->addRestriction(res)) != ret_t::Success) return code;
     }
   }
 
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::rewriteFunction(const function_record *func,
-                                       RandomizedFunctionPtr &info) {
-  bool doEncode, changed;
-  int32_t update, offset, randOffset;
-  uint32_t frameSize = arch::initialFrameSize(),
-           randFrameSize = arch::initialFrameSize(),
-           count = 0;
-  RandRestriction res;
+ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
+  int32_t update, offset;
+  uint32_t frameSize = arch::initialFrameSize();
+  size_t instrSize;
+  const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = codeWindow.getData(func->addr);
-  byte *start = funcData[0], *end = start + func->code_size;
+  byte *real = (byte *)func->addr, *cur = funcData[0], *prev,
+       *end = cur + func->code_size;
   instrlist_t *instrs;
   instr_t *instr;
   reg_id_t drsp;
+  RandRestriction res;
   ret_t code = ret_t::Success;
 
   if(funcData.getLength() < func->code_size) {
@@ -379,23 +410,38 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
     return ret_t::BadMetadata;
   }
 
-  if(!start) {
+  if(!cur) {
     DEBUGMSG("invalid code iterator" << std::endl);
     return ret_t::RandomizeFailed;
   }
 
-  // Construct a list of instructions & analyze for restrictions
+  // Construct a list of instructions & analyze for restrictions.
+  // instr_create() allocates the instruction on DynamoRIO's heap; the info
+  // object maintains ownership of the instructions and frees them as needed.
   instrs = instrlist_create(GLOBAL_DCONTEXT);
   drsp = arch::getDRRegType(arch::RegType::StackPointer);
-  while(start < end) {
+  while(cur < end) {
+    prev = cur;
     instr = instr_create(GLOBAL_DCONTEXT);
     instr_init(GLOBAL_DCONTEXT, instr);
-    start = decode(GLOBAL_DCONTEXT, start, instr);
+    cur = decode_from_copy(GLOBAL_DCONTEXT, cur, real, instr);
+    if(!cur) {
+      code = ret_t::AnalysisFailed;
+      goto out;
+    }
+    instrSize = cur - prev;
+    instr_set_raw_bits(instr, prev, instrSize);
+    real += instrSize;
     instrlist_append(instrs, instr);
 
-    DEBUG_VERBOSE(DEBUGMSG_INSTR("", instr));
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("Instruction size = " << instrSize
+                                 << ": ", instr);)
 
-    code = analyzeOperands(info, frameSize, instr);
+    code = analyzeOperands<instr_num_srcs, instr_get_src>
+                          (info, frameSize, instr);
+    if(code != ret_t::Success) goto out;
+    code = analyzeOperands<instr_num_dsts, instr_get_dst>
+                          (info, frameSize, instr);
     if(code != ret_t::Success) goto out;
 
     // Check if possible to rewrite frame allocation instructions with a random
@@ -425,40 +471,175 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
     }
   }
 
-  if(frameSize != arch::initialFrameSize()) {
-    DEBUGMSG("function at 0x" << std::hex << func->addr
-             << " does not clean up frame (not intended to return?)"
-             << std::endl);
-    frameSize = arch::initialFrameSize();
+  // Add the remaining slots, i.e., those that don't have any restrictions
+  code = info->populateSlots();
+
+  DEBUG(
+    if(frameSize != arch::initialFrameSize())
+      DEBUGMSG(" -> function does not clean up frame (not intended to return?)"
+               << std::endl);
+  )
+
+out:
+  if(code == ret_t::Success) info->setInstructions(instrs);
+  else instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs);
+  return code;
+}
+
+ret_t CodeTransformer::analyzeFunctions() {
+  Timer t;
+  ret_t code;
+
+  // Analyze every function for which we have transformation metadata
+  Binary::func_iterator it = binary.getFunctions(codeStart, codeEnd);
+  for(; !it.end(); ++it) {
+    const function_record *func = *it;
+
+    DEBUGMSG("analyzing function @ " << std::hex << func->addr << ", size = "
+             << std::dec << func->code_size << std::endl);
+    t.start();
+
+    RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);
+    RandomizedFunctionMap::iterator it =
+      funcMaps.emplace(func->addr, std::move(info)).first;
+    code = analyzeFunction(it->second);
+    if(code != ret_t::Success) return code;
+
+    t.end(true);
+    DEBUGMSG_VERBOSE("analyzing function took " << t.elapsed(Timer::Micro)
+                     << " us" << std::endl);
   }
 
-  DEBUGMSG_VERBOSE("randomizing function" << std::endl);
+  INFO("Total analyze time: " << t.totalElapsed(Timer::Micro) << " us"
+       << std::endl);
+
+  return ret_t::Success;
+}
+
+// TODO 1: we currently assume the compiler generates references to stack slots
+// independently of other stack slots, i.e., it doesn't generate intermediate
+// values which are then used to generate references to 2 or more slots.  This
+// may not be true with increasing optimization levels, see X86OptimizeLEAs.cpp
+// in newer versions of LLVM.
+// TODO 2: references into arrays & structs also include an index and scale
+// operand.  But we're only changing the beginning offset of the slot, so those
+// operands should be okay as-is.  Verify this is true.
+template<int (*NumOp)(instr_t *),
+         opnd_t (*GetOp)(instr_t *, unsigned),
+         void (*SetOp)(instr_t *, unsigned, opnd_t)>
+ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
+                                         uint32_t frameSize,
+                                         uint32_t randFrameSize,
+                                         instr_t *instr,
+                                         bool &changed) {
+  size_t i;
+  int32_t offset, randOffset, randRegOffset;
+  opnd_t op;
+  enum arch::RegType type;
+
+  for(i = 0; i < NumOp(instr); i++) {
+    op = GetOp(instr, i);
+    offset = getStackOffset(frameSize, op, type);
+    if(offset && info->transformOffset(offset)) {
+      randOffset = info->getRandomizedOffset(offset);
+      if(randOffset == INT32_MAX) {
+        DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
+                       instr);
+        return ret_t::BadMetadata;
+      }
+      randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
+      opnd_set_disp_ex(&op, randRegOffset, false, false, false);
+      SetOp(instr, i, op);
+      changed = true;
+
+      DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
+                       << randOffset << std::endl);
+    }
+  }
+
+  return ret_t::Success;
+}
+
+#ifdef DEBUG_BUILD
+/**
+ * Compare original instructions to transformed version and print any size
+ * differences.
+ *
+ * @param pointer to real address of original instructions
+ * @param pointer to starting address of original instructions
+ * @param pointer to ending address of original instructions
+ * @param transformedInstrs transformed instructions
+ */
+static void compareInstructions(byte *real,
+                                byte *start,
+                                byte *end,
+                                instrlist_t *transformedInstrs) {
+  int origLen, transLen;
+  instr_t orig, *trans;
+  byte *prev;
+
+  instr_init(GLOBAL_DCONTEXT, &orig);
+  trans = instrlist_first(transformedInstrs);
+  while(start < end) {
+    prev = start;
+    instr_reset(GLOBAL_DCONTEXT, &orig);
+    start = decode_from_copy(GLOBAL_DCONTEXT, start, real, &orig);
+    if(!start) {
+      DEBUGMSG("couldn't decode compareInstructions()" << std::endl);
+      return;
+    }
+    origLen = start - prev;
+    instr_set_raw_bits(&orig, prev, origLen);
+    real += origLen;
+    transLen = instr_length(GLOBAL_DCONTEXT, trans);
+    if(transLen != origLen) {
+      DEBUGMSG_INSTR("Changed size: " << transLen << " bytes, ", trans);
+      DEBUGMSG_INSTR("              " << origLen << " bytes, ", &orig);
+    }
+    trans = instr_get_next(trans);
+  }
+}
+#endif
+
+ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
+  bool changed;
+  int32_t update, offset, instrSize;
+  uint32_t frameSize = arch::initialFrameSize(),
+           randFrameSize = arch::initialFrameSize(),
+           count = 0;
+  const function_record *func = info->getFunctionRecord();
+  byte_iterator funcData = codeWindow.getData(func->addr);
+  byte *real = (byte *)func->addr, *cur = funcData[0], *prev;
+  instrlist_t *instrs = info->getInstructions();
+  instr_t *instr;
+  reg_id_t drsp;
+  ret_t code;
 
   // Randomize the function's layout according to the metadata
   code = info->randomize(rng(), slotPadding);
-  if(code != ret_t::Success) goto out;
-
-  DEBUGMSG_VERBOSE("re-writing/re-assembling instructions" << std::endl);
+  if(code != ret_t::Success) return code;
 
   // Apply the randomization by rewriting instructions
   instr = instrlist_first(instrs);
-  doEncode = false;
+  drsp = arch::getDRRegType(arch::RegType::StackPointer);
   while(instr) {
     changed = false;
+    instrSize = instr_length(GLOBAL_DCONTEXT, instr);
 
-    DEBUG_VERBOSE(DEBUGMSG_INSTR("", instr));
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("Instruction size = " << instrSize
+                                 << ": ", instr);)
 
     // Rewrite stack slot reference operands to their randomized locations
-    code = rewriteOperands<instr_num_srcs, instr_get_src, instr_set_src>
+    code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
                           (info, frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) goto out;
-    code = rewriteOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
+    if(code != ret_t::Success) return code;
+    code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
                           (info, frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) goto out;
+    if(code != ret_t::Success) return code;
 
-    // Allow each ISA-specific randomized function have its way
+    // Allow each ISA-specific randomized function to have its way
     code = info->transformInstr(frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) goto out;
+    if(code != ret_t::Success) return code;
 
     // Keep track of stack pointer updates & rewrite frame update instructions
     // with randomized size
@@ -473,7 +654,7 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
           offset = info->getRandomizedBulkFrameUpdate();
           offset = update > 0 ? offset : -offset;
           code = arch::rewriteFrameUpdate(instr, offset, changed);
-          if(code != ret_t::Success) goto out;
+          if(code != ret_t::Success) return code;
           randFrameSize += offset;
 
           DEBUGMSG_VERBOSE(" -> rewrite frame update: " << update << " -> "
@@ -484,111 +665,58 @@ ret_t CodeTransformer::rewriteFunction(const function_record *func,
       }
     }
 
+    // If we changed anything, re-encode the instruction.  Note that on x86-64,
+    // randomizing the prologue/epilogue *may* change the size of the push/pop
+    // instructions.  However the net code size should be identical.
     if(changed) {
-      count++;
-      DEBUG_VERBOSE(DEBUGMSG_INSTR(" -> rewrote: ", instr));
-    }
+      prev = cur;
+      cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
+      if(!cur) return ret_t::RandomizeFailed;
 
-    doEncode |= changed;
+      count++;
+      DEBUG_VERBOSE(
+        if(instrSize != (cur - prev))
+          DEBUGMSG_VERBOSE(" -> changed size of instruction: " << instrSize
+                           << " vs. " << (cur - prev) << std::endl);
+        DEBUGMSG_INSTR(" -> rewrote: ", instr)
+      );
+    }
+    else cur += instrSize;
+    real += instrSize;
+
     instr = instr_get_next(instr);
+  }
+
+  if((uintptr_t)real != (func->addr + func->code_size)) {
+    WARN("changed size of function's instructions" << std::endl);
+    DEBUG(compareInstructions((byte *)func->addr, funcData[0],
+                              funcData[0] + func->code_size, instrs));
+    return ret_t::RandomizeFailed;
   }
 
   DEBUGMSG("rewrote " << count << " instruction(s)" << std::endl);
 
-  if(doEncode) {
-    // TODO should has_instr_jmp_targets (last argument) be true?
-    start = instrlist_encode(GLOBAL_DCONTEXT, instrs, funcData[0], false);
-    if(!start || start != end) {
-      DEBUGMSG("expected end = " << std::hex << (void *)end << " but got "
-               << (void *)start << std::endl);
-      code = ret_t::RandomizeFailed;
-    }
-  }
-
-out:
-  instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs);
-  return code;
+  return ret_t::Success;
 }
 
-ret_t CodeTransformer::randomizeFunctions(const Binary::Section &codeSection,
-                                          const Binary::Segment &codeSegment) {
-  uintptr_t segStart, segEnd, secStart, secEnd, curAddr;
-  ssize_t len, filelen;
-  const void *data;
-  ret_t code;
-  MemoryRegionPtr r;
+ret_t CodeTransformer::randomizeFunctions() {
   Timer t;
+  ret_t code;
 
-  // First order of business - set up the memory window to handle page faults.
-  // Note: by construction of how we're adding regions we don't need to call
-  // codeWindow.sort() to sort the regions within the window.
+  for(auto &it : funcMaps) {
+    RandomizedFunctionPtr &info = it.second;
 
-  // Calculate the first address we care about. Note that we *only* care about
-  // pages with code, i.e., the code segment may contain other sections that
-  // are on different pages that don't concern us.
-  codeWindow.clear();
-  segStart = codeSegment.address();
-  secStart = codeSection.address();
-  curAddr = std::max<uintptr_t>(PAGE_DOWN(secStart), segStart);
-
-  // First, check if the segment contains data before the code section.  Note
-  // that the region must be entirely contained on-disk (i.e., no zero-filled
-  // region so file length = memory length) because segments can't have holes
-  // and we know the subsequent code section *must* be on-disk.
-  len = secStart - curAddr;
-  if(len > 0) {
-    if(binary.getRemainingFileSize(curAddr, codeSegment) <= len) {
-      WARN("Invalid file format - found holes in segment" << std::endl);
-      return ret_t::InvalidElf;
-    }
-    data = binary.getData(curAddr, codeSegment);
-    if(!data) return ret_t::MarshalDataFailed;
-    r.reset(new FileRegion(curAddr, len, len, data));
-    codeWindow.insert(r);
-  }
-  else if(len != 0) {
-    WARN("Invalid file format - segment start address is after code section "
-         "start address" << std::endl);
-    return ret_t::InvalidElf;
-  }
-
-  // Now, add a region for the code section
-  len = codeSection.size();
-  filelen = binary.getRemainingFileSize(secStart, codeSegment);
-  if(filelen < len)
-    WARN("Code section on-disk smaller than in-memory representation ("
-         << filelen << " vs " << codeSection.size() << " bytes)" << std::endl);
-  data = binary.getData(secStart, codeSegment);
-  if(!data) return ret_t::MarshalDataFailed;
-  r.reset(new BufferedRegion(secStart, len, filelen, data));
-  codeWindow.insert(r);
-
-  // Finally, add any segment data/zeroed memory after the code section
-  secEnd = secStart + len;
-  curAddr = PAGE_UP(secEnd);
-  len = curAddr - secEnd;
-  filelen = binary.getRemainingFileSize(secEnd, codeSegment);
-  data = binary.getData(secEnd, codeSegment);
-  r.reset(new FileRegion(secEnd, len, filelen, data));
-  codeWindow.insert(r);
-
-  // Randomize every function for which we have transformation metadata
-  Binary::func_iterator it = binary.getFunctions(secStart, secEnd);
-  for(; !it.end(); ++it) {
-    const function_record *func = *it;
-
-    DEBUGMSG("randomizing function @ " << std::hex << func->addr << ", size = "
-             << std::dec << func->code_size << std::endl);
-
-    RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);
-    RandomizedFunctionMap::iterator it =
-      funcMaps.emplace(func->addr, std::move(info)).first;
-
+    DEBUG(
+      const function_record *func = info->getFunctionRecord();
+      DEBUGMSG("randomizing function @ " << std::hex << func->addr
+               << ", size = " << std::dec << func->code_size << std::endl);
+    )
     t.start();
-    code = rewriteFunction(func, it->second);
-    if(code != ret_t::Success) return code;
-    t.end(true);
 
+    code = randomizeFunction(info);
+    if(code != ret_t::Success) return code;
+
+    t.end(true);
     DEBUGMSG_VERBOSE("randomizing function took " << t.elapsed(Timer::Micro)
                      << " us" << std::endl);
   }

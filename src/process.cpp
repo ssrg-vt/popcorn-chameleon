@@ -112,7 +112,6 @@ execChild(char **argv, int socket) {
 ret_t Process::forkAndExec() {
   int sockets[2];
   pid_t child;
-  ret_t code = ret_t::Success;
 
   // Don't let the user fork another child if we've already got one
   if(status != Ready) return ret_t::Exists;

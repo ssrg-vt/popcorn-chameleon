@@ -54,7 +54,7 @@ public:
    * @return an iterator for accessing the underlying data
    */
   virtual byte_iterator getData(uintptr_t address)
-  { return byte_iterator(nullptr, 0); }
+  { return byte_iterator::empty(); }
 
   /* Comparison types & functions for sorting */
   static bool compare(const std::unique_ptr<MemoryRegion> &lhs,
@@ -100,11 +100,12 @@ public:
    * @param len length of region in bytes
    * @param fileLen length of on-disk portion of memory region; truncated to
    *                match len if larger
-   * @param data pointer to on-disk data previously mapped into memory
+   * @param data byte iterator to on-disk data previously mapped into memory
    */
-  FileRegion(uintptr_t start, size_t len, size_t fileLen, const void *data)
+  FileRegion(uintptr_t start, size_t len, size_t fileLen, byte_iterator data)
     : MemoryRegion(start, len), fileLen(std::min<size_t>(len, fileLen)),
-      data(data) {}
+      data(data)
+  { assert(data.getLength() >= fileLen && "Invalid FileRegion"); }
 
   /**
    * Populate the buffer with the region's memory.
@@ -118,7 +119,7 @@ public:
                           size_t offset) const override;
 private:
   size_t fileLen;
-  const void *data;
+  byte_iterator data;
 };
 
 /**
@@ -139,12 +140,12 @@ public:
    * @param len length of region in bytes
    * @param fileLen length of on-disk portion of memory region; truncated to
    *                match len if larger
-   * @param data pointer to on-disk data previously mapped into memory
+   * @param data byte iterator to on-disk data previously mapped into memory
    */
   BufferedRegion(uintptr_t start,
                  size_t len,
                  size_t fileLen,
-                 const void *data);
+                 byte_iterator data);
 
   /**
    * Populate the buffer with the region's memory.

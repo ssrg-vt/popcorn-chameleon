@@ -198,20 +198,32 @@ public:
   const Segment &getCodeSegment() const { return codeSegment; }
 
   /**
-   * Get pointer to the binary's data contained inside a particular segment.
+   * Get a byte iterator to the binary's data contained inside a particular
+   * segment.
+   *
+   * Note: the file is mapped read-only but due to ELF APIs we keep it in a
+   * non-const pointer.  Trying to change the data pointed to by the iterator
+   * will cause a segfault!
+   *
    * @param addr a virtual memory address contained in segment
    * @param segment the segment containing addr
-   * @return pointer to the file's contents or nullptr if addr is out-of-bounds
-   *         of the segment
+   * @return byte iterator which can reference the file's contents or nullptr
+   *         if addr is out-of-bounds of the segment
    */
-  const void *getData(uintptr_t addr, const Segment &segment) const;
+  byte_iterator getData(uintptr_t addr, const Segment &segment) const;
 
   /**
-   * Get a pointer to the binary's data at a particular virtual address.
+   * Get a byte iterator to the binary's data at a particular virtual address.
+   *
+   * Note: the file is mapped read-only but due to ELF APIs we keep it in a
+   * non-const pointer.  Trying to change the data pointed to by the iterator
+   * will cause a segfault!
+   *
    * @param addr a virtual memory address
-   * @return pointer to the file's contents or nullptr if addr is out-of-bounds
+   * @return byte iterator which can reference the file's contents or nullptr
+   *         if addr is out-of-bounds of the binary
    */
-  const void *getData(uintptr_t addr) const;
+  byte_iterator getData(uintptr_t addr) const;
 
   /**
    * Get the remaining size, in bytes, from a virtual address to the end of the

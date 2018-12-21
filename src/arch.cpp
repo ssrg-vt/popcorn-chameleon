@@ -11,6 +11,16 @@ using namespace chameleon;
 #if defined __x86_64__
 
 ///////////////////////////////////////////////////////////////////////////////
+// Miscellaneous
+///////////////////////////////////////////////////////////////////////////////
+
+bool arch::supportedArch(uint16_t arch) {
+  DEBUGMSG("ISA: x86-64 = " << (arch == EM_X86_64 ? "yes" : "no")
+           << std::endl);
+  return arch == EM_X86_64;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Register information & handling
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -308,26 +318,34 @@ private:
  * |                       | v
  * |-----------------------|
  * |                       | ^
+ * |    FP-limited area    | | Permutable
+ * |                       | v
+ * |-----------------------|
+ * |                       | ^
  * |     Movable area      | | Randomizable
- * |     (stack slots)     | | (see below)
+ * |                       | v
+ * |-----------------------|
+ * |                       | ^
+ * |    SP-limited area    | | Permutable
  * |                       | v
  * |-----------------------|
  * |                       | ^
  * |       Call area       | | Immutable
- * | (arguments, red zone) | |
+ * |  (spilled arguments)  | |
  * |                       | v
  * |-----------------------|
  *
- * Within the movable area there are restrictions depending on the original
- * placement of stack slots.  x86-64 allows 1-byte displacements for base +
- * displacement memory references; the displacement for these objects cannot
- * fall outside -128 <-> 127, meaning the randomizer is limited in what it can
- * do with these slots.  Thus
+ * The bulk of the randomization applies to regular stack slots and the
+ * callee-save area.  For stack slots, x86-64 allows 1-byte displacements for
+ * base + displacement memory references; the displacement for these objects
+ * cannot fall outside -128 <-> 127, meaning the randomizer is limited in what
+ * it can do with these slots.  Thus the FP-limited and SP-limited stack slots
+ * are only permutable and not fully randomizable.
  *
  * Note 1: we don't move stack objects between their original regions as it may
  * create incorrect behavior.  For example, moving a stack slot from the
- * completely randomizable area into a restricted randomizable area may violate
- * the restrictions on those objects.
+ * completely randomizable area into a permutable area may violate the
+ * restrictions on those objects.
  *
  * Note 2: we assume all immovable objects are in a contiguous region adjacent
  * to the callee-save region
@@ -448,6 +466,49 @@ public:
     return code;
   }
 
+  virtual ret_t populateSlots() override {
+    int curOffset = 0;
+    ssize_t i;
+    ret_t code = ret_t::Success;
+
+    // Add stack slots to the movable region.  During analysis we should have
+    // added any restricted slots to their appropriate sections; the remaining
+    // slots are completely randomizable.
+    for(auto &s : slots) {
+      if(!seen.count(s.first)) {
+        const stack_slot *slot = s.second;
+        regions[x86Region::R_Movable]->addSlot(s.first,
+                                               slot->size,
+                                               slot->alignment);
+        DEBUGMSG(" -> randomizable slot @ " << s.first << " (size = "
+                 << slot->size << ")" << std::endl);
+      }
+    }
+
+    // Calculate section offsets & prune empty sections.  Note that regions are
+    // in reverse order (lowest stack address first).
+    // TODO is it faster to search through unsorted slots in each section to
+    // find the bottom offset?
+    for(i = regions.size() - 1; i >= 0; i--) {
+      if(regions[i]->numSlots() > 0) {
+        StackRegionPtr &region = regions[i];
+        region->sortSlots();
+        const SlotMap &bottom = region->getSlots()[0];
+        region->setRegionOffset(bottom.original);
+        region->setRegionSize(abs(bottom.original - curOffset));
+        curOffset = bottom.original;
+      }
+      else {
+        DEBUGMSG_VERBOSE("removing empty "
+                         << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
+                         << " region" << std::endl);
+        regions.erase(regions.begin() + i);
+      }
+    }
+
+    return code;
+  }
+
   /**
    * For x86-64, the bulk frame update allocates space for all regions below
    * the callee-save/immovable region; search for an update within that region.
@@ -519,50 +580,6 @@ public:
                               (frameSize, instr, 0, changed);
       break;
     default: break;
-    }
-
-    return code;
-  }
-
-protected:
-  virtual ret_t populateSlots() override {
-    int curOffset = 0;
-    ssize_t i;
-    ret_t code = ret_t::Success;
-
-    // Add stack slots to the movable region.  During analysis we should have
-    // added any restricted slots to their appropriate sections; the remaining
-    // slots are completely randomizable.
-    for(auto &s : slots) {
-      if(!seen.count(s.first)) {
-        const stack_slot *slot = s.second;
-        regions[x86Region::R_Movable]->addSlot(s.first,
-                                               slot->size,
-                                               slot->alignment);
-        DEBUGMSG(" -> randomizable slot @ " << s.first << " (size = "
-                 << slot->size << ")" << std::endl);
-      }
-    }
-
-    // Calculate section offsets & prune empty sections.  Note that regions are
-    // in reverse order (lowest stack address first).
-    // TODO is it faster to search through unsorted slots in each section to
-    // find the bottom offset?
-    for(i = regions.size() - 1; i >= 0; i--) {
-      if(regions[i]->numSlots() > 0) {
-        StackRegionPtr &region = regions[i];
-        region->sortSlots();
-        const SlotMap &bottom = region->getSlots()[0];
-        region->setRegionOffset(bottom.original);
-        region->setRegionSize(abs(bottom.original - curOffset));
-        curOffset = bottom.original;
-      }
-      else {
-        DEBUGMSG_VERBOSE("removing empty "
-                         << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
-                         << " region" << std::endl);
-        regions.erase(regions.begin() + i);
-      }
     }
 
     return code;

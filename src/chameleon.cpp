@@ -20,8 +20,8 @@ bool verboseDebug = false;
 #endif
 
 static bool checkCompatibility() {
-  // TODO check we're on a supported architecture, i.e., AArch64 or x86-64
-  // TODO check that page size is a multiple of 4k
+  // TODO other checks?
+  if(sysconf(_SC_PAGESIZE) != PAGESZ) return false;
   return true;
 }
 

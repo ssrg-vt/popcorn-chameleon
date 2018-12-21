@@ -5,9 +5,9 @@
 #include <sys/stat.h>
 #include <het_bin.h>
 
+#include "arch.h"
 #include "binary.h"
 #include "log.h"
-
 
 using namespace chameleon;
 
@@ -66,9 +66,13 @@ ret_t Binary::initLibELF() {
 }
 
 static inline bool checkCompatibility(Elf *e) {
+  Elf64_Ehdr *ehdr;
+
   if(elf_kind(e) != ELF_K_ELF) return false;
   if(gelf_getclass(e) != ELFCLASS64) return false;
-  // TODO other ELF checks?
+  if(!(ehdr = elf64_getehdr(e))) return false;
+  if(!arch::supportedArch(ehdr->e_machine)) return false;
+
   return true;
 }
 
@@ -114,7 +118,6 @@ static inline void buildSectionName(std::string &buf, const char *sec) {
 }
 
 ret_t Binary::initialize() {
-  bool foundCodeSeg = false;
   ret_t retcode = ret_t::Success;
   std::string buf;
 
@@ -203,20 +206,23 @@ void Binary::cleanup() {
   )
 }
 
-const void *Binary::getData(uintptr_t addr, const Segment &segment) const {
+byte_iterator Binary::getData(uintptr_t addr, const Segment &segment) const {
   uintptr_t fileAddr;
   off_t offset;
   if(segment.contains(addr)) {
     offset = addr - segment.address();
     fileAddr = (uintptr_t)data + segment.fileOffset() + offset;
-    if(binaryContains(fileAddr)) return (void *)fileAddr;
+    if(binaryContains(fileAddr))
+      return byte_iterator((unsigned char *)fileAddr,
+                           segment.fileSize() - offset);
   }
-  return nullptr;
+  return byte_iterator::empty();
 }
 
-const void * Binary::getData(uintptr_t addr) const {
+byte_iterator Binary::getData(uintptr_t addr) const {
   Segment tmp;
-  if(getSegmentByAddress(addr, tmp) != ret_t::Success) return nullptr;
+  if(getSegmentByAddress(addr, tmp) != ret_t::Success)
+    return byte_iterator::empty();
   else return getData(addr, tmp);
 }
 
@@ -280,12 +286,12 @@ Binary::getFunctions(uintptr_t start, uintptr_t end) const {
   ssize_t idx, count = 0;
   const function_record *record;
 
-  if(end <= start) return func_iterator(nullptr, 0);
+  if(end <= start) return func_iterator::empty();
 
   // Find the first function containing start or starting directly after it
   idx = findRight<function_record, uintptr_t, funcContains, lessThanFunc>
                  (functions.getEntries(), functions.getNumEntries(), start);
-  if(idx < 0) return func_iterator(nullptr, 0);
+  if(idx < 0) return func_iterator::empty();
   record = functions.getEntries();
 
   // Find all remaining functions in the range
@@ -299,7 +305,7 @@ template<typename T, typename it>
 static inline it getIterator(const Binary::EntrySection<T> &section,
                              size_t offset, size_t num) {
   ssize_t entries = section.getNumEntries(), remaining = entries - offset;
-  if(remaining <= 0) return it(nullptr, 0);
+  if(remaining <= 0) return it::empty();
   if(remaining < num)
     WARN("Function record indicated more entries than available" << std::endl);
   entries = std::min<ssize_t>(remaining, num);
@@ -344,7 +350,7 @@ ret_t Binary::getSectionByType(uint32_t type, Section &section) {
   while((scn = elf_nextscn(elf, scn))) {
     if(gelf_getshdr(scn, &shdr) != &shdr) return ret_t::ElfReadError;
     if(shdr.sh_type == type) {
-      const char *name = elf_strptr(elf, shdrstrndx, shdr.sh_name);
+      name = elf_strptr(elf, shdrstrndx, shdr.sh_name);
       return section.initialize(elf, name, shdr, scn);
     }
   }

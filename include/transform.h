@@ -1,8 +1,9 @@
 /**
  * class CodeTransformer
  *
- * Implements reading & transforming code as read in through the userfaulfd
- * mechanism.
+ * Implements reading, randomizing & transforming code.  Code pages randomized
+ * by the CodeTransformer are mapped into the target application by handling
+ * faults through the userfaulfd file descriptor.
  *
  * Author: Rob Lyerly <rlyerly@vt.edu>
  * Date: 10/15/2018
@@ -37,8 +38,8 @@ public:
   CodeTransformer(Process &proc,
                   size_t batchedFaults = 1,
                   size_t slotPadding = 128)
-    : proc(proc), binary(proc.getArgv()[0]), faultHandlerPid(-1),
-      batchedFaults(batchedFaults), slotPadding(slotPadding) {}
+    : proc(proc), binary(proc.getArgv()[0]), slotPadding(slotPadding),
+      faultHandlerPid(-1), batchedFaults(batchedFaults) {}
   CodeTransformer() = delete;
   ~CodeTransformer();
 
@@ -127,6 +128,9 @@ private:
   /* Binary containing transformation metadata */
   Binary binary;
 
+  /* Code section start & end addresses */
+  uintptr_t codeStart, codeEnd;
+
   /* An abstract view of the code segment, used to randomize code */
   MemoryWindow codeWindow;
 
@@ -162,17 +166,48 @@ private:
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
 
   /**
+   * Create memory window for the application's code.  The window will be used
+   * both as a buffer for randomization and as the source of data used to
+   * handle page faults.
+   *
+   * @param codeSection the code section from the binary
+   * @param codeSegment the code segment from the binary
+   */
+  ret_t populateCodeWindow(const Binary::Section &codeSection,
+                           const Binary::Segment &codeSegment);
+
+  /**
    * Analyze the operands of an instruction in order to determine any
    * randomization restrictions.
    *
+   * @template NumOp function to get the number of operands
+   * @template GetOp function to get an operand
    * @param info randomization information for a function
    * @param frameSize currently calculated frame size
    * @param instr an instruction
    * @return a return code describing the outcome
    */
+  template<int (*NumOp)(instr_t *),
+           opnd_t (*GetOp)(instr_t *, unsigned)>
   ret_t analyzeOperands(RandomizedFunctionPtr &info,
                         uint32_t frameSize,
                         instr_t *instr);
+
+  /**
+   * Disassemble a function's code and analyze for randomization restrictions.
+   * @param info randomization information for a function
+   * @return a return code describing the outcome
+   */
+  ret_t analyzeFunction(RandomizedFunctionPtr &info);
+
+  /**
+   * Disassemble all functions and analyze for randomization restrictions.
+   * Instantiates all randomization machinery but does *not* perform actual
+   * randomization
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t analyzeFunctions();
 
   /**
    * Rewrite stack slot reference operands to refer to the randomized location.
@@ -192,31 +227,25 @@ private:
   template<int (*NumOp)(instr_t *),
            opnd_t (*GetOp)(instr_t *, unsigned),
            void (*SetOp)(instr_t *, unsigned, opnd_t)>
-  ret_t rewriteOperands(const RandomizedFunctionPtr &info,
-                        uint32_t frameSize,
-                        uint32_t randFrameSize,
-                        instr_t *instr,
-                        bool &changed);
+  ret_t randomizeOperands(const RandomizedFunctionPtr &info,
+                          uint32_t frameSize,
+                          uint32_t randFrameSize,
+                          instr_t *instr,
+                          bool &changed);
 
   /**
-   * Decode, randomize and re-encode a function.
-   * @param func a function record
+   * Randomize and re-encode a function.
    * @param info randomization information for a function
    * @return a return code describing the outcome
    */
-  ret_t rewriteFunction(const function_record *func,
-                        RandomizedFunctionPtr &info);
+  ret_t randomizeFunction(RandomizedFunctionPtr &info);
 
   /**
    * Load the code segment from disk into the memory window and randomize
    * all functions.
-   *
-   * @param codeSection the code section from the binary
-   * @param codeSegment the code segment from the binary
    * @return a return code describing the outcome
    */
-  ret_t randomizeFunctions(const Binary::Section &codeSection,
-                           const Binary::Segment &codeSegment);
+  ret_t randomizeFunctions();
 };
 
 }

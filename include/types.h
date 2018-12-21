@@ -74,7 +74,14 @@ const char *retText(ret_t retcode);
 template<typename T>
 class iterator {
 public:
+  iterator() : cur(0), len(0), entries(nullptr) {}
   iterator(T *entries, size_t len) : cur(0), len(len), entries(entries) {}
+
+  /**
+   * Return a sentinal empty iterator.
+   * @return an empty iterator
+   */
+  static iterator empty() { return iterator(nullptr, 0); }
 
   size_t getLength() const { return len; }
   bool end() const { return cur >= len; }
@@ -91,6 +98,8 @@ public:
     if(cur < len) return &this->entries[cur];
     else return nullptr;
   }
+
+  bool operator!() const { return entries == nullptr; }
 private:
   size_t cur, len;
   T *entries;
