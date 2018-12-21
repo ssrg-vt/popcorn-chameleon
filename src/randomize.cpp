@@ -12,6 +12,22 @@
 using namespace chameleon;
 
 ///////////////////////////////////////////////////////////////////////////////
+// Slot re-mapping information
+///////////////////////////////////////////////////////////////////////////////
+
+bool chameleon::slotMapCmp(const SlotMap &a, const SlotMap &b)
+{ return a.original < b.original; }
+
+bool chameleon::slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
+{ return a.original > b.original; }
+
+bool chameleon::slotMapContains(const SlotMap *slot, int offset)
+{ return CONTAINS(offset, slot->original, slot->size); }
+
+bool chameleon::lessThanSlotMap(const SlotMap *slot, int offset)
+{ return offset < slot->original; }
+
+///////////////////////////////////////////////////////////////////////////////
 // StackRegion implementation
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -35,17 +51,6 @@ void StackRegion::addSlot(int offset, uint32_t size, uint32_t alignment) {
   slots.emplace_back(std::move(newSlot));
 }
 
-template<typename Pad>
-int StackRegion::calculateOffsets(size_t startIdx, int startOffset, Pad &pad) {
-  startOffset = abs(startOffset);
-  for(size_t i = startIdx; i < slots.size(); i++) {
-    startOffset = ROUND_UP(startOffset + slots[i].size + pad.slotPadding(),
-                           slots[i].alignment);
-    slots[i].randomized = -startOffset;
-  }
-  return -startOffset;
-}
-
 int StackRegion::getRandomizedOffset(int orig) {
   int offset = INT32_MAX;
   ssize_t idx = findRight<SlotMap, int, slotMapContains, lessThanSlotMap>
@@ -54,6 +59,9 @@ int StackRegion::getRandomizedOffset(int orig) {
     offset = orig - slots[idx].original + slots[idx].randomized;
   return offset;
 }
+
+bool chameleon::regionCompare(const StackRegionPtr &a, const StackRegionPtr &b)
+{ return a->getOriginalRegionOffset() < b->getOriginalRegionOffset(); }
 
 void ImmutableRegion::randomize(int start, RandUtil &ru) {
   ZeroPad pad;

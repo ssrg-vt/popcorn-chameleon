@@ -18,7 +18,8 @@ if (NOT ELF)
   message(FATAL_ERROR "libelf not found - please install libelf")
 endif ()
 
-# Find DynamoRIO installation
+# Find DynamoRIO installation.  Assumes installation has both Debug & Release
+# builds a la release packages on the DynamoRIO webiste.
 if (NOT DYNAMORIO_INSTALL_DIR)
   set(DYNAMORIO_INSTALL_DIR "/usr/lib")
 endif ()
@@ -26,9 +27,14 @@ find_path(DYNAMORIO_INCLUDE_DIR
   NAMES dr_api.h
   PATHS ${DYNAMORIO_INSTALL_DIR}/include
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(DYNAMORIO_LIB_TYPE ${DYNAMORIO_INSTALL_DIR}/lib64/debug)
+else()
+  set(DYNAMORIO_LIB_TYPE ${DYNAMORIO_INSTALL_DIR}/lib64/release)
+endif()
 find_path(DYNAMORIO_LIB_DIR
   NAMES libdrdecode.a
-  PATHS ${DYNAMORIO_INSTALL_DIR}/lib
+  PATHS ${DYNAMORIO_LIB_TYPE}
 )
 if (${DYNAMORIO_INCLUDE_DIR} STREQUAL "DYNAMORIO_INCLUDE_DIR-NOTFOUND" OR
     ${DYNAMORIO_LIB_DIR} STREQUAL "DYNAMORIO_LIB_DIR-NOTFOUND")
@@ -73,7 +79,7 @@ target_link_libraries (chameleon
   ${ZLIB_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${DYNAMORIO_LIB_DIR}/libdrdecode.a
-  ${DYNAMORIO_LIB_DIR}/libdrhelper.a
+  ${DYNAMORIO_LIB_DIR}/../libdrhelper.a
   -static
 )
 

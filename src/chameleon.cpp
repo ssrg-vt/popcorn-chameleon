@@ -91,11 +91,14 @@ static void parseArgs(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   ret_t code;
+  Timer t;
 
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
   parseArgs(argc, argv);
   DEBUG(printChameleonInfo())
+
+  t.start();
 
   // Initialize the child process
   Process child(childArgc, childArgv);
@@ -111,6 +114,10 @@ int main(int argc, char **argv) {
   code = transformer.initialize();
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
+
+  t.end();
+  INFO("Application startup took " << t.elapsed(Timer::Micro) << " us"
+       << std::endl);
 
   INFO("beginning execution of child process" << std::endl);
   do {

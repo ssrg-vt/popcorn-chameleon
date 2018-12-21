@@ -243,7 +243,6 @@ public:
    * @return a return code describing the outcome
    */
   virtual void randomize(int start, RandUtil &ru) override {
-    size_t i;
     ZeroPad pad;
 
     // We can't randomize the return address or saved RBP location; move them
@@ -256,6 +255,7 @@ public:
     sortRegisterSaveLocs();
 
     DEBUG_VERBOSE(
+      size_t i;
       DEBUGMSG_VERBOSE("permuted callee-save slots:" << std::endl);
       for(i = 0; i < slots.size(); i++) {
         DEBUGMSG_VERBOSE("  " << slots[i].original << " ("

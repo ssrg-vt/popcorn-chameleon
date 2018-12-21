@@ -48,8 +48,7 @@ typedef struct SlotMap {
  * @param second slot mapping
  * @return true if a's first element is less than b's first element
  */
-static bool slotMapCmp(const SlotMap &a, const SlotMap &b)
-{ return a.original < b.original; }
+bool slotMapCmp(const SlotMap &a, const SlotMap &b);
 
 /**
  * Comparison function for sorting a SlotMap.  Searches based on the original
@@ -59,8 +58,7 @@ static bool slotMapCmp(const SlotMap &a, const SlotMap &b)
  * @param second slot mapping
  * @return true if a's first element is greater than b's first element
  */
-static bool slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
-{ return a.original > b.original; }
+bool slotMapCmpReverse(const SlotMap &a, const SlotMap &b);
 
 /**
  * Return whether the SlotMap contains a given offset.  Uses the slot's
@@ -70,8 +68,7 @@ static bool slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
  * @param offset a canonicalized stack offset
  * @return true if the slot contains the offset or false otherwise
  */
-static bool slotMapContains(const SlotMap *slot, int offset)
-{ return CONTAINS(offset, slot->original, slot->size); }
+bool slotMapContains(const SlotMap *slot, int offset);
 
 /**
  * Return whether an offset would appear in a SlotMap before the specified
@@ -82,8 +79,7 @@ static bool slotMapContains(const SlotMap *slot, int offset)
  * @return true if the offset would appear before the slot or false
  *         otherwise
  */
-static bool lessThanSlotMap(const SlotMap *slot, int offset)
-{ return offset < slot->original; }
+bool lessThanSlotMap(const SlotMap *slot, int offset);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Randomization utilities
@@ -162,7 +158,15 @@ public:
    * @return the randomized offset of the last stack slot
    */
   template<typename Pad>
-  int calculateOffsets(size_t startIdx, int startOffset, Pad &pad);
+  int calculateOffsets(size_t startIdx, int startOffset, Pad &pad) {
+    startOffset = abs(startOffset);
+    for(size_t i = startIdx; i < slots.size(); i++) {
+      startOffset = ROUND_UP(startOffset + slots[i].size + pad.slotPadding(),
+                             slots[i].alignment);
+      slots[i].randomized = -startOffset;
+    }
+    return -startOffset;
+  }
 
   /**
    * Randomize the slots in a region.  Calculates the new offset & size.
@@ -240,8 +244,7 @@ struct ZeroPad { int slotPadding() { return 0; } };
  * @param b second stack region
  * @return true if a comes before b in a sorted ordering of stack regions
  */
-static bool regionCompare(const StackRegionPtr &a, const StackRegionPtr &b)
-{ return a->getOriginalRegionOffset() < b->getOriginalRegionOffset(); }
+bool regionCompare(const StackRegionPtr &a, const StackRegionPtr &b);
 
 /**
  * A region of the stack which cannot be randomized.  Provides an identity

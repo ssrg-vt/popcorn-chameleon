@@ -59,7 +59,7 @@ extern bool verboseDebug;
 #else
 # define DEBUGMSG( ... ) {}
 # define DEBUGMSG_RAW( ... ) {}
-# define DEBUGMSG_INSTR( instr ) {}
+# define DEBUGMSG_INSTR( msg, instr ) {}
 # define DEBUG( ... ) {}
 # define DEBUGMSG_VERBOSE( ... ) {}
 # define DEBUGMSG_VERBOSE_RAW( ... ) {}

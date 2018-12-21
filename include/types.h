@@ -163,7 +163,7 @@ public:
   ret_t end(bool doAccumulate = false) {
     e = timestamp();
     if(e != UINT64_MAX) {
-      if(doAccumulate) accum = e - s;
+      if(doAccumulate) accum += e - s;
       return ret_t::Success;
     }
     else return ret_t::NoTimestamp;
