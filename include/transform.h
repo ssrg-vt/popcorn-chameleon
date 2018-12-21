@@ -45,9 +45,10 @@ public:
 
   /**
    * Initialize the code transformer object.
+   * @param randomize if true, randomize the code
    * @return a return code describing the outcome
    */
-  ret_t initialize();
+  ret_t initialize(bool randomize);
 
   /**
    * Return the address of a buffer which can be directly passed to the kernel

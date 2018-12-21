@@ -129,7 +129,7 @@ CodeTransformer::~CodeTransformer() {
   }
 }
 
-ret_t CodeTransformer::initialize() {
+ret_t CodeTransformer::initialize(bool randomize) {
   ret_t retcode;
 
   if(batchedFaults != 1) {
@@ -151,10 +151,12 @@ ret_t CodeTransformer::initialize() {
   if(retcode != ret_t::Success) return retcode;
   retcode = populateCodeWindow(codeSec, codeSeg);
   if(retcode != ret_t::Success) return retcode;
-  retcode = analyzeFunctions();
-  if(retcode != ret_t::Success) return retcode;
-  retcode = randomizeFunctions();
-  if(retcode != ret_t::Success) return retcode;
+  if(randomize) {
+    retcode = analyzeFunctions();
+    if(retcode != ret_t::Success) return retcode;
+    retcode = randomizeFunctions();
+    if(retcode != ret_t::Success) return retcode;
+  }
 
   if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
     return ret_t::UffdHandshakeFailed;

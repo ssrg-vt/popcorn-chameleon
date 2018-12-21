@@ -15,6 +15,7 @@ using namespace chameleon;
 pid_t masterPID;
 static int childArgc;
 static char **childArgv;
+bool randomize = true;
 #ifndef NDEBUG
 bool verboseDebug = false;
 #endif
@@ -34,6 +35,7 @@ static void printHelp(const char *bin) {
                  "specify a binary and any arguments" << endl << endl
        << "Options:" << endl
        << "  -h : print help and exit" << endl
+       << "  -n : don't randomize the code section" << endl
 #ifndef NDEBUG
        << "  -d : print even more debugging information than normal" << endl
 #endif
@@ -65,10 +67,11 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hdv")) != -1) {
+  while((c = getopt(argc, argv, "hndv")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
+    case 'n': randomize = false; break;
 #ifndef NDEBUG
     case 'd': verboseDebug = true; break;
 #endif
@@ -111,7 +114,7 @@ int main(int argc, char **argv) {
   if(code != ret_t::Success)
     ERROR("could not initialize libelf: " << retText(code) << endl);
   CodeTransformer transformer(child);
-  code = transformer.initialize();
+  code = transformer.initialize(randomize);
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
 
