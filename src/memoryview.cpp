@@ -30,6 +30,13 @@ size_t FileRegion::populate(uintptr_t address,
   return copyLen + curLen;
 }
 
+byte_iterator FileRegion::getData(uintptr_t address) {
+  ssize_t regOffset = address - start, remainingLen = fileLen - regOffset;
+  if(regOffset >= 0 && remainingLen >= 0)
+    return byte_iterator(data[regOffset], remainingLen);
+  else return byte_iterator::empty();
+}
+
 BufferedRegion::BufferedRegion(uintptr_t start,
                                size_t len,
                                size_t fileLen,
@@ -80,6 +87,20 @@ static bool regionContains(const MemoryRegionPtr *region, uintptr_t addr)
  */
 static bool lessThanRegion(const MemoryRegionPtr *region, uintptr_t addr)
 { return addr < (*region)->getStart(); }
+
+uintptr_t MemoryWindow::zeroCopy(uintptr_t address) const {
+  ssize_t regNum;
+  byte_iterator data;
+
+  regNum = findRight<MemoryRegionPtr, uintptr_t,
+                     regionContains, lessThanRegion>
+                    (&regions[0], regions.size(), address);
+  if(regNum >= 0 && regions[regNum]->contains(address)) {
+    data = regions[regNum]->getData(address);
+    if(data.getLength() >= PAGESZ) return (uintptr_t)*data;
+  }
+  return 0;
+}
 
 ret_t
 MemoryWindow::project(uintptr_t address, std::vector<char> &buffer) const {

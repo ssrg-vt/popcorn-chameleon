@@ -40,7 +40,7 @@ static inline bool setSignalHandler() {
 static std::vector<char> pageBuf(PAGESZ);
 static inline ret_t
 handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
-  uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address);
+  uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address), data;
   ret_t code = ret_t::Success;
 
   assert(msg.event == UFFD_EVENT_PAGEFAULT && "Invalid message type");
@@ -48,9 +48,12 @@ handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
            << ", flags=" << msg.arg.pagefault.flags << ", ptid=" << std::dec
            << msg.arg.pagefault.feat.ptid << std::endl);
 
-  CT->project(PAGE_DOWN(msg.arg.pagefault.address), pageBuf);
-  if(!uffd::copy(uffd, (uintptr_t)&pageBuf[0], pageAddr))
-    code = ret_t::UffdCopyFailed;
+  if(!(data = CT->zeroCopy(pageAddr))) {
+    if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success) return code;
+    data = (uintptr_t)&pageBuf[0];
+  }
+
+  if(!uffd::copy(uffd, data, pageAddr)) code = ret_t::UffdCopyFailed;
 
   return code;
 }

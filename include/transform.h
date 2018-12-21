@@ -50,6 +50,17 @@ public:
   ret_t initialize();
 
   /**
+   * Return the address of a buffer which can be directly passed to the kernel
+   * to handle a fault for an address, or 0 if none can be used for zero-copy.
+   *
+   * @param address faulting page address
+   * @return address of page buffer used to handle fault or 0 if zero-copy is
+   *         not possible
+   */
+  uintptr_t zeroCopy(uintptr_t address) const
+  { return codeWindow.zeroCopy(address); }
+
+  /**
    * Project the transformed code into the buffer.
    * @param address page address at which to fill
    * @param buffer a buffer into which the MemoryRegion's contents are copied

@@ -117,6 +117,13 @@ public:
   virtual size_t populate(uintptr_t address,
                           std::vector<char> &buffer,
                           size_t offset) const override;
+
+  /**
+   * Get an iterator to the underlying data store at a given address.
+   * @param addr a program virtual address
+   * @return an iterator for accessing the underlying data
+   */
+  virtual byte_iterator getData(uintptr_t address) override;
 private:
   size_t fileLen;
   byte_iterator data;
@@ -199,6 +206,19 @@ public:
    */
   void sort()
   { std::sort(regions.begin(), regions.end(), MemoryRegion::compare); }
+
+  /**
+   * Return an address of a buffer that can be directly passed to the kernel to
+   * handle a pagefault if possible, or 0 otherwise.  Pages that can be handled
+   * as zero-copy do not cross regions and have all their data in memory, e.g.,
+   * BufferedRegions or FileRegions where the entire page is inside the region's
+   * on-disk data (not past end-of-region or in implicitly-specified zeros).
+   *
+   * @param address faulting page address
+   * @return address of page buffer used to handle fault or 0 if zero-copy is
+   *         not possible
+   */
+  uintptr_t zeroCopy(uintptr_t address) const;
 
   /**
    * Project the MemoryRegions in the window into the buffer, zero-filling any
