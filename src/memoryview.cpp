@@ -61,6 +61,7 @@ size_t BufferedRegion::populate(uintptr_t address,
 
 byte_iterator BufferedRegion::getData(uintptr_t address) {
   ssize_t regOffset = address - start;
+  assert(len - regOffset >= 0 && "Invalid address");
   if(regOffset >= 0) return byte_iterator(&data[regOffset], len - regOffset);
   else return byte_iterator::empty();
 }

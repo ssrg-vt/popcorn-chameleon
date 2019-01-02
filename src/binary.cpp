@@ -120,10 +120,16 @@ static inline void buildSectionName(std::string &buf, const char *sec) {
 ret_t Binary::initialize() {
   ret_t retcode = ret_t::Success;
   std::string buf;
+  ssize_t fsize;
 
   if((fd = open(filename, O_RDONLY)) == -1 ||
-     (size = fileSize(fd)) == -1 ||
-     !(data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0))) {
+     (fsize = fileSize(fd)) == -1) {
+    retcode = ret_t::OpenFailed;
+    goto error;
+  }
+
+  size = fsize;
+  if(!(data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0))) {
     retcode = ret_t::OpenFailed;
     goto error;
   }
@@ -183,8 +189,8 @@ ret_t Binary::initialize() {
     goto error;
   }
   unwind.setEntrySize(sizeof(unwind_loc));
-
   goto finish;
+
 error:
   cleanup();
 finish:
@@ -229,11 +235,11 @@ byte_iterator Binary::getData(uintptr_t addr) const {
 size_t
 Binary::getRemainingMemSize(uintptr_t addr, const Segment &segment) const {
   size_t remaining = 0;
-  off_t offset;
+  size_t offset;
   if(segment.contains(addr)) {
     offset = addr - segment.address();
-    assert(offset <= segment.memorySize() && "Invalid segment memory size");
-    remaining = segment.memorySize() - offset;
+    if(offset <= segment.memorySize())
+      remaining = segment.memorySize() - offset;
   }
   return remaining;
 }
@@ -247,10 +253,9 @@ size_t Binary::getRemainingMemSize(uintptr_t addr) const {
 size_t
 Binary::getRemainingFileSize(uintptr_t addr, const Segment &segment) const {
   size_t remaining = 0;
-  off_t offset;
+  size_t offset;
   if(segment.contains(addr)) {
     offset = addr - segment.address();
-    assert(offset <= segment.memorySize() && "Invalid segment memory size");
     if(offset < segment.fileSize()) remaining = segment.fileSize() - offset;
   }
   return remaining;
@@ -269,7 +274,7 @@ size_t Binary::getRemainingFileSize(uintptr_t addr) const {
  * @return true if contained or false otherwise
  */
 static bool funcContains(const function_record *func, uintptr_t addr)
-{ return CONTAINS(addr, func->addr, func->code_size); }
+{ return CONTAINS_ABOVE(addr, func->addr, func->code_size); }
 
 /**
  * Return whether the address comes before the start of the function in the
@@ -283,7 +288,8 @@ static bool lessThanFunc(const function_record *func, uintptr_t addr)
 
 Binary::func_iterator
 Binary::getFunctions(uintptr_t start, uintptr_t end) const {
-  ssize_t idx, count = 0;
+  ssize_t idx;
+  size_t count;
   const function_record *record;
 
   if(end <= start) return func_iterator::empty();
@@ -304,7 +310,7 @@ Binary::getFunctions(uintptr_t start, uintptr_t end) const {
 template<typename T, typename it>
 static inline it getIterator(const Binary::EntrySection<T> &section,
                              size_t offset, size_t num) {
-  ssize_t entries = section.getNumEntries(), remaining = entries - offset;
+  size_t entries = section.getNumEntries(), remaining = entries - offset;
   if(remaining <= 0) return it::empty();
   if(remaining < num)
     WARN("Function record indicated more entries than available" << std::endl);

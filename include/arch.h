@@ -19,6 +19,21 @@
 #include "randomize.h"
 #include "types.h"
 
+/*
+ * Stack growth direction -- each ISA must declare which direction the stack
+ * grows.
+ */
+#define UP   0 /* grows from lower addresses to higher addresses */
+#define DOWN 1 /* grows from higher addresses to lower addresses */
+
+#ifdef __x86_64__
+# define STACK_DIRECTION DOWN
+#endif
+
+#ifndef STACK_DIRECTION
+# error Each ISA must define which direction the stack grows
+#endif
+
 namespace chameleon {
 namespace arch {
 
@@ -104,7 +119,7 @@ void marshalSyscall(struct user_regs_struct &regs, long syscall,
  * @param regs a register set
  * @return system call return value
  */
-int syscallRetval(struct user_regs_struct &regs);
+long syscallRetval(struct user_regs_struct &regs);
 
 /**
  * Dump register contents to a stream.

@@ -81,24 +81,55 @@ public:
    * Return a sentinal empty iterator.
    * @return an empty iterator
    */
-  static iterator empty() { return iterator(nullptr, 0); }
+  static iterator empty() { return iterator(); }
 
+  /**
+   * Get the number of entries made available by the iterator.
+   * @return the number of available entries
+   */
   size_t getLength() const { return len; }
+
+  /**
+   * Return whether or not the iterator has reached the end.
+   * @return true if the iterator has visited all entries or false otherwise
+   */
   bool end() const { return cur >= len; }
 
+  /**
+   * Reset the iterator to the beginning of the entries.
+   */
   void reset() { cur = 0; }
+
+  /**
+   * Advance to the next entry.
+   */
   void operator++() { cur++; }
 
+  /**
+   * Return the entry at a given index.
+   * @param idx the index
+   * @return the entry at idx or nullptr if idx is out of bounds
+   */
   T *operator[](size_t idx) const {
     if(idx < len) return &entries[idx];
     else return nullptr;
   }
 
+  /**
+   * Return the entry at the current iterator index.
+   * @return the entry at the iterator's current index or nullptr if there
+   *         are no more entries
+   */
   const T *operator*() const {
     if(cur < len) return &this->entries[cur];
     else return nullptr;
   }
 
+  /**
+   * Return whether the iterator has valid entries to traverse.
+   * @return true if the iterator has entries available for traversal or false
+   *         otherwise
+   */
   bool operator!() const { return entries == nullptr; }
 private:
   size_t cur, len;

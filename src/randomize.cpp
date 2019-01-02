@@ -22,7 +22,7 @@ bool chameleon::slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
 { return a.original > b.original; }
 
 bool chameleon::slotMapContains(const SlotMap *slot, int offset)
-{ return CONTAINS(offset, slot->original, slot->size); }
+{ return CONTAINS_BELOW(offset, slot->original, slot->size); }
 
 bool chameleon::lessThanSlotMap(const SlotMap *slot, int offset)
 { return offset < slot->original; }
@@ -39,11 +39,11 @@ void StackRegion::addSlot(int offset, uint32_t size, uint32_t alignment) {
 
   // Do existence checking so we don't have redundant slots
   for(auto &sm : slots) {
-    if(CONTAINS(offset, sm.original, sm.size)) {
-      if(!CONTAINS(offset + size, sm.original, sm.size))
+    if(CONTAINS_BELOW(offset, sm.original, sm.size)) {
+      if(!CONTAINS_BELOW(offset - size + 1, sm.original, sm.size))
         WARN("Overlapping slots? "
-             << sm.original << " -> " << sm.original + sm.size << ", "
-             << offset << " -> " << offset + size << std::endl);
+             << sm.original - sm.size << " -> " << sm.original << ", "
+             << offset - size << " -> " << offset << std::endl);
       return;
     }
   }
@@ -66,7 +66,7 @@ bool chameleon::regionCompare(const StackRegionPtr &a, const StackRegionPtr &b)
 void ImmutableRegion::randomize(int start, RandUtil &ru) {
   ZeroPad pad;
 
-  sortSlotsReverse();
+  sortSlots();
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
   randomizedSize = origSize;
 
@@ -77,8 +77,6 @@ void ImmutableRegion::randomize(int start, RandUtil &ru) {
                        << std::endl);
     }
   )
-
-  sortSlots();
 }
 
 /**
@@ -90,7 +88,7 @@ void ImmutableRegion::randomize(int start, RandUtil &ru) {
  * originalOffset = 0).  Holes can be filled in with actual slots.
  */
 struct Bucket {
-  std::vector<SlotMap> slots; /* Slots & holdes in the bucket */
+  std::vector<SlotMap> slots; /* Slots & holes in the bucket */
 
   /**
    * Create a hole of a given size.
@@ -114,14 +112,14 @@ struct Bucket {
                           const SlotMap &s,
                           uint32_t &beforePad,
                           uint32_t &afterPad) {
-    uint32_t alignUp;
+    uint32_t alignDown;
 
     assert(hole.original == 0 && "Not a hole");
 
-    alignUp = ROUND_UP(curOffset, s.alignment);
-    if(CONTAINS(alignUp, curOffset, hole.size + 1) &&
-       CONTAINS(alignUp + s.size, curOffset, hole.size + 1)) {
-      beforePad = alignUp - curOffset;
+    alignDown = ROUND_DOWN(curOffset, s.alignment);
+    if(CONTAINS_BELOW(alignDown, curOffset, hole.size) &&
+       CONTAINS_BELOW(alignDown - s.size + 1, curOffset, hole.size)) {
+      beforePad = curOffset - alignDown;
       afterPad = hole.size - s.size - beforePad;
       return true;
     }
@@ -137,29 +135,29 @@ struct Bucket {
    * @return true if the slot was successfully added or false otherwise
    */
   bool addSlotMap(const SlotMap &s) {
-    uint32_t curOffset = 0, beforePad = 0, afterPad = 0;
+    uint32_t curOffset = 0, beforePad, afterPad;
     size_t i;
     std::vector<SlotMap>::iterator it;
 
-    assert(s.original != 0 && "Invalid sentinal offset");
+    assert(s.original != 0 && "Adding hole to bucket");
 
     for(i = 0; i < slots.size(); i++) {
+      curOffset += slots[i].size;
       if(slots[i].original == 0 &&
          canHoldSlot(curOffset, slots[i], s, beforePad, afterPad)) {
         it = slots.begin() + i;
         it = slots.erase(it);
-        if(beforePad) {
-          it = slots.insert(it, getHole(beforePad));
+        if(afterPad) {
+          it = slots.insert(it, getHole(afterPad));
           it++;
         }
         it = slots.insert(it, s);
-        if(afterPad) {
+        if(beforePad) {
           it++;
-          it = slots.insert(it, getHole(afterPad));
+          it = slots.insert(it, getHole(beforePad));
         }
         return true;
       }
-      else curOffset += slots[i].size;
     }
     return false;
   }
@@ -191,7 +189,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   SlotMap toPlace;
   ZeroPad pad;
 
-  // Sort buckets by increasing size/alignment requirements & determine the
+  // Sort slots by increasing size/alignment requirements & determine the
   // bucket size based on slot sizes & alignments.  For example, a stack slot
   // of size 24 with 16-byte alignment requires a 32-byte bucket.
   std::sort(slots.begin(), slots.end(), slotSizeAlignCmp);
@@ -199,7 +197,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
 
   // Due to starting offset, the first bucket may actually be smaller to round
   // the frame up to the nearest bucket size
-  curSize = ROUND_UP(abs(start), bucketSize) - abs(start);
+  curSize = ROUND_UP(start, bucketSize) - start;
   if(curSize < bucketSize) {
     buckets.emplace_back(Bucket(curSize));
     fillerBucket = true;
@@ -208,7 +206,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   // To avoid deterministically placing equal sized slots into the same buckets
   // for every permutation, e.g., a frame with multiple 8-byte slots being
   // placed into the same buckets due to their ordering from sorting, randomize
-  // slots which are in equivalent classes (defined by size & alignment).
+  // slots which are in equivalent size/alignment classes.
   for(i = 0; i < slots.size(); i++) {
     curSize = ROUND_UP(slots[i].size, slots[i].alignment);
     j = i;
@@ -226,10 +224,8 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
     // Search for an existing bucket that can accomodate the slot
     added = false;
     for(auto &bucket : buckets) {
-      if(bucket.addSlotMap(toPlace)) {
-        added = true;
-        break;
-      }
+      added = bucket.addSlotMap(toPlace);
+      if(added) break;
     }
 
     // Add a new bucket if no existing buckets can contain the slot
@@ -255,19 +251,27 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
                ru.gen);
   std::shuffle(buckets.begin() + j, buckets.end(), ru.gen);
   for(auto &bucket : buckets)
-    for(auto slot = bucket.slots.rbegin(); slot != bucket.slots.rend(); slot++)
+    for(auto slot = bucket.slots.begin(); slot != bucket.slots.end(); slot++)
       if(slot->original != 0) slots.emplace_back(*slot);
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
 
   // If permutation failed, resort to original ordering
-  if(randomizedOffset < origOffset) {
+  if(randomizedOffset > origOffset) {
     WARN("Could not permute slots in " << origOffset << " -> "
-         << origOffset + (int)origSize << " region" << std::endl);
+         << origOffset + origSize << " region" << std::endl);
     for(auto &sm : slots) sm.randomized = sm.original;
   }
-  else if(randomizedOffset > origOffset) {
+  else if(randomizedOffset < origOffset) {
     // TODO extra space, disperse between slots
   }
+
+  // Sometimes we actually manage to create smaller regions than those laid out
+  // by the compiler.  Logically pad to fill the region.
+  randomizedOffset = start + origSize;
+  randomizedSize = origSize;
+
+  // Sort by original offset for searching
+  sortSlots();
 
   DEBUG_VERBOSE(
     DEBUGMSG_VERBOSE("permuted slots:" << std::endl);
@@ -276,14 +280,6 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
                        << slots[i].randomized << std::endl);
     }
   )
-
-  // Sometimes we actually manage to create smaller regions than those laid out
-  // by the compiler.  Logically pad to fill the region.
-  randomizedOffset = start - origSize;
-  randomizedSize = origSize;
-
-  // Sort by original offset for searching
-  sortSlots();
 }
 
 void RandomizableRegion::randomize(int start, RandUtil &ru) {
@@ -293,17 +289,17 @@ void RandomizableRegion::randomize(int start, RandUtil &ru) {
   std::shuffle(slots.begin(), slots.end(), ru.gen);
   curOffset = calculateOffsets<RandUtil>(0, start, ru);
 
+  // Sort by original offset for searching & update frame sizes
+  sortSlots();
+  randomizedSize = curOffset - start;
+  randomizedOffset = curOffset;
+
   DEBUG_VERBOSE(
     DEBUGMSG_VERBOSE("randomized slots:" << std::endl);
     for(size_t i = 0; i < slots.size(); i++)
       DEBUGMSG_VERBOSE("  " << slots[i].original << " -> "
                        << slots[i].randomized << std::endl);
   )
-
-  // Sort by original offset for searching & update frame sizes
-  sortSlots();
-  randomizedSize = abs(curOffset - start);
-  randomizedOffset = curOffset;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -322,7 +318,8 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func)
-  : binary(binary), func(func), instrs(nullptr) {
+  : binary(binary), func(func), instrs(nullptr),
+    randomizedFrameSize(UINT32_MAX) {
   int offset;
   arch::RegType type;
   Binary::slot_iterator si = binary.getStackSlots(func);
@@ -365,13 +362,11 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
     ui.reset();
   )
 
-  // Note: regions are ordered from lowest region first; walk the vector in
-  // reverse order to calculate CFA offsets
-  for(auto r = regions.rbegin(); r != regions.rend(); r++) {
+  for(auto r = regions.begin(); r != regions.end(); r++) {
     (*r)->randomize(offset, ru);
     offset = (*r)->getRandomizedRegionOffset();
   }
-  randomizedFrameSize = abs(regions[0]->getRandomizedRegionOffset());
+  randomizedFrameSize = regions.back()->getRandomizedRegionOffset();
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
@@ -393,7 +388,7 @@ int RandomizedFunction::getRandomizedOffset(int orig) const {
  */
 static bool
 slotContains(const std::pair<int, const stack_slot *> *slot, int offset)
-{ return CONTAINS(offset, slot->first, slot->second->size); }
+{ return CONTAINS_BELOW(offset, slot->first, slot->second->size); }
 
 /**
  * Return whether an offset would appear in a slot before the specified pair

@@ -279,12 +279,12 @@ ret_t Process::setSyscallRegs(long syscall, long a1, long a2, long a3,
   return ret_t::Success;
 }
 
-ret_t Process::getSyscallReturnValue(int &retval) const {
+ret_t Process::getSyscallReturnValue(long &retval) const {
   struct user_regs_struct regs;
   if(!stoppedAtSyscall()) return ret_t::InvalidState;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   retval = arch::syscallRetval(regs);
-  if(retval > -4096UL) retval = -retval;
+  if((unsigned long)retval > -4096UL) retval = -retval;
   return ret_t::Success;
 }
 

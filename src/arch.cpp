@@ -107,9 +107,8 @@ void arch::marshalSyscall(struct user_regs_struct &regs, long syscall,
   regs.r9 = a6;
 }
 
-int arch::syscallRetval(struct user_regs_struct &regs) {
-  return regs.rax;
-}
+long arch::syscallRetval(struct user_regs_struct &regs)
+{ return regs.rax; }
 
 #define DUMP_REG( regset, name ) \
   #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
@@ -174,25 +173,25 @@ enum x86Restriction {
 
 /*
  * x86 region indexes.  Only usable *before* randomization as empty regions may
- * be pruned.  Ordered by lowest stack address.
+ * be pruned.  Ordered by highest stack address.
  */
 enum x86Region {
-  R_Call = 0,
-  R_SPLimited,
-  R_Movable,
-  R_FPLimited,
+  R_CalleeSave = 0,
   R_Immovable,
-  R_CalleeSave,
+  R_FPLimited,
+  R_Movable,
+  R_SPLimited,
+  R_Call,
 };
 
 /* x86 region names (corresponds to indexs above) */
 const char *x86RegionName[] {
-  "call",
-  "SP-limited",
-  "movable",
-  "FP-limited",
-  "immovable",
   "callee-save",
+  "immovable",
+  "FP-limited",
+  "movable",
+  "SP-limited",
+  "call",
 };
 
 /**
@@ -245,9 +244,9 @@ public:
   virtual void randomize(int start, RandUtil &ru) override {
     ZeroPad pad;
 
-    // We can't randomize the return address or saved RBP location; move them
+    // We can't randomize the return address or saved FBP location; move them
     // to the front and randomize the remaining locations.
-    sortSlotsReverse();
+    sortSlots();
     std::shuffle(slots.begin() + 2, slots.end(), ru.gen);
     randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
     randomizedSize = origSize;
@@ -350,6 +349,8 @@ private:
  * Note 2: we assume all immovable objects are in a contiguous region adjacent
  * to the callee-save region
  */
+// TODO is the immovable region actually just stack alignment inserted by the
+// compiler?
 // TODO we don't do any checking regarding if a single stack slot is accessed
 // via both frame and stack pointer or crosses regions and thus could
 // potentially fall into one or more regions
@@ -376,18 +377,16 @@ public:
       cs->addRegisterSaveLoc(offset, loc->reg);
       regionSize += size;
     }
-    cs->setRegionOffset(-regionSize);
+    cs->setRegionOffset(regionSize);
     cs->setRegionSize(regionSize);
 
-    // Add x86-specific regions ordered by lowest stack address first.
-    // TODO is it possible to have immovable stack slots interspersed with
-    // movable ones?
-    regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
-    regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
-    regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
-    regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited));
-    regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
+    // Add x86-specific regions ordered by highest stack address first.
     regions.push_back(StackRegionPtr(cs));
+    regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
+    regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited));
+    regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
+    regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
+    regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
   }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
@@ -421,7 +420,7 @@ public:
       if(!regions[x86Region::R_CalleeSave]->contains(offset)) {
         // Some functions (e.g., Popcorn's migration library) access offsets
         // beyond the frame size in the metadata; ignore thoses accesses.
-        if(abs(offset) <= func->frame_size) {
+        if(offset <= (int)func->frame_size) {
           regions[x86Region::R_Immovable]->addSlot(offset, size, alignment);
           DEBUGMSG(" -> cannot randomize slot @ " << offset << " (size = "
                    << size << ")" << std::endl);
@@ -442,7 +441,7 @@ public:
                  << " limited to 1-byte displacements from FP" << std::endl);
         break;
       case arch::RegType::StackPointer:
-        // The metadata doesn't contain slot infor for the call area
+        // The metadata doesn't contain slot information for the call area
         if(foundSlot) {
           regions[x86Region::R_SPLimited]->addSlot(offset, size, alignment);
           DEBUGMSG(" -> slot @ " << offset
@@ -468,7 +467,7 @@ public:
 
   virtual ret_t populateSlots() override {
     int curOffset = 0;
-    ssize_t i;
+    size_t i;
     ret_t code = ret_t::Success;
 
     // Add stack slots to the movable region.  During analysis we should have
@@ -485,17 +484,17 @@ public:
       }
     }
 
-    // Calculate section offsets & prune empty sections.  Note that regions are
-    // in reverse order (lowest stack address first).
+    // Calculate section offsets & prune empty sections.
     // TODO is it faster to search through unsorted slots in each section to
     // find the bottom offset?
-    for(i = regions.size() - 1; i >= 0; i--) {
+    curOffset = regions[0]->getOriginalRegionOffset();
+    for(i = 1; i < regions.size(); i++) {
       if(regions[i]->numSlots() > 0) {
         StackRegionPtr &region = regions[i];
         region->sortSlots();
-        const SlotMap &bottom = region->getSlots()[0];
+        const SlotMap &bottom = region->getSlots().back();
         region->setRegionOffset(bottom.original);
-        region->setRegionSize(abs(bottom.original - curOffset));
+        region->setRegionSize(bottom.original - curOffset);
         curOffset = bottom.original;
       }
       else {
@@ -503,6 +502,7 @@ public:
                          << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
                          << " region" << std::endl);
         regions.erase(regions.begin() + i);
+        i--;
       }
     }
 
@@ -514,19 +514,12 @@ public:
    * the callee-save/immovable region; search for an update within that region.
    */
   virtual bool transformBulkFrameUpdate(int offset) const override {
-    int regType;
-    size_t i;
+    size_t i = 0;
 
     // Note: the immovable region may have been pruned if it was empty
-    for(i = 0; i < regions.size(); i++) {
-      regType = REGION_TYPE(regions[i]->getFlags());
-      if(regType == x86Region::R_Immovable ||
-         regType == x86Region::R_CalleeSave) break;
-    }
-
-    assert(i < regions.size() && "Invalid x86-64 stack layout");
-
-    if(offset < regions[i]->getOriginalRegionOffset()) return true;
+    if(regions.size() > 1 &&
+       REGION_TYPE(regions[1]->getFlags()) == x86Region::R_Immovable) i = 1;
+    if(offset > regions[i]->getOriginalRegionOffset()) return true;
     else return false;
   }
 
@@ -534,21 +527,13 @@ public:
    * For x86-64, the bulk update consists of the movable & call regions.
    */
   virtual uint32_t getRandomizedBulkFrameUpdate() const override {
-    int regType;
-    size_t i;
+    size_t i = 0;
+
+    assert(regions.size() > 1 && "No bulk frame update");
 
     // Note: the immovable region may have been pruned if it was empty
-    for(i = 0; i < regions.size(); i++) {
-      regType = REGION_TYPE(regions[i]->getFlags());
-      if(regType == x86Region::R_Immovable ||
-         regType == x86Region::R_CalleeSave) break;
-    }
-
-    // If calling this function, need at least the callee-saved & one of the
-    // movable/call regions
-    assert(i != 0 && i != regions.size() && "Invalid x86-64 stack layout");
-
-    return randomizedFrameSize + (regions[i]->getRandomizedRegionOffset());
+    if(REGION_TYPE(regions[1]->getFlags()) == x86Region::R_Immovable) i = 1;
+    return randomizedFrameSize - (regions[i]->getRandomizedRegionOffset());
   }
 
   virtual bool transformOffset(int offset) const override {

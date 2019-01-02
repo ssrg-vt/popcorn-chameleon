@@ -148,8 +148,8 @@ public:
   { std::sort(slots.begin(), slots.end(), slotMapCmpReverse); }
 
   /**
-   * Calculate randomized slot offsets and add padding by calling the provided
-   * template function.
+   * Calculate randomized slot offsets and add padding using the templated
+   * object.
    *
    * @template Pad an object that implements the slotPadding() function which
    *           returns an integer amount of padding to add between slots
@@ -159,17 +159,20 @@ public:
    */
   template<typename Pad>
   int calculateOffsets(size_t startIdx, int startOffset, Pad &pad) {
-    startOffset = abs(startOffset);
     for(size_t i = startIdx; i < slots.size(); i++) {
       startOffset = ROUND_UP(startOffset + slots[i].size + pad.slotPadding(),
                              slots[i].alignment);
-      slots[i].randomized = -startOffset;
+      slots[i].randomized = startOffset;
     }
-    return -startOffset;
+    return startOffset;
   }
 
   /**
    * Randomize the slots in a region.  Calculates the new offset & size.
+   *
+   * Note: child class implementations *must* sort the slots using sortSlots()
+   * after any randomization to make them available for searching!
+   *
    * @param start the starting offset of the region
    * @param ru a random number generator
    */
@@ -180,7 +183,7 @@ public:
   /**
    * Return the randomized offset of slot.
    * @param orig the canonicalized original offset
-   * @return the randomized offset or INT32_MAX if none available
+   * @return the canonicalized randomized offset or INT32_MAX if none available
    */
   int getRandomizedOffset(int orig);
 
@@ -191,7 +194,8 @@ public:
    * @param orig a canonicalized offset
    * @return true if the offset falls within the region, false otherwise
    */
-  bool contains(int orig) { return CONTAINS(orig, origOffset, origSize); }
+  bool contains(int orig) const
+  { return CONTAINS_BELOW(orig, origOffset, origSize); }
 
   /**
    * Setters & getters - set/get what you ask for.  Setters for offset & size
@@ -217,7 +221,9 @@ protected:
   /*
    * Region information.  The region's offset is the furthest address away from
    * the canonical frame address, i.e., the lowest address contained in the
-   * region for stacks that grow down.
+   * region for stacks that grow down or the highest address contained in the
+   * region for stacks that grow up.  Note that offsets are maintained as
+   * positive offsets from the stack frame's canonical frame address.
    */
   int32_t origOffset, randomizedOffset;
   uint32_t origSize, randomizedSize;
@@ -335,7 +341,7 @@ public:
   {  if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
-   * Get alignment requirements for the frame.
+   * Get alignment requirements for the function's stack frame.
    * @return frame alignment requirements
    */
   virtual uint32_t getFrameAlignment() const = 0;
@@ -357,17 +363,15 @@ public:
   void setInstructions(instrlist_t *instrs) { this->instrs = instrs; }
 
   /**
-   * Add a randomization restriction for a given slot.
-   * @param offset a canonicalized stack offset
-   * @param res restriction information about the slot
+   * Add a randomization restriction for a slot.
+   * @param res slot and restriction information
    * @return a return code describing the outcome
    */
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
 
   /**
    * Populate stack regions with stack slots from metadata after analyzing
-   * restrictions.  Just to emphasize, this should be called *after* analysis.
-   *
+   * restrictions.  Just to emphasize, this must be called *after* analysis.
    * @return a return code describing the outcome
    */
   virtual ret_t populateSlots() = 0;
@@ -423,10 +427,7 @@ public:
   /**
    * Get the randomized offset for a stack slot
    *
-   * Note: the original stack slot offset must be canonicalized (i.e.,
-   * converted to offset from CFA) before passing to the function
-   *
-   * @param orig the original stack slot offset (canonicalized)
+   * @param orig the canonicalized original stack slot offset
    * @return the canonicalized randomized offset, or INT32_MAX if orig
    *         doesn't correspond to any stack slot
    */
@@ -434,7 +435,7 @@ public:
 
   /**
    * Hook to allow ISA-specific implementations to do any other transformations
-   * not captured by replacing memory reference operands.
+   * not captured by finding & replacing memory reference operands.
    *
    * @param frameSize current frame size
    * @param randFrameSize current randomized frame size

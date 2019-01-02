@@ -73,7 +73,9 @@ public:
    * @param addr a virtual memory address
    * @return true if it contains the address, false otherwise
    */
-  bool contains(uintptr_t addr) const { return CONTAINS(addr, start, len); }
+  bool contains(uintptr_t addr) const
+  { return CONTAINS_ABOVE(addr, start, len); }
+
 protected:
   uintptr_t start, end;
   size_t len;

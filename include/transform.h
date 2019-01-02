@@ -108,7 +108,10 @@ public:
   /**
    * Convert a stack slot (base register + offset) to an offset from the
    * canonical frame address (CFA), defined as the highest stack address of a
-   * function activation for stacks that grow down.
+   * function activation for stacks that grow down or the lowest stack address
+   * of a function activation for stacks that grow up.  Note that as part of
+   * the canonicalization process, all offsets are converted to positive
+   * values.
    *
    * @param frameSize size of the frame in bytes
    * @param reg the base register
@@ -121,7 +124,8 @@ public:
 
   /**
    * Convert an offset from the canonical frame address (CFA) to an offset from
-   * a base register.
+   * a base register.  Performs the reverse operation from
+   * canonicalizeSlotOffset().
    *
    * @param frameSize size of the frame in bytes
    * @param reg the base register

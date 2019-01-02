@@ -11,12 +11,22 @@
 #include <assert.h>
 
 /*
- * Check if a value is within a region.  Note that all values must either be
- * signed integers or must be within a signed 64-bit integer range.
+ * Check if a value is within the region [start, start+len).  Note that all
+ * values must either be signed integers or must be within a signed 64-bit
+ * integer range.
  */
-#define CONTAINS( val, start, len ) \
+#define CONTAINS_ABOVE( val, start, len ) \
   ((int64_t)(start) <= (int64_t)(val) && \
    (int64_t)(val) < ((int64_t)(start) + (int64_t)(len)))
+
+/*
+ * Check if a value is within the region (start-len, start].  Note that all
+ * values must either be signed integers or must be within a signed 64-bit
+ * integer range.
+ */
+#define CONTAINS_BELOW( val, start, len ) \
+  ((int64_t)(val) <= (int64_t)(start) && \
+   (int64_t)(val) > ((int64_t)(start) - (int64_t)(len)))
 
 /* Rounding for positive values and positive power-of-2 sizes */
 #define ROUND_DOWN( val, size ) ((val) & -(size))

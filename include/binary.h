@@ -34,14 +34,8 @@ public:
      * Zero-initialize all fields; users must call initialize() to set up the
      * section.
      */
-    Section() : name(""), elf(nullptr), header({0}), section(nullptr) {}
-
-    const std::string &getName() const { return name; }
-    uintptr_t address() const { return header.sh_addr; }
-    uintptr_t fileOffset() const { return header.sh_offset; }
-    uintptr_t size() const { return header.sh_size; }
-    bool contains(uintptr_t addr) const
-    { return CONTAINS(addr, header.sh_addr, header.sh_size); }
+    Section() : name(""), entrySize(0), numEntries(0), elf(nullptr),
+                header({0}), section(nullptr), data(nullptr) {}
 
     /**
      * Initialize the object with an ELF object, name, header and section.
@@ -57,9 +51,21 @@ public:
                              Elf_Scn *section);
 
     /* Field getters - return what you ask for */
+    const std::string &getName() const { return name; }
     size_t getEntrySize() const { return entrySize; }
     size_t getNumEntries() const { return numEntries; }
+    uintptr_t address() const { return header.sh_addr; }
+    uintptr_t fileOffset() const { return header.sh_offset; }
+    size_t size() const { return header.sh_size; }
     const void *getData() const { return data->d_buf; }
+
+    /**
+     * Return whether the section contains an address.
+     * @param addr a virtual address
+     * @return true if the section contains the address or false otherwise
+     */
+    bool contains(uintptr_t addr) const
+    { return CONTAINS_ABOVE(addr, header.sh_addr, header.sh_size); }
 
     /**
      * Set the size of entries & re-calculate the number of entries.
@@ -92,7 +98,7 @@ public:
   };
 
   /**
-   * A section containing a number of identical sections.
+   * A section containing a number of identical entries.
    */
   template<typename T>
   class EntrySection : public Section {
@@ -141,17 +147,24 @@ public:
     Segment() : header({0}) {}
     Segment(GElf_Phdr &header) : header(header) {}
 
+    /* Field getters - return what you ask for */
     uintptr_t address() const { return header.p_vaddr; }
     uintptr_t fileOffset() const { return header.p_offset; }
-    uintptr_t fileSize() const { return header.p_filesz; }
-    uintptr_t memorySize() const { return header.p_memsz; }
+    size_t fileSize() const { return header.p_filesz; }
+    size_t memorySize() const { return header.p_memsz; }
     Type type() const { return (Type)header.p_type; }
     uint64_t flags() const { return header.p_flags; }
     bool isExecutable() const { return header.p_flags & Flags::Executable; }
     bool isWritable() const { return header.p_flags & Flags::Writable; }
     bool isReadable() const { return header.p_flags & Flags::Readable; }
+
+    /**
+     * Return whether the segment contains an address.
+     * @param addr a virtual address
+     * @return true if the segment contains the address or false otherwise
+     */
     bool contains(uintptr_t addr) const
-    { return CONTAINS(addr, header.p_vaddr, header.p_memsz); }
+    { return CONTAINS_ABOVE(addr, header.p_vaddr, header.p_memsz); }
 
   private:
     GElf_Phdr header;
@@ -227,7 +240,7 @@ public:
 
   /**
    * Get the remaining size, in bytes, from a virtual address to the end of the
-   * the segment argument.
+   * the specified segment.
    *
    * @param addr a virtual memory address contained in segment
    * @param segment the segment containing addr
@@ -299,6 +312,7 @@ public:
    * @return a iterator for the function's unwind locations
    */
   unwind_iterator getUnwindLocations(const function_record *func) const;
+
 private:
   /* Raw file access */
   const char *filename;
@@ -334,10 +348,13 @@ private:
    * Return whether an address is within the mapped file's boundaries.  Note:
    * does *not* apply to virtual addresses of the binary, but rather addresses
    * inside the mapped file in our virtual memory.  Used for error checking.
+   *
+   * @param addr an address inside the mapped file, i.e., virtual address from
+   *             inside where the chameleon process mapped the file
    * @return true if contained within or false otherwise
    */
   bool binaryContains(uintptr_t addr) const
-  { return CONTAINS(addr, (uintptr_t)data, size); }
+  { return CONTAINS_ABOVE(addr, (uintptr_t)data, size); }
 
   /**
    * Search for a section by name and populate the section object argument.

@@ -187,7 +187,7 @@ public:
    * @param retval output parameter into which the exit code is written
    * @return a return code describing the outcome
    */
-  ret_t getSyscallReturnValue(int &retval) const;
+  ret_t getSyscallReturnValue(long &retval) const;
 
   /**
    * Read 8 bytes of data from a virtual memory address.
