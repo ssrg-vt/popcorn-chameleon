@@ -20,6 +20,7 @@
 #include "arch.h"
 #include "binary.h"
 #include "memoryview.h"
+#include "parasite.h"
 #include "process.h"
 #include "randomize.h"
 #include "types.h"
@@ -143,6 +144,9 @@ private:
 
   /* Binary containing transformation metadata */
   Binary binary;
+
+  /* libcompel handle for child parasite */
+  struct parasite_ctl *parasite;
 
   /* Code section start & end addresses */
   uintptr_t codeStart, codeEnd;

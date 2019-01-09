@@ -31,6 +31,8 @@ namespace chameleon {
   X(TraceSetupFailed, "setting up tracing of child from parent failed") \
   X(WaitFailed, "wait() returned an error") \
   X(PtraceFailed, "ptrace() returned an error") \
+  X(CompelInitFailed, "compel initialization failed") \
+  X(CompelInfectFailed, "compel infect failed") \
   X(Exists, "process already exists") \
   X(DoesNotExist, "process exited or terminated") \
   X(InvalidState, "operation not allowed in current process state")

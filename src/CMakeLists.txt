@@ -1,16 +1,3 @@
-add_executable (chameleon
-  arch.cpp
-  binary.cpp
-  chameleon.cpp
-  memoryview.cpp
-  process.cpp
-  randomize.cpp
-  trace.cpp
-  transform.cpp
-  types.cpp
-  userfaultfd.cpp
-)
-
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 find_library(ELF elf)
@@ -42,6 +29,37 @@ if (${DYNAMORIO_INCLUDE_DIR} STREQUAL "DYNAMORIO_INCLUDE_DIR-NOTFOUND" OR
                       "set DYNAMORIO_INSTALL_DIR (see http://dynamorio.org/)")
 endif ()
 
+# Find compel installation.  Assumes installation has both Debug & Release
+# builds -- see utils directory for script to configure & install both types of
+# libcompel.a from CRIU source.
+if (NOT COMPEL_INSTALL_DIR)
+  set(COMPEL_INSTALL_DIR "/usr/lib")
+endif()
+find_path(COMPEL_INCLUDE_DIR
+  NAMES compel/compel.h
+  PATHS ${COMPEL_INSTALL_DIR}/include
+)
+find_path(COMPEL_BIN_DIR
+  NAMES compel
+  PATHS ${COMPEL_INSTALL_DIR}/bin
+)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(COMPEL_LIB_TYPE ${COMPEL_INSTALL_DIR}/lib64/debug)
+else()
+  set(COMPEL_LIB_TYPE ${COMPEL_INSTALL_DIR}/lib64/release)
+endif()
+find_path(COMPEL_LIB_DIR
+  NAMES libcompel.a
+  PATHS ${COMPEL_LIB_TYPE}
+)
+if (${COMPEL_INCLUDE_DIR} STREQUAL "COMPEL_INCLUDE_DIR-NOTFOUND" OR
+    ${COMPEL_BIN_DIR} STREQUAL "COMPEL_BIN_DIR-NOTFOUND" OR
+    ${COMPEL_LIB_DIR} STREQUAL "COMPEL_LIB_DIR-NOTFOUND")
+  message(FATAL_ERROR "libcompel.a not found -- please download CRIU source, "
+                      "install using helper scripts in the util folder and "
+                      "set COMPEL_INSTALL_DIR")
+endif()
+
 # Find Secure Popcorn installation
 if (NOT POPCORN_INSTALL_DIR)
   set(POPCORN_INSTALL_DIR "/usr/local/secure-popcorn")
@@ -67,12 +85,64 @@ if (${POPCORN_REGDESC_DIR} STREQUAL "POPCORN_REGDESC_DIR-NOTFOUND")
                       "installed correctly at ${POPCORN_INSTALL_DIR}")
 endif ()
 
+# Create the parasite
+execute_process (
+  COMMAND ${COMPEL_BIN_DIR}/compel cflags
+  OUTPUT_VARIABLE COMPEL_CFLAGS
+)
+set(COMPEL_CFLAGS "${COMPEL_CFLAGS} -O3 -I ${COMPEL_INCLUDE_DIR}/compel")
+string(REGEX REPLACE "\n" ";" COMPEL_CFLAGS "${COMPEL_CFLAGS}")
+string(REGEX REPLACE " " ";" COMPEL_CFLAGS "${COMPEL_CFLAGS}")
+execute_process (
+  COMMAND ${COMPEL_BIN_DIR}/compel ldflags
+  OUTPUT_VARIABLE COMPEL_LDFLAGS
+)
+string(REGEX REPLACE "\n" ";" COMPEL_LDFLAGS "${COMPEL_LDFLAGS}")
+string(REGEX REPLACE " " ";" COMPEL_LDFLAGS "${COMPEL_LDFLAGS}")
+execute_process (
+  COMMAND ${COMPEL_BIN_DIR}/compel plugins
+  OUTPUT_VARIABLE COMPEL_PLUGINS
+)
+string(REGEX REPLACE "\n" ";" COMPEL_PLUGINS "${COMPEL_PLUGINS}")
+string(REGEX REPLACE " " ";" COMPEL_PLUGINS "${COMPEL_PLUGINS}")
+add_custom_command (OUTPUT ${CMAKE_BINARY_DIR}/include/chameleon-parasite.h
+  COMMAND ${CMAKE_C_COMPILER} -c ${COMPEL_CFLAGS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/parasite/chameleon-parasite.c
+    -o /tmp/chameleon-parasite.o
+  COMMAND ld ${COMPEL_LDFLAGS} /tmp/chameleon-parasite.o ${COMPEL_PLUGINS}
+    -o /tmp/chameleon-parasite.po
+  COMMAND ${COMPEL_BIN_DIR}/compel hgen -f /tmp/chameleon-parasite.po
+    -o ${CMAKE_BINARY_DIR}/include/chameleon-parasite.h
+  COMMAND rm -f /tmp/chameleon-parasite.o /tmp/chameleon-parasite.po
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/parasite/chameleon-parasite.c
+  COMMENT "Generating chameleon-parasite.h header"
+)
+add_custom_target (parasite_lib
+  DEPENDS ${CMAKE_BINARY_DIR}/include/chameleon-parasite.h
+)
+
+# Create the Chameleon executable
+add_executable (chameleon
+  arch.cpp
+  binary.cpp
+  chameleon.cpp
+  memoryview.cpp
+  parasite.cpp
+  process.cpp
+  randomize.cpp
+  trace.cpp
+  transform.cpp
+  types.cpp
+  userfaultfd.cpp
+)
+add_dependencies(chameleon parasite_lib)
 target_include_directories (chameleon PRIVATE
   "${PROJECT_SOURCE_DIR}/include"
   "${DYNAMORIO_INCLUDE_DIR}"
   "${POPCORN_INCLUDE_DIR}"
   "${POPCORN_REGDESC_DIR}"
 )
+target_include_directories (chameleon SYSTEM PRIVATE "${COMPEL_INCLUDE_DIR}")
 target_compile_options (chameleon PRIVATE
   "-std=c++11"
   "-pthread"
@@ -84,6 +154,7 @@ target_link_libraries (chameleon
   ${CMAKE_THREAD_LIBS_INIT}
   ${DYNAMORIO_LIB_DIR}/libdrdecode.a
   ${DYNAMORIO_LIB_DIR}/../libdrhelper.a
+  ${COMPEL_LIB_DIR}/libcompel.a
   -static
 )
 

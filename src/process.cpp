@@ -130,6 +130,7 @@ ret_t Process::forkAndExec() {
   }
   pid = child;
   status = Running;
+  nthreads = 1;
 
   DEBUGMSG("forked child " << pid << std::endl);
 
@@ -141,7 +142,7 @@ ret_t Process::forkAndExec() {
 
   // Wait for child to execv() & set up tracing infrastructure.  The kernel
   // will stop the child with SIGTRAP before execution begins.
-  if(wait_internal(false) != ret_t::Success ||
+  if(waitInternal(false) != ret_t::Success ||
      status != Stopped ||
      !trace::killChildOnExit(pid))
     return ret_t::TraceSetupFailed;
@@ -151,7 +152,7 @@ ret_t Process::forkAndExec() {
   return ret_t::Success;
 }
 
-ret_t Process::wait_internal(bool reinject) {
+ret_t Process::waitInternal(bool reinject) {
   int wstatus;
   ret_t retval = ret_t::Success;
 
@@ -189,7 +190,7 @@ ret_t Process::wait_internal(bool reinject) {
   return retval;
 }
 
-ret_t Process::wait() { return wait_internal(true); }
+ret_t Process::wait() { return waitInternal(true); }
 
 ret_t Process::resume(bool syscall) {
   bool success;
@@ -216,7 +217,7 @@ ret_t Process::resume(bool syscall) {
 ret_t Process::continueToNextEvent(bool syscall) {
   ret_t retcode = resume(syscall);
   if(retcode != ret_t::Success) return retcode;
-  return wait_internal(true);
+  return waitInternal(true);
 }
 
 void Process::detach() {

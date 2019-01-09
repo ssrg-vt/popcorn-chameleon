@@ -41,7 +41,8 @@ public:
    */
   Process(int argc, char **argv) : argc(argc), argv(argv), pid(-1),
                                    status(Ready), exit(0),
-                                   reinjectSignal(false), uffd(-1) {}
+                                   reinjectSignal(false), uffd(-1),
+                                   nthreads(0) {}
   Process() = delete;
 
   /////////////////////////////////////////////////////////////////////////////
@@ -121,6 +122,7 @@ public:
   int getPid() const { return pid; }
   status_t getStatus() const { return status; }
   int getUserfaultfd() const { return uffd; }
+  size_t getNumThreads() const { return nthreads; }
 
   /* Note: the following APIs may only be called when the process is stopped */
 
@@ -224,6 +226,7 @@ private:
   };
   bool reinjectSignal; /* whether to re-inject signal into tracee */
   int uffd; /* userfaultfd file descriptor */
+  size_t nthreads; /* number of threads in the process */
 
   /**
    * Internal wait implementation used to save relevant information depending
@@ -236,7 +239,7 @@ private:
    * @param reinject whether or not to reinject a signal
    * @return a return code describing the outcome
    */
-  ret_t wait_internal(bool reinject);
+  ret_t waitInternal(bool reinject);
 };
 
 }
