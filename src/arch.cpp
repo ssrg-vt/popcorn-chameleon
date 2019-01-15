@@ -99,6 +99,7 @@ void arch::marshalFuncCall(struct user_regs_struct &regs,
   #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
 
 void arch::dumpRegs(struct user_regs_struct &regs) {
+  INFO("General-purpose registers:" << std::endl);
   INFO(DUMP_REG(regs, rax) << std::endl);
   INFO(DUMP_REG(regs, rbx) << std::endl);
   INFO(DUMP_REG(regs, rcx) << std::endl);
@@ -124,6 +125,38 @@ void arch::dumpRegs(struct user_regs_struct &regs) {
   INFO(DUMP_REG(regs, gs) << std::endl);
   INFO(DUMP_REG(regs, gs_base) << std::endl);
   INFO(DUMP_REG(regs, ss) << std::endl);
+}
+
+void arch::dumpFPRegs(struct user_fpregs_struct &regs) {
+  size_t num;
+  INFO("Floating-point registers:" << std::endl);
+  INFO(DUMP_REG(regs, cwd) << std::endl);
+  INFO(DUMP_REG(regs, swd) << std::endl);
+  INFO(DUMP_REG(regs, ftw) << std::endl);
+  INFO(DUMP_REG(regs, fop) << std::endl);
+  INFO(DUMP_REG(regs, rip) << std::endl);
+  INFO(DUMP_REG(regs, rdp) << std::endl);
+  INFO(DUMP_REG(regs, mxcsr) << std::endl);
+  INFO(DUMP_REG(regs, mxcr_mask));
+  num = sizeof(regs.st_space) / sizeof(regs.st_space[0]);
+  for(size_t i = 0; i < num; i++) {
+    if(i % 4 == 0) {
+      INFO_RAW(std::endl);
+      INFO("st" << (i / 4) << ": 0x");
+    }
+    INFO_RAW(std::hex << std::setfill('0') << std::setw(8)
+             << regs.st_space[i]);
+  }
+  num = sizeof(regs.xmm_space) / sizeof(regs.xmm_space[0]);
+  for(size_t i = 0; i < num; i++) {
+    if(i % 4 == 0) {
+      INFO_RAW(std::endl);
+      INFO("xmm" << (i / 4) << ": 0x");
+    }
+    INFO_RAW(std::hex << std::setfill('0') << std::setw(8)
+             << regs.xmm_space[i]);
+  }
+  INFO_RAW(std::endl);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

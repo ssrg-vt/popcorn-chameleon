@@ -11,6 +11,10 @@
  */
 
 #include <compel/plugins/std.h>
+// TODO: compel bug: the header guards in plugins/std.h & plugins/plugin-fds.h
+// are identical; whichever header is second doesn't actually get included
+// unless we manually remove the guard.
+#undef COMPEL_PLUGIN_STD_STD_H__
 #include <compel/plugins/plugin-fds.h>
 
 #include "parasite.h"

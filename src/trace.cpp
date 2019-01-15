@@ -49,6 +49,11 @@ bool trace::getRegs(pid_t tracee, struct user_regs_struct &regs) {
   else return false;
 }
 
+bool trace::getFPRegs(pid_t tracee, struct user_fpregs_struct &regs) {
+  if(ptrace(PTRACE_GETFPREGS, tracee, nullptr, &regs) == 0) return true;
+  else return false;
+}
+
 bool trace::setRegs(pid_t tracee,  struct user_regs_struct &regs) {
   if(ptrace(PTRACE_SETREGS, tracee, nullptr, &regs) == 0) return true;
   else return false;

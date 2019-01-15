@@ -15,6 +15,7 @@
 extern pid_t masterPID;
 
 /* Print information to the console */
+#define INFO_RAW( ... ) std::cout << __VA_ARGS__ << std::dec;
 #define INFO( ... ) \
   do { std::cout << "[ chameleon " << masterPID << " ] " \
                  << __VA_ARGS__ << std::dec; } while(0);

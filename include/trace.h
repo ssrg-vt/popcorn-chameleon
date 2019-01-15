@@ -84,6 +84,13 @@ bool detach(pid_t tracee);
 bool getRegs(pid_t tracee, struct user_regs_struct &regs);
 
 /**
+ * Get a tracee's (child) floating-point registers.
+ * @param tracee the tracee's PID
+ * @param regs floating point register set struct to be filled
+ */
+bool getFPRegs(pid_t tracee, struct user_fpregs_struct &regs);
+
+/**
  * Set a tracee's (child) registers.
  * @param tracee the tracee's PID
  * @param regs values for tracee's registers

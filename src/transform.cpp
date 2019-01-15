@@ -216,6 +216,12 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   int prot, flags;
   long mmapRet;
 
+  // TODO: for some reason we need to do a dummy syscall to get the child
+  // into a state controllable by us/compel.  Maybe related to not getting into
+  // the correct ptrace-stop mode before running the parasite? ¯\_(ツ)_/¯
+  if(parasite::syscall(parasite, SYS_getpid, mmapRet) != ret_t::Success)
+    return ret_t::CompelActionFailed;
+
   DEBUGMSG("changing child's code section anonymous private mapping for "
            "userfaultfd" << std::endl);
 
@@ -226,8 +232,6 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   roundedLen = PAGE_ALIGN_LEN(start, len);
   prot = PROT_EXEC | PROT_READ;
   flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
-  parasite::syscall(parasite, SYS_mmap, mmapRet, pageStart, roundedLen, prot,
-                    flags, -1, 0);
   parasite::syscall(parasite, SYS_mmap, mmapRet, pageStart, roundedLen, prot,
                     flags, -1, 0);
   if((uintptr_t)mmapRet != pageStart) return ret_t::RemapCodeFailed;

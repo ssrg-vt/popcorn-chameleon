@@ -90,7 +90,13 @@ execute_process (
   COMMAND ${COMPEL_BIN_DIR}/compel cflags
   OUTPUT_VARIABLE COMPEL_CFLAGS
 )
-set(COMPEL_CFLAGS "${COMPEL_CFLAGS} -O3 -I ${COMPEL_INCLUDE_DIR}/compel")
+if (CMAKE_BUILD_TYPE MATCHES "Debug")
+  set(COMPEL_CFLAGS "${COMPEL_CFLAGS} -O0 -I ${COMPEL_INCLUDE_DIR}/compel")
+else ()
+  set(COMPEL_CFLAGS
+    "${COMPEL_CFLAGS} -O3 -I ${COMPEL_INCLUDE_DIR}/compel -DNDEBUG"
+  )
+endif ()
 string(REGEX REPLACE "\n" ";" COMPEL_CFLAGS "${COMPEL_CFLAGS}")
 string(REGEX REPLACE " " ";" COMPEL_CFLAGS "${COMPEL_CFLAGS}")
 execute_process (

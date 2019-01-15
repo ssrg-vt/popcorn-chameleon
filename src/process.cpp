@@ -87,12 +87,15 @@ ret_t Process::forkAndExec() {
      !trace::traceProcessControl(pid))
     return ret_t::TraceSetupFailed;
 
+  // TODO: without reading the registers, we get a floating-point exception
+  // when using x87 (which may appear in odd places like printf).  Maybe it
+  // initializes some FP state that is otherwise not initialized? ¯\_(ツ)_/¯
+  struct user_fpregs_struct fpregs;
+  trace::getFPRegs(pid, fpregs);
+
   // Finally, get to the other side of the execve
   if(resume(false) != ret_t::Success || waitInternal(false) != ret_t::Success)
     return ret_t::TraceSetupFailed;
-
-  // TODO we need to do one more ptrace step here to get the child in a state
-  // suitable for compel_syscall()
 
   DEBUGMSG("set up child for tracing" << std::endl);
 
@@ -245,6 +248,8 @@ ret_t Process::write(uintptr_t addr, uint64_t data) const {
 
 void Process::dumpRegs() const {
   struct user_regs_struct regs;
+  struct user_fpregs_struct fpregs;
   if(trace::getRegs(pid, regs)) arch::dumpRegs(regs);
+  if(trace::getFPRegs(pid, fpregs)) arch::dumpFPRegs(fpregs);
 }
 

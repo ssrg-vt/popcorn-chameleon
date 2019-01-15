@@ -75,7 +75,8 @@ ret_t cure(struct parasite_ctl *ctx);
  * @return a return code describing the outcome
  */
 ret_t syscall(struct parasite_ctl *ctx, long syscall, long &sysRet,
-              long a1, long a2, long a3, long a4, long a5, long a6);
+              long a1 = 0, long a2 = 0, long a3 = 0,
+              long a4 = 0, long a5 = 0, long a6 = 0);
 
 }
 }
