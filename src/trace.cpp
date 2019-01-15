@@ -13,8 +13,23 @@ bool trace::traceme() {
   else return false;
 }
 
-bool trace::killChildOnExit(pid_t tracee) {
-  if(ptrace(PTRACE_SETOPTIONS, tracee, 0, PTRACE_O_EXITKILL) == 0) return true;
+bool trace::traceProcessControl(pid_t tracee) {
+  if(ptrace(PTRACE_SETOPTIONS, tracee, 0, PTRACE_O_EXITKILL |
+                                          PTRACE_O_TRACECLONE |
+                                          PTRACE_O_TRACEEXEC |
+                                          PTRACE_O_TRACEFORK) == 0)
+    return true;
+  else return false;
+}
+
+bool trace::attach(pid_t tracee, bool seize) {
+  if(ptrace((seize ? PTRACE_SEIZE : PTRACE_ATTACH),
+            tracee, 0, 0) == 0) return true;
+  else return false;
+}
+
+bool trace::interrupt(pid_t tracee) {
+  if(ptrace(PTRACE_INTERRUPT, tracee, 0, 0) == 0) return true;
   else return false;
 }
 

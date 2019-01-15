@@ -55,7 +55,7 @@ find_path(COMPEL_LIB_DIR
 if (${COMPEL_INCLUDE_DIR} STREQUAL "COMPEL_INCLUDE_DIR-NOTFOUND" OR
     ${COMPEL_BIN_DIR} STREQUAL "COMPEL_BIN_DIR-NOTFOUND" OR
     ${COMPEL_LIB_DIR} STREQUAL "COMPEL_LIB_DIR-NOTFOUND")
-  message(FATAL_ERROR "libcompel.a not found -- please download CRIU source, "
+  message(FATAL_ERROR "compel not found - please download CRIU source, "
                       "install using helper scripts in the util folder and "
                       "set COMPEL_INSTALL_DIR")
 endif()
@@ -100,13 +100,14 @@ execute_process (
 string(REGEX REPLACE "\n" ";" COMPEL_LDFLAGS "${COMPEL_LDFLAGS}")
 string(REGEX REPLACE " " ";" COMPEL_LDFLAGS "${COMPEL_LDFLAGS}")
 execute_process (
-  COMMAND ${COMPEL_BIN_DIR}/compel plugins
+  COMMAND ${COMPEL_BIN_DIR}/compel plugins fds
   OUTPUT_VARIABLE COMPEL_PLUGINS
 )
 string(REGEX REPLACE "\n" ";" COMPEL_PLUGINS "${COMPEL_PLUGINS}")
 string(REGEX REPLACE " " ";" COMPEL_PLUGINS "${COMPEL_PLUGINS}")
 add_custom_command (OUTPUT ${CMAKE_BINARY_DIR}/include/chameleon-parasite.h
   COMMAND ${CMAKE_C_COMPILER} -c ${COMPEL_CFLAGS}
+    -DPARASITE -I${PROJECT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/parasite/chameleon-parasite.c
     -o /tmp/chameleon-parasite.o
   COMMAND ld ${COMPEL_LDFLAGS} /tmp/chameleon-parasite.o ${COMPEL_PLUGINS}

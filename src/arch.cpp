@@ -95,21 +95,6 @@ void arch::marshalFuncCall(struct user_regs_struct &regs,
   regs.r9 = a6;
 }
 
-void arch::marshalSyscall(struct user_regs_struct &regs, long syscall,
-                          long a1, long a2, long a3,
-                          long a4, long a5, long a6) {
-  regs.rax = syscall;
-  regs.rdi = a1;
-  regs.rsi = a2;
-  regs.rdx = a3;
-  regs.r10 = a4;
-  regs.r8 = a5;
-  regs.r9 = a6;
-}
-
-long arch::syscallRetval(struct user_regs_struct &regs)
-{ return regs.rax; }
-
 #define DUMP_REG( regset, name ) \
   #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
 
@@ -150,15 +135,6 @@ uint32_t arch::initialFrameSize() { return 8; }
 uint32_t arch::alignFrameSize(uint32_t size) { return ROUND_UP(size, 16); }
 
 int32_t arch::framePointerOffset() { return -16; }
-
-///////////////////////////////////////////////////////////////////////////////
-// Instruction information
-///////////////////////////////////////////////////////////////////////////////
-
-uint64_t arch::syscall(size_t &size) {
-  size = 2;
-  return 0x050f;
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Randomization implementation

@@ -28,15 +28,26 @@ struct parasite_ctl *parasite::initialize(int pid) {
 
 ret_t
 parasite::infect(struct parasite_ctl *ctx, size_t nthreads) {
-  // TODO need to define the argument size
   chameleon_parasite_setup_c_header(ctx);
-  if(compel_infect(ctx, nthreads, 0)) return ret_t::CompelInfectFailed;
+  if(compel_infect(ctx, nthreads, sizeof(parasiteArgs)))
+    return ret_t::CompelInfectFailed;
   else return ret_t::Success;
 }
 
-ret_t parasite::syscall(struct parasite_ctl *ctx, long syscall,
+int parasite::stealUFFD(struct parasite_ctl *ctx) {
+  int uffd;
+  if(compel_rpc_call(GET_UFFD, ctx) ||
+     compel_util_recv_fd(ctx, &uffd) ||
+     compel_rpc_sync(GET_UFFD, ctx)) return -1;
+  return uffd;
+}
+
+ret_t parasite::cure(struct parasite_ctl *ctx)
+{ return compel_cure(ctx) == 0 ? ret_t::Success : ret_t::CompelCureFailed; }
+
+ret_t parasite::syscall(struct parasite_ctl *ctx, long syscall, long &sysRet,
                         long a1, long a2, long a3, long a4, long a5, long a6) {
-  // TODO implement
-  return ret_t::Success;
+  int ret = compel_syscall(ctx, syscall, &sysRet, a1, a2, a3, a4, a5, a6);
+  return ret == 0 ? ret_t::Success : ret_t::CompelSyscallFailed;
 }
 

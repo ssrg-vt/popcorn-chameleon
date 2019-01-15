@@ -27,15 +27,38 @@ namespace trace {
 bool traceme();
 
 /**
- * Kill the tracee (child) if the tracer (chameleon) exits.
+ * Trace all process control events, including execve(), clone() and fork().
+ * Additionally, instruct ptrace to kill the child if we exit for any reason.
+ * Internally sets PTRACE_O_<EXITKILL|TRACECLONE|TRACEEXEC|TRACEFORK>.
+ *
  * @param tracee the tracee's PID
  * @return true if call succeeded, false otherwise
  */
-bool killChildOnExit(pid_t tracee);
+bool traceProcessControl(pid_t tracee);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Control
 ////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Attach to a tracee.  If seize == true attach using PTRACE_SEIZE, which
+ * allows subsequent interruptions via interrupt().  Otherwise, attach using
+ * the more limited via PTRACE_ATTACH.
+ *
+ * @param tracee the tracee's PID
+ * @param seize if true, use PTRACE_SEIZE to attach to tracee
+ * @return true if the call succeeded, false otherwise
+ */
+bool attach(pid_t tracee, bool seize = true);
+
+/**
+ * Interrupt a tracee.  Note that this requires attaching to the tracee with
+ * trace::attach(pid, true) (use PTRACE_SEIZE).
+ *
+ * @param tracee the tracee's PID
+ * @return true if the call succeeded, false otherwise
+ */
+bool interrupt(pid_t tracee);
 
 /**
  * Resume a tracee (child).

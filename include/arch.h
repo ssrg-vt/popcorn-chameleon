@@ -99,27 +99,10 @@ void pc(user_regs_struct &regs, uintptr_t newPC);
 /**
  * Marshal the given arguments into the register set for a function call.
  * @param regs a register set
- * @param a1-6 arguments to place in registers for syscall
+ * @param a1-6 arguments to place in registers for function call
  */
 void marshalFuncCall(struct user_regs_struct &regs,
                      long a1, long a2, long a3, long a4, long a5, long a6);
-
-/**
- * Marshal the given arguments into the register set for a system call.
- * @param regs a register set
- * @param syscall the system call number
- * @param a1-6 arguments to place in registers for syscall
- */
-void marshalSyscall(struct user_regs_struct &regs, long syscall,
-                    long a1, long a2, long a3, long a4, long a5, long a6);
-
-/**
- * Retrieve the value in the register used to return system call return values.
- * Note: caller must ensure process is stopped at system call exit boundary!
- * @param regs a register set
- * @return system call return value
- */
-long syscallRetval(struct user_regs_struct &regs);
 
 /**
  * Dump register contents to a stream.
@@ -150,18 +133,6 @@ uint32_t alignFrameSize(uint32_t size);
  * @return frame pointer's offset from the CFA
  */
 int32_t framePointerOffset();
-
-///////////////////////////////////////////////////////////////////////////////
-// Instruction information
-///////////////////////////////////////////////////////////////////////////////
-
-/**
- * Return the system call instruction bytes and write the size of the
- * instruction to the argument.
- * @param size size of the syscall instruction in bytes
- * @return the bytes constituting the syscall instruction
- */
-uint64_t syscall(size_t &size);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Randomization implementation

@@ -17,6 +17,8 @@
 #include <sys/types.h>
 #include "types.h"
 
+struct parasite_ctl;
+
 namespace chameleon {
 
 class Process {
@@ -110,6 +112,17 @@ public:
    */
   void detach();
 
+  /**
+   * Initialize the userfaultfd in the context of the child and send it to
+   * Chameleon.  After calling, users can query the file descriptor using
+   * getUserfaultfd().  Uses a previously initialized parasite_ctl, but
+   * performs the infection/curing internally.
+   *
+   * @param ctx a previously-initialized libcompel parasite_ctl context
+   * @return a return code describing the outcome
+   */
+  ret_t stealUserfaultfd(struct parasite_ctl *ctx);
+
   /////////////////////////////////////////////////////////////////////////////
   // Inspect & modify process state
   /////////////////////////////////////////////////////////////////////////////
@@ -165,31 +178,6 @@ public:
    */
   ret_t setFuncCallRegs(long a1 = 0, long a2 = 0, long a3 = 0,
                         long a4 = 0, long a5 = 0, long a6 = 0) const;
-
-  /**
-   * Marshal a set of arguments into registers to invoke a system call
-   * according to the ISA-specific calling convention.
-   * @param syscall system call number (ISA-specific)
-   * @param a1-6 arguments to the system call
-   * @return a return code describing the outcome
-   */
-  ret_t setSyscallRegs(long syscall, long a1 = 0, long a2 = 0, long a3 = 0,
-                       long a4 = 0, long a5 = 0, long a6 = 0) const;
-
-  /**
-   * Return the system call return value if stopped at a system call exit
-   * boundary.
-   *
-   * Note: ptrace stops the child at both entrance and exit system call
-   * boundaries.  The Process object doesn't track which boundary the process
-   * stopped at, meaning calling this function after stopping at the entrance
-   * boundary will return garbage.  Users should call continueToNextEvent(true)
-   * to continue through to the exit boundary.
-   *
-   * @param retval output parameter into which the exit code is written
-   * @return a return code describing the outcome
-   */
-  ret_t getSyscallReturnValue(long &retval) const;
 
   /**
    * Read 8 bytes of data from a virtual memory address.

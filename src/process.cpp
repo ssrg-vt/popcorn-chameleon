@@ -10,63 +10,11 @@
 
 #include "arch.h"
 #include "log.h"
+#include "parasite.h"
 #include "process.h"
 #include "trace.h"
 
 using namespace chameleon;
-
-/**
- * Send a file descriptor to another process.
- * @param fd the file descriptor to send
- * @param socket a UNIX domain socket connected to the parent
- * @return true if successfully sent or false othewise
- */
-static bool sendFileDescriptor(int fd, int socket) {
-  bool success = false;
-  struct msghdr msg = {0};
-  struct cmsghdr *cmsg;
-  char buf[CMSG_SPACE(sizeof(int))], dup[256];
-  struct iovec io = { .iov_base = &dup, .iov_len = sizeof(dup) };
-
-  memset(buf, 0, sizeof(buf));
-  msg.msg_iov = &io;
-  msg.msg_iovlen = 1;
-  msg.msg_control = buf;
-  msg.msg_controllen = sizeof(buf);
-  cmsg = CMSG_FIRSTHDR(&msg);
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_RIGHTS;
-  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-  memcpy((int *)CMSG_DATA(cmsg), &fd, sizeof(int));
-  if(sendmsg(socket, &msg, 0) >= 0) success = true;
-  close(socket);
-  return success;
-}
-
-/**
- * Receive a file descriptor from another process.
- * @param socket a UNIX domain socket connected to the child
- * @return received file descriptor if successful or -1 otherwise
- */
-static int receiveFileDescriptor(int socket) {
-  int fd = -1;
-  struct msghdr msg = {0};
-  struct cmsghdr *cmsg;
-  char buf[CMSG_SPACE(sizeof(int))], dup[256];
-  struct iovec io = { .iov_base = &dup, .iov_len = sizeof(dup) };
-
-  memset(buf, 0, sizeof(buf));
-  msg.msg_iov = &io;
-  msg.msg_iovlen = 1;
-  msg.msg_control = buf;
-  msg.msg_controllen = sizeof(buf);
-  if(recvmsg(socket, &msg, 0) >= 0) {
-    cmsg = CMSG_FIRSTHDR(&msg);
-    memcpy(&fd, (int *)CMSG_DATA(cmsg), sizeof(int));
-  }
-  close(socket);
-  return fd;
-}
 
 /**
  * Called by forked children to set up introspection machinery and execute the
@@ -76,50 +24,41 @@ static int receiveFileDescriptor(int socket) {
  */
 [[noreturn]] static void
 execChild(char **argv, int socket) {
-  int uffd;
+  bool err = false;
+  pid_t me;
 
-  // Prepare for ptrace on the child (tracee) side
-  if(!trace::traceme()) {
-    perror("Could not enable ptrace in child");
-    close(socket);
+  // Wait for the parent to attach
+  if(recv(socket, &me, sizeof(me), 0) != sizeof(me)) err = true;
+  close(socket);
+  if(err) {
+    perror("Could not wait for parent to set up tracing in the child");
     abort();
   }
 
-  // TODO Note: the kernel is modified to update the userfaultfd's context with
-  // the task's post execve() mm_struct so the descriptor is valid after
-  // starting the new application.  We should instead use CRIU's compel library
-  // to instead inject code into the target which establishes the userfaultfd &
-  // sends it to the parent before starting the application
-
-  // Open the userfaultfd file descriptor and pass it to the parent.  Set the
-  // close-on-exec flag so we don't need to close it ourselves.
-  if((uffd = syscall(SYS_userfaultfd, O_CLOEXEC)) == -1) {
-    perror("Could not create userfaultfd descriptor in child");
-    close(socket);
+  // Trace-stop to allow the parent to configure ptrace options
+  if(raise(SIGSTOP)) {
+    perror("Could not raise SIGSTOP to enable parent to configure tracing");
     abort();
   }
 
-  if(!sendFileDescriptor(uffd, socket)) {
-    perror("Could not send userfaultfd file descriptor to parent");
-    abort();
-  }
-
+  // Let's do the dang thing
   execv(argv[0], argv);
   perror("Could not exec application");
   abort();
 }
 
 ret_t Process::forkAndExec() {
+  bool err = false;
   int sockets[2];
   pid_t child;
 
   // Don't let the user fork another child if we've already got one
   if(status != Ready) return ret_t::Exists;
 
-  // Establish a pair of connected sockets for passing the userfaultfd file
-  // descriptor from the child to the parent
+  // Establish a pair of connected sockets for synchronizing the parent
+  // attaching to the child via ptrace
   if(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1)
-    return ret_t::RecvUFFDFailed;
+    return ret_t::TraceSetupFailed;
 
   child = fork();
   if(child == 0) execChild(argv, sockets[1]);
@@ -134,23 +73,36 @@ ret_t Process::forkAndExec() {
 
   DEBUGMSG("forked child " << pid << std::endl);
 
-  // Receive userfaultfd descriptor from child
-  if((uffd = receiveFileDescriptor(sockets[0])) == -1)
-    return ret_t::RecvUFFDFailed;
+  // Attach via seizing (which lets us interrupt the child later on) and
+  // release the child
+  if(!trace::attach(pid, true) ||
+     send(sockets[0], &child, sizeof(child), 0) != sizeof(child)) err = true;
+  close(sockets[0]);
+  close(sockets[1]);
+  if(err) return ret_t::TraceSetupFailed;
 
-  DEBUGMSG("received userfaultfd (fd=" << uffd << ") from child" << std::endl);
-
-  // Wait for child to execv() & set up tracing infrastructure.  The kernel
-  // will stop the child with SIGTRAP before execution begins.
-  if(waitInternal(false) != ret_t::Success ||
-     status != Stopped ||
-     !trace::killChildOnExit(pid))
+  // Wait until the child trace-stops and configure ptrace to allow chameleon
+  // to observe a number of events
+  if(waitInternal(false) != ret_t::Success || status != Stopped ||
+     !trace::traceProcessControl(pid))
     return ret_t::TraceSetupFailed;
+
+  // Finally, get to the other side of the execve
+  if(resume(false) != ret_t::Success || waitInternal(false) != ret_t::Success)
+    return ret_t::TraceSetupFailed;
+
+  // TODO we need to do one more ptrace step here to get the child in a state
+  // suitable for compel_syscall()
 
   DEBUGMSG("set up child for tracing" << std::endl);
 
   return ret_t::Success;
 }
+
+// TODO check wstatus in waitInternal for the following:
+//   clone()  : status>>8 == (SIGTRAP | (PTRACE_EVENT_CLONE<<8))
+//   execve() : status>>8 == (SIGTRAP | (PTRACE_EVENT_EXEC<<8))
+//   fork()   : status>>8 == (SIGTRAP | (PTRACE_EVENT_FORK<<8))
 
 ret_t Process::waitInternal(bool reinject) {
   int wstatus;
@@ -230,6 +182,17 @@ void Process::detach() {
   uffd = -1;
 }
 
+ret_t Process::stealUserfaultfd(struct parasite_ctl *ctx) {
+  ret_t retcode;
+  retcode = parasite::infect(ctx, nthreads);
+  if(retcode != ret_t::Success) return retcode;
+  if((uffd = parasite::stealUFFD(ctx)) == -1) {
+    parasite::cure(ctx);
+    return ret_t::CompelActionFailed;
+  }
+  return parasite::cure(ctx);
+}
+
 int Process::getExitCode() const {
   if(status == Exited) return exit;
   else return INT32_MAX;
@@ -240,9 +203,9 @@ int Process::getSignal() const {
   else return INT32_MAX;
 }
 
-// TODO the functions that only access a single register (i.e., get/setPC(),
-// getSyscallReturnValue()) should be converted to use PTRACE_PEEKUSER rather
-// than bulk reading/writing the entire register set
+// TODO the functions that only access a single register (i.e., get/setPC())
+// should be converted to use PTRACE_PEEKUSER/POKUSER rather than bulk
+// reading/writing the entire register set
 
 uintptr_t Process::getPC() const {
   struct user_regs_struct regs;
@@ -267,25 +230,6 @@ ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::marshalFuncCall(regs, a1, a2, a3, a4, a5, a6);
   if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
-  return ret_t::Success;
-}
-
-ret_t Process::setSyscallRegs(long syscall, long a1, long a2, long a3,
-                              long a4, long a5, long a6) const {
-  struct user_regs_struct regs;
-  if(status != Stopped) return ret_t::InvalidState;
-  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
-  arch::marshalSyscall(regs, syscall, a1, a2, a3, a4, a5, a6);
-  if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
-  return ret_t::Success;
-}
-
-ret_t Process::getSyscallReturnValue(long &retval) const {
-  struct user_regs_struct regs;
-  if(!stoppedAtSyscall()) return ret_t::InvalidState;
-  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
-  retval = arch::syscallRetval(regs);
-  if((unsigned long)retval > -4096UL) retval = -retval;
   return ret_t::Success;
 }
 

@@ -27,12 +27,14 @@ namespace chameleon {
 /* Process control error codes */
 #define PROCESS_RETCODES \
   X(ForkFailed, "fork() returned an error") \
-  X(RecvUFFDFailed, "could not receive userfaultfd descriptor from child") \
   X(TraceSetupFailed, "setting up tracing of child from parent failed") \
   X(WaitFailed, "wait() returned an error") \
   X(PtraceFailed, "ptrace() returned an error") \
   X(CompelInitFailed, "compel initialization failed") \
   X(CompelInfectFailed, "compel infect failed") \
+  X(CompelActionFailed, "compel action in child failed") \
+  X(CompelCureFailed, "compel cure failed") \
+  X(CompelSyscallFailed, "compel child system call failed") \
   X(Exists, "process already exists") \
   X(DoesNotExist, "process exited or terminated") \
   X(InvalidState, "operation not allowed in current process state")
@@ -48,8 +50,6 @@ namespace chameleon {
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
   X(UffdCopyFailed, "userfaultfd copy failed") \
-  X(EncodeFailed, "re-encoding transformed instruction failed") \
-  X(BadFault, "kernel delivered unexpected or unhandled fault") \
   X(MarshalDataFailed, "failed to marshal data to handle fault") \
   X(BadMarshal, "invalid view of memory, found overlapping regions")
 
