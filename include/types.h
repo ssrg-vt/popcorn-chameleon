@@ -30,11 +30,13 @@ namespace chameleon {
   X(TraceSetupFailed, "setting up tracing of child from parent failed") \
   X(WaitFailed, "wait() returned an error") \
   X(PtraceFailed, "ptrace() returned an error") \
+  X(InterruptFailed, "could not interrupt task") \
   X(CompelInitFailed, "compel initialization failed") \
+  X(CompelSyscallFailed, "compel child system call failed") \
   X(CompelInfectFailed, "compel infect failed") \
   X(CompelActionFailed, "compel action in child failed") \
   X(CompelCureFailed, "compel cure failed") \
-  X(CompelSyscallFailed, "compel child system call failed") \
+  X(HandoffFailed, "handing off tracing to another thread failed") \
   X(Exists, "process already exists") \
   X(DoesNotExist, "process exited or terminated") \
   X(InvalidState, "operation not allowed in current process state")
@@ -46,6 +48,8 @@ namespace chameleon {
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
   X(AnalysisFailed, "could not analyze code to ensure correctness") \
   X(RandomizeFailed, "could not randomize code section") \
+  X(ChildHandlerSetupFailed, "creating child handler thread failed") \
+  X(ChildHandlerCleanupFailed, "cleaning up child handler thread failed") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
@@ -55,6 +59,8 @@ namespace chameleon {
 
 /* Other miscellaneous error codes */
 #define MISC_RETCODES \
+  X(LockFailed, "locking/unlocking mutex failed") \
+  X(NotImplemented, "not implemented") \
   X(NoTimestamp, "could not get timestamp")
 
 enum ret_t {
@@ -68,6 +74,14 @@ enum ret_t {
 };
 
 const char *retText(ret_t retcode);
+
+/* Reasons a tracee was stopped */
+enum stop_t {
+  Other = 0, /* child is stopped for unhandled reason */
+  Clone,     /* child is stopped on clone() syscall */
+  Exec,      /* chlid is stopped on execve() syscall */
+  Fork       /* child is stopped on fork() syscall */
+};
 
 /**
  * Iterate over contiguous entries of a given type.  Useful for providing a

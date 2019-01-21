@@ -61,8 +61,10 @@ bool uffd::api(int fd, uint64_t *features, uint64_t *ioctls) {
   DEBUG(
     DEBUGMSG("requested userfaultfd API: " << UFFD_API
              << ", kernel responded: " << api.api << std::endl);
-    printFeatures(api.features);
-    printIoctls(api.ioctls);
+    DEBUG_VERBOSE(
+      printFeatures(api.features);
+      printIoctls(api.ioctls);
+    )
   )
 
   return true;
@@ -81,7 +83,7 @@ bool uffd::registerRegion(int fd, uintptr_t addr, uint64_t len) {
     DEBUGMSG("registered 0x" << std::hex << ctrl.range.start << " - "
              << ctrl.range.start + ctrl.range.len << " (size=" << std::dec
              << ctrl.range.len << ")" << std::endl);
-    printIoctls(ctrl.ioctls);
+    DEBUG_VERBOSE(printIoctls(ctrl.ioctls));
   )
 
   return true;

@@ -141,9 +141,7 @@ ret_t CodeTransformer::initialize(bool randomize) {
   if(slotPadding >= PAGESZ)
     WARN("Large padding added between slots: " << slotPadding << std::endl);
 
-  if((retcode = binary.initialize()) != ret_t::Success) return retcode;
-  if((retcode = arch::initDisassembler()) != ret_t::Success)
-    return retcode;
+  if((retcode = arch::initDisassembler()) != ret_t::Success) return retcode;
   const Binary::Section &codeSec = binary.getCodeSection();
   const Binary::Segment &codeSeg = binary.getCodeSegment();
 
@@ -157,13 +155,11 @@ ret_t CodeTransformer::initialize(bool randomize) {
     if(retcode != ret_t::Success) return retcode;
   }
 
-  // Prepare the code region inside the binary by setting up correct page
-  // permissions and registering the code with the userfaultfd file descriptor
-  parasite = parasite::initialize(proc.getPid());
-  if(!parasite) return ret_t::CompelInitFailed;
+  // Prepare the code region inside the child by setting up correct page
+  // permissions and registering it with the userfaultfd file descriptor
   retcode = remapCodeSegment(codeSec.address(), codeSec.size());
   if(retcode != ret_t::Success) return retcode;
-  retcode = proc.stealUserfaultfd(parasite);
+  retcode = proc.stealUserfaultfd();
   if(retcode != ret_t::Success) return retcode;
   if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
     return ret_t::UffdHandshakeFailed;
@@ -215,6 +211,7 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   size_t roundedLen;
   int prot, flags;
   long mmapRet;
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
 
   // TODO: for some reason we need to do a dummy syscall to get the child
   // into a state controllable by us/compel.  Maybe related to not getting into
@@ -480,8 +477,7 @@ ret_t CodeTransformer::analyzeFunctions() {
                      << " us" << std::endl);
   }
 
-  INFO("Total analyze time: " << t.totalElapsed(Timer::Micro) << " us"
-       << std::endl);
+  INFO("Analyze time: " << t.totalElapsed(Timer::Micro) << " us" << std::endl);
 
   return ret_t::Success;
 }

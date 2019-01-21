@@ -12,9 +12,16 @@
 #include "log.h"
 #include "parasite.h"
 #include "process.h"
-#include "trace.h"
 
 using namespace chameleon;
+
+/*
+ * Note: compel's API is a little obtuse -- compel_prepare() allocates a
+ * context and compel_infect() controls the child, whereas compel_cure() both
+ * cures and frees the context.  Process is currently designed to always have a
+ * context ready to go, so every parasite::cure() should be accompanied by a
+ * parasite::initialize().
+ */
 
 /**
  * Called by forked children to set up introspection machinery and execute the
@@ -52,6 +59,8 @@ ret_t Process::forkAndExec() {
   int sockets[2];
   pid_t child;
 
+  DEBUGMSG("forking/execing child process" << std::endl);
+
   // Don't let the user fork another child if we've already got one
   if(status != Ready) return ret_t::Exists;
 
@@ -71,10 +80,10 @@ ret_t Process::forkAndExec() {
   status = Running;
   nthreads = 1;
 
-  DEBUGMSG("forked child " << pid << std::endl);
+  DEBUGMSG("successfully forked child " << pid << std::endl);
 
-  // Attach via seizing (which lets us interrupt the child later on) and
-  // release the child
+  // Attach via seizing (which lets us interrupt the child later) and release
+  // the child; we can't configure the child until it reaches a trace-stop.
   if(!trace::attach(pid, true) ||
      send(sockets[0], &child, sizeof(child), 0) != sizeof(child)) err = true;
   close(sockets[0]);
@@ -82,7 +91,7 @@ ret_t Process::forkAndExec() {
   if(err) return ret_t::TraceSetupFailed;
 
   // Wait until the child trace-stops and configure ptrace to allow chameleon
-  // to observe a number of events
+  // to observe task creation events
   if(waitInternal(false) != ret_t::Success || status != Stopped ||
      !trace::traceProcessControl(pid))
     return ret_t::TraceSetupFailed;
@@ -97,18 +106,24 @@ ret_t Process::forkAndExec() {
   if(resume(false) != ret_t::Success || waitInternal(false) != ret_t::Success)
     return ret_t::TraceSetupFailed;
 
-  DEBUGMSG("set up child for tracing" << std::endl);
+  DEBUGMSG("successfully stopped child " << pid << " after execve()"
+           << std::endl);
+
+  return initForkedChild();
+}
+
+ret_t Process::initForkedChild() {
+  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  if(sem_init(&handoff, 0, 0)) return ret_t::TraceSetupFailed;
+
+  DEBUGMSG("set up child " << pid << " for tracing" << std::endl);
 
   return ret_t::Success;
 }
 
-// TODO check wstatus in waitInternal for the following:
-//   clone()  : status>>8 == (SIGTRAP | (PTRACE_EVENT_CLONE<<8))
-//   execve() : status>>8 == (SIGTRAP | (PTRACE_EVENT_EXEC<<8))
-//   fork()   : status>>8 == (SIGTRAP | (PTRACE_EVENT_FORK<<8))
-
 ret_t Process::waitInternal(bool reinject) {
   int wstatus;
+  unsigned long childPid;
   ret_t retval = ret_t::Success;
 
   // Return immediately if the process is already stopped/exited
@@ -130,9 +145,15 @@ ret_t Process::waitInternal(bool reinject) {
       signal = WTERMSIG(wstatus);
     }
     else if(WIFSTOPPED(wstatus)) {
-      // Don't reinject SIGTRAP -- it's a syscall invoked by the application
       status = Stopped;
       signal = WSTOPSIG(wstatus);
+      stopReason = trace::stopReason(wstatus);
+      if(stopReason == stop_t::Clone ||
+         stopReason == stop_t::Fork) {
+        if(trace::getEventMessage(pid, childPid)) newTaskPid = childPid;
+        else retval = ret_t::PtraceFailed;
+      }
+      // Don't reinject SIGTRAP -- it's a syscall invoked by the application
       reinjectSignal = reinject && (signal != SIGTRAP);
     }
     else {
@@ -146,6 +167,16 @@ ret_t Process::waitInternal(bool reinject) {
 }
 
 ret_t Process::wait() { return waitInternal(true); }
+
+ret_t Process::interrupt() {
+  ret_t code = ret_t::Success;
+
+  // TODO copy compel_wait_task() for a more robust implementation
+  if(!trace::interrupt(pid)) return ret_t::PtraceFailed;
+  if((code = waitInternal(false)) != ret_t::Success) return code;
+  if(status != Stopped) return ret_t::InterruptFailed;
+  return ret_t::Success;
+}
 
 ret_t Process::resume(bool syscall) {
   bool success;
@@ -175,25 +206,88 @@ ret_t Process::continueToNextEvent(bool syscall) {
   return waitInternal(true);
 }
 
-void Process::detach() {
-  trace::detach(pid);
-  close(uffd);
-  pid = -1;
-  status = Ready;
-  exit = 0;
-  reinjectSignal = false;
-  uffd = -1;
+ret_t Process::attach() {
+  if(!trace::attach(pid, true)) return ret_t::PtraceFailed;
+  return ret_t::Success;
 }
 
-ret_t Process::stealUserfaultfd(struct parasite_ctl *ctx) {
-  ret_t retcode;
-  retcode = parasite::infect(ctx, nthreads);
-  if(retcode != ret_t::Success) return retcode;
-  if((uffd = parasite::stealUFFD(ctx)) == -1) {
-    parasite::cure(ctx);
-    return ret_t::CompelActionFailed;
+ret_t Process::attachHandoff() {
+  ret_t code;
+  if(sem_wait(&handoff)) return ret_t::HandoffFailed;
+  if(!trace::attach(pid, true)) return ret_t::PtraceFailed;
+  if((code = parasite::cure(&parasite)) != ret_t::Success) return code;
+  status = Stopped;
+  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  return ret_t::Success;
+}
+
+ret_t Process::detach() {
+  trace::detach(pid);
+  close(uffd);
+  pid = newTaskPid = -1;
+  status = Ready;
+  exit = 0;
+  stopReason = stop_t::Other;
+  reinjectSignal = false;
+  uffd = -1;
+  nthreads = 0;
+  parasite::cure(&parasite);
+  sem_destroy(&handoff);
+  return ret_t::Success;
+}
+
+ret_t Process::detachHandoff() {
+  ret_t code;
+
+  // Daemonize the child the wait for us to reattach
+  if(parasite::infect(parasite, 1) != ret_t::Success)
+    return ret_t::CompelInfectFailed;
+  status = Running;
+
+  // At this point the child is asleep waiting for compel commands, but
+  // detaching requires it to be in a trace-stop state.  Interrupt & detach.
+  if((code = interrupt()) != ret_t::Success) goto err;
+  if(!trace::detach(pid)) {
+    code = ret_t::PtraceFailed;
+    goto err;
   }
-  return parasite::cure(ctx);
+
+  // Signal the other thread that they are now able to attach
+  if(sem_post(&handoff)) {
+    code = ret_t::HandoffFailed;
+    goto err;
+  }
+
+  return ret_t::Success;
+err:
+  if(parasite::cure(&parasite) == ret_t::Success) {
+    status = Stopped;
+    parasite = parasite::initialize(pid);
+  }
+  return code;
+}
+
+ret_t Process::traceThread(pid_t pid) {
+  // TODO handle multi-threading
+  return ret_t::NotImplemented;
+}
+
+ret_t Process::stealUserfaultfd() {
+  ret_t retcode;
+  retcode = parasite::infect(parasite, nthreads);
+  if(retcode != ret_t::Success) return retcode;
+  if((uffd = parasite::stealUFFD(parasite)) == -1)
+    return ret_t::CompelActionFailed;
+  if((retcode = parasite::cure(&parasite)) != ret_t::Success) return retcode;
+  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  return ret_t::Success;
+}
+
+pid_t Process::getNewTaskPid() const {
+  if(status == Stopped &&
+     (stopReason == stop_t::Fork || stopReason == stop_t::Clone))
+    return newTaskPid;
+  else return INT32_MAX;
 }
 
 int Process::getExitCode() const {
@@ -204,6 +298,11 @@ int Process::getExitCode() const {
 int Process::getSignal() const {
   if(status == SignalExit || status == Stopped) return signal;
   else return INT32_MAX;
+}
+
+stop_t Process::getStopReason() const {
+  if(status == Stopped) return stopReason;
+  else return stop_t::Other;
 }
 
 // TODO the functions that only access a single register (i.e., get/setPC())

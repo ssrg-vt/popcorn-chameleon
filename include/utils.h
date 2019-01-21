@@ -10,6 +10,8 @@
 
 #include <assert.h>
 
+extern pid_t masterPID;
+
 /*
  * Check if a value is within the region [start, start+len).  Note that all
  * values must either be signed integers or must be within a signed 64-bit

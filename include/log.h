@@ -12,21 +12,19 @@
 #include <iomanip>
 #include <sys/types.h>
 
-extern pid_t masterPID;
-
 /* Print information to the console */
 #define INFO_RAW( ... ) std::cout << __VA_ARGS__ << std::dec;
 #define INFO( ... ) \
-  do { std::cout << "[ chameleon " << masterPID << " ] " \
+  do { std::cout << "[ chameleon ] " \
                  << __VA_ARGS__ << std::dec; } while(0);
 
 #define WARN( ... ) \
-  do { std::cerr << "[ chameleon " << masterPID << " ] WARNING: " \
+  do { std::cerr << "[ chameleon ] WARNING: " \
                  << __VA_ARGS__ << std::dec; } while(0);
 
 /* Print an error message and exit */
 #define ERROR( ... ) \
-  do { std::cerr << "[ chameleon " << masterPID << " ] ERROR: " \
+  do { std::cerr << "[ chameleon ] ERROR: " \
                  << __VA_ARGS__; exit(1); } while(0);
 
 #ifndef NDEBUG

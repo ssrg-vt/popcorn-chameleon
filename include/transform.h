@@ -37,11 +37,20 @@ public:
    * @param batchedFaults maximum number of faults handled at once
    */
   CodeTransformer(Process &proc,
+                  Binary &binary,
                   size_t batchedFaults = 1,
                   size_t slotPadding = 128)
-    : proc(proc), binary(proc.getArgv()[0]), slotPadding(slotPadding),
-      faultHandlerPid(-1), batchedFaults(batchedFaults) {}
+    : proc(proc), binary(binary), codeStart(0), codeEnd(0),
+      slotPadding(slotPadding), faultHandlerPid(-1),
+      batchedFaults(batchedFaults) {}
   CodeTransformer() = delete;
+
+  /**
+   * Destructor for state transformer.
+   *
+   * Note: calls Process::detach() in order to close the userfaultfd file
+   * descriptor & exit the fault handling thread.
+   */
   ~CodeTransformer();
 
   /**
@@ -143,10 +152,7 @@ private:
   Process &proc;
 
   /* Binary containing transformation metadata */
-  Binary binary;
-
-  /* libcompel handle for child parasite */
-  struct parasite_ctl *parasite;
+  Binary &binary;
 
   /* Code section start & end addresses */
   uintptr_t codeStart, codeEnd;

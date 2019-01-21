@@ -57,13 +57,15 @@ ret_t infect(struct parasite_ctl *ctx, size_t nthreads);
 int stealUFFD(struct parasite_ctl *ctx);
 
 /**
- * Cure the child's parasite.  Note that the child must have been previously
+ * Cure the child's parasite.  Internally frees pointed-to ctx and sets its
+ * storage to null, meaning it is no longer valid; users must get another
+ * context via initialize().  Note that the child must have been previously
  * stopped & infected.
  *
- * @param ctx a paraite control context
+ * @param ctx a pointer to a parasite control context pointer
  * @return a return code describing the outcome
  */
-ret_t cure(struct parasite_ctl *ctx);
+ret_t cure(struct parasite_ctl **ctx);
 
 /**
  * Execute a system call in the context of the child process.  Note that the

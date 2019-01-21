@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <sys/user.h>
 
+#include "types.h"
+
 namespace chameleon {
 namespace trace {
 
@@ -61,6 +63,13 @@ bool attach(pid_t tracee, bool seize = true);
 bool interrupt(pid_t tracee);
 
 /**
+ * Return the reason a thread was stopped.
+ * @param wstatus the wait status as returned by the wait() family of syscalls
+ * @return the reason a thread was stopped
+ */
+stop_t stopReason(int wstatus);
+
+/**
  * Resume a tracee (child).
  * @param tracee the tracee's PID
  * @param signal signal to be delivered to child if non-zero
@@ -77,9 +86,19 @@ bool resume(pid_t tracee, int signal = 0, bool syscall = false);
 bool detach(pid_t tracee);
 
 /**
+ * Retrieve a message about a recent ptrace event.  The returned value depends
+ * on the actual event.
+ * @param tracee the tracee's PID
+ * @param msg reference to storage to be populated with the event message
+ * @return true if the call succeeded, false otherwise
+ */
+bool getEventMessage(pid_t tracee, unsigned long &msg);
+
+/**
  * Get a tracee's (child) registers.
  * @param tracee the tracee's PID
  * @param regs register set struct to be filled
+ * @return true if call succeeded, false otherwise
  */
 bool getRegs(pid_t tracee, struct user_regs_struct &regs);
 
@@ -87,6 +106,7 @@ bool getRegs(pid_t tracee, struct user_regs_struct &regs);
  * Get a tracee's (child) floating-point registers.
  * @param tracee the tracee's PID
  * @param regs floating point register set struct to be filled
+ * @return true if call succeeded, false otherwise
  */
 bool getFPRegs(pid_t tracee, struct user_fpregs_struct &regs);
 
@@ -94,6 +114,7 @@ bool getFPRegs(pid_t tracee, struct user_fpregs_struct &regs);
  * Set a tracee's (child) registers.
  * @param tracee the tracee's PID
  * @param regs values for tracee's registers
+ * @return true if call succeeded, false otherwise
  */
 bool setRegs(pid_t tracee, struct user_regs_struct &regs);
 

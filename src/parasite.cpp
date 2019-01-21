@@ -42,8 +42,14 @@ int parasite::stealUFFD(struct parasite_ctl *ctx) {
   return uffd;
 }
 
-ret_t parasite::cure(struct parasite_ctl *ctx)
-{ return compel_cure(ctx) == 0 ? ret_t::Success : ret_t::CompelCureFailed; }
+ret_t parasite::cure(struct parasite_ctl **ctx)
+{
+  if(compel_cure(*ctx) == 0) {
+    ctx = nullptr;
+    return ret_t::Success;
+  }
+  else return ret_t::CompelCureFailed;
+}
 
 ret_t parasite::syscall(struct parasite_ctl *ctx, long syscall, long &sysRet,
                         long a1, long a2, long a3, long a4, long a5, long a6) {
