@@ -96,12 +96,6 @@ ret_t Process::forkAndExec() {
      !trace::traceProcessControl(pid))
     return ret_t::TraceSetupFailed;
 
-  // TODO: without reading the registers, we get a floating-point exception
-  // when using x87 (which may appear in odd places like printf).  Maybe it
-  // initializes some FP state that is otherwise not initialized? ¯\_(ツ)_/¯
-  struct user_fpregs_struct fpregs;
-  trace::getFPRegs(pid, fpregs);
-
   // Finally, get to the other side of the execve
   if(resume(false) != ret_t::Success || waitInternal(false) != ret_t::Success)
     return ret_t::TraceSetupFailed;
@@ -115,6 +109,12 @@ ret_t Process::forkAndExec() {
 ret_t Process::initForkedChild() {
   if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
   if(sem_init(&handoff, 0, 0)) return ret_t::TraceSetupFailed;
+
+  // TODO: without reading the registers, we get a floating-point exception
+  // when using x87 (which may appear in odd places like printf).  Maybe it
+  // initializes some FP state that is otherwise not initialized? ¯\_(ツ)_/¯
+  struct user_fpregs_struct fpregs;
+  trace::getFPRegs(pid, fpregs);
 
   DEBUGMSG("set up child " << pid << " for tracing" << std::endl);
 
@@ -222,7 +222,6 @@ ret_t Process::attachHandoff() {
 }
 
 ret_t Process::detach() {
-  trace::detach(pid);
   close(uffd);
   pid = newTaskPid = -1;
   status = Ready;
@@ -233,6 +232,7 @@ ret_t Process::detach() {
   nthreads = 0;
   parasite::cure(&parasite);
   sem_destroy(&handoff);
+  trace::detach(pid);
   return ret_t::Success;
 }
 
@@ -274,6 +274,9 @@ ret_t Process::traceThread(pid_t pid) {
 
 ret_t Process::stealUserfaultfd() {
   ret_t retcode;
+
+  DEBUGMSG(pid << ": stealing userfault from child" << std::endl);
+
   retcode = parasite::infect(parasite, nthreads);
   if(retcode != ret_t::Success) return retcode;
   if((uffd = parasite::stealUFFD(parasite)) == -1)

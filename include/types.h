@@ -46,6 +46,7 @@ namespace chameleon {
   X(InvalidTransformConfig, "invalid transformation configuration") \
   X(DisasmSetupFailed, "setting up disassembler failed") \
   X(RemapCodeFailed, "could not remap code section for userfaulfd setup") \
+  X(DropCodeFailed, "dropping code to force new page faults failed") \
   X(AnalysisFailed, "could not analyze code to ensure correctness") \
   X(RandomizeFailed, "could not randomize code section") \
   X(ChildHandlerSetupFailed, "creating child handler thread failed") \

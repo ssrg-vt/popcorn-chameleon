@@ -39,7 +39,7 @@ static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
 
 // Declare event & child handling APIs to satisfy compiler
 static ret_t addChild(pid_t pid);
-static ret_t cleanupChild(pid_t pid);
+static ret_t cleanupChild(const Process *proc);
 static Process::status_t handleEvent(Process &child);
 static void *forkedChildLoop(void *proc);
 
@@ -132,7 +132,7 @@ static ret_t addChild(pid_t pid) {
   return code;
 }
 
-static ret_t cleanupChild(pid_t pid) {
+static ret_t cleanupChild(const Process *proc) {
   ret_t code = ret_t::Success;
   list<ChildHandler>::iterator it;
 
@@ -141,7 +141,7 @@ static ret_t cleanupChild(pid_t pid) {
   // Find the entry containing the Process object & handler, add the handler to
   // be joined and remove the child entry
   for(it = children.begin(); it != children.end(); it++) {
-    if(it->first.getPid() == pid) {
+    if(&it->first == proc) {
       if(pthread_mutex_lock(&joinLock)) {
         code = ret_t::LockFailed;
         break;
@@ -186,6 +186,7 @@ static ret_t joinHandlers() {
     code = (ret_t)tmp.rawInt;
 
     if(code != ret_t::Success) {
+      // TODO print PID of exiting process
       WARN("handler exited with error: " << retText(code) << endl);
       code = ret_t::Success;
     }
@@ -220,6 +221,7 @@ static Process::status_t handleEvent(Process &child) {
     switch(child.getStopReason()) {
     default: code = ret_t::Success; break;
     case stop_t::Exec:
+      // TODO implement - need to create a new Binary and remap code section
       ERROR(pid << ": could not handle execve(): "
             << retText(ret_t::NotImplemented) << endl);
       break;
@@ -256,10 +258,28 @@ static void *forkedChildLoop(void *proc) {
   Process::status_t status;
   ret_t code = ret_t::Success;
 
-  // Become the child's tracer
-  if((code = child->attachHandoff()) != ret_t::Success) return (void *)code;
+  // Note: cleanupChild() removes the process &handler from the children list,
+  // which destroys the Process object pointed to by child.  After the call,
+  // child is no longer valid - do not use!
 
-  // TODO need a CodeTransformer when randomizing the child
+  // Become the child's tracer
+  if((code = child->attachHandoff()) != ret_t::Success) {
+    DEBUGMSG(cpid << ": could not attach from handoff" << endl);
+    child->detach();
+    cleanupChild(child);
+    return (void *)code;
+  }
+
+  // Initialize transformation machinery.  Note that we don't have to re-map
+  // child's code - the re-mapped VMA should be inherited from the parent.
+  CodeTransformer transformer(*child, *binary);
+  code = transformer.initialize(randomize, false);
+  if(code != ret_t::Success) {
+    DEBUGMSG(cpid << ": could not set up code transformer" << endl);
+    transformer.cleanup();
+    cleanupChild(child);
+    return (void *)code;
+  }
 
   INFO("Beginning forked child " << cpid << endl);
 
@@ -267,13 +287,10 @@ static void *forkedChildLoop(void *proc) {
     status = handleEvent(*child);
   } while(status != Process::Exited && status != Process::SignalExit);
 
-  // Note: cleanupChild() removes the process &handler from the children list,
-  // which destroys the Process object pointed to by child.  The child pointer
-  // is no longer valid - do not use!
   INFO("Cleaning up forked child " << cpid << endl);
-  child->detach(); // TODO CodeTransformer will call this internally
-  proc = child = nullptr;
-  cleanupChild(cpid);
+  if(transformer.cleanup() != ret_t::Success)
+    WARN(cpid << ": problem cleaning up code transformer" << endl);
+  cleanupChild(child);
 
   return (void *)code;
 }
@@ -291,10 +308,13 @@ int main(int argc, char **argv) {
   INFO("Starting '" << childArgv[0] << "'" << endl);
   t.start();
 
-  // Initialize libelf and load the binary (including all metadata)
+  // Initialize libelf/disassembler, load the binary (including all metadata)
   code = Binary::initLibELF();
   if(code != ret_t::Success)
     ERROR("could not initialize libelf: " << retText(code) << endl);
+  code = arch::initDisassembler();
+  if(code != ret_t::Success)
+    ERROR("could not initialize disassembler: " << retText(code) << endl);
   binary.reset(new Binary(childArgv[0]));
   code = binary->initialize();
   if(code != ret_t::Success)
@@ -308,22 +328,28 @@ int main(int argc, char **argv) {
 
   // Set up the state transfomer
   CodeTransformer transformer(child, *binary);
-  code = transformer.initialize(randomize);
+  code = transformer.initialize(randomize, true);
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
 
   t.end();
   INFO("Application startup time: " << t.elapsed(Timer::Micro) << " us"
-       << endl << "Beginning main child " << child.getPid() << endl);
+       << endl);
+  INFO("Beginning main child " << child.getPid() << endl);
 
   do {
     status = handleEvent(child);
   } while(status != Process::Exited && status != Process::SignalExit);
 
-  // TODO if forked children don't exit (and our handlers are blocked waiting),
-  // then we're force-killing them by exiting.  Need to gracefully clean up.
-
   INFO("Cleaning up child " << child.getPid() << endl);
+  code = transformer.cleanup();
+  if(code != ret_t::Success)
+    ERROR("could not clean up clean up transformer" << retText(code) << endl);
+
+  // TODO if forked children haven't exited and our handlers are blocked
+  // waiting, then we're force-killing them by exiting.  Need to wait for all
+  // forked children to exit before we return.
+  joinHandlers();
 
   return 0;
 }

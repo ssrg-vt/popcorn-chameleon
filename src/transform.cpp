@@ -13,8 +13,6 @@ using namespace chameleon;
 // Fault handling
 ///////////////////////////////////////////////////////////////////////////////
 
-static volatile bool faultHandlerExit = false;
-
 /**
  * Set up signal handler for SIGINT.  Required because the calls to read() in
  * handleFaultsAsync are blocking.
@@ -35,18 +33,21 @@ static inline bool setSignalHandler() {
  * @param CT code transformer
  * @param uffd userfaultfd file descriptor for user-space fault handling
  * @param msg description of faulting region
+ * @param pageBuf a page-sized buffer used to hold page data
  * @return a return code describing the outcome
  */
-static std::vector<char> pageBuf(PAGESZ);
-static inline ret_t
-handleFault(CodeTransformer *CT, int uffd, const struct uffd_msg &msg) {
-  uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address), data;
+static inline ret_t handleFault(CodeTransformer *CT,
+                                int uffd,
+                                const struct uffd_msg &msg,
+                                std::vector<char> &pageBuf) {
+  uintptr_t pageAddr = msg.arg.pagefault.address, data;
   ret_t code = ret_t::Success;
 
   assert(msg.event == UFFD_EVENT_PAGEFAULT && "Invalid message type");
-  DEBUGMSG("handling fault @ 0x" << std::hex << msg.arg.pagefault.address
-           << ", flags=" << msg.arg.pagefault.flags << ", ptid=" << std::dec
-           << msg.arg.pagefault.feat.ptid << std::endl);
+  assert(!(pageAddr & (PAGESZ - 1)) && "Fault address not page-aligned");
+  DEBUGMSG(CT->getProcessPid() << ": handling fault @ 0x" << std::hex
+           << pageAddr << ", flags=" << msg.arg.pagefault.flags << ", ptid="
+           << std::dec << msg.arg.pagefault.feat.ptid << std::endl);
 
   if(!(data = CT->zeroCopy(pageAddr))) {
     if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success) return code;
@@ -71,6 +72,7 @@ static void *handleFaultsAsync(void *arg) {
   pid_t me = syscall(SYS_gettid);
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
   Timer t;
+  std::vector<char> pageBuf(PAGESZ, 0xcc);
 
   assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
@@ -83,7 +85,7 @@ static void *handleFaultsAsync(void *arg) {
   DEBUGMSG("fault handler " << me << ": reading from uffd=" << uffd
            << ", batching " << nfaults << " fault(s)" << std::endl);
 
-  while(!faultHandlerExit) {
+  while(!CT->shouldFaultHandlerExit()) {
     bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);
     if(bytesRead >= 0) {
       t.start();
@@ -92,7 +94,7 @@ static void *handleFaultsAsync(void *arg) {
         // TODO for Linux 4.11+, handle UFFD_EVENT_FORK, UFFD_EVENT_REMAP,
         // UFFD_EVENT_REMOVE, UFFD_EVENT_UNMAP
         if(msg[i].event != UFFD_EVENT_PAGEFAULT) continue;
-        if(handleFault(CT, uffd, msg[i]) != ret_t::Success) {
+        if(handleFault(CT, uffd, msg[i], pageBuf) != ret_t::Success) {
           INFO("could not handle fault, limping ahead..." << std::endl);
           continue;
         }
@@ -118,18 +120,7 @@ static void *handleFaultsAsync(void *arg) {
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
-CodeTransformer::~CodeTransformer() {
-  faultHandlerExit = true;
-  proc.detach(); // detaching closes the userfaultfd file descriptor
-  if(faultHandlerPid > 0) {
-    // Interrupt the fault handling thread if the thread was already blocking
-    // on a read before closing the userfaultfd file descriptor
-    syscall(SYS_tgkill, masterPID, faultHandlerPid, SIGINT);
-    pthread_join(faultHandler, nullptr);
-  }
-}
-
-ret_t CodeTransformer::initialize(bool randomize) {
+ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   ret_t retcode;
 
   if(batchedFaults != 1) {
@@ -141,11 +132,10 @@ ret_t CodeTransformer::initialize(bool randomize) {
   if(slotPadding >= PAGESZ)
     WARN("Large padding added between slots: " << slotPadding << std::endl);
 
-  if((retcode = arch::initDisassembler()) != ret_t::Success) return retcode;
+  // Initialize code & randomize (if requested) to serve initial faults
+
   const Binary::Section &codeSec = binary.getCodeSection();
   const Binary::Segment &codeSeg = binary.getCodeSegment();
-
-  // Initialize code & randomize (if requested) to serve initial faults
   retcode = populateCodeWindow(codeSec, codeSeg);
   if(retcode != ret_t::Success) return retcode;
   if(randomize) {
@@ -157,7 +147,8 @@ ret_t CodeTransformer::initialize(bool randomize) {
 
   // Prepare the code region inside the child by setting up correct page
   // permissions and registering it with the userfaultfd file descriptor
-  retcode = remapCodeSegment(codeSec.address(), codeSec.size());
+  if(remap) retcode = remapCodeSegment(codeSec.address(), codeSec.size());
+  else retcode = dropCode();
   if(retcode != ret_t::Success) return retcode;
   retcode = proc.stealUserfaultfd();
   if(retcode != ret_t::Success) return retcode;
@@ -173,6 +164,33 @@ ret_t CodeTransformer::initialize(bool randomize) {
     return ret_t::FaultHandlerFailed;
 
   return ret_t::Success;
+}
+
+ret_t CodeTransformer::cleanup() {
+  faultHandlerExit = true;
+  proc.detach(); // detaching closes the userfaultfd file descriptor
+  if(faultHandlerPid > 0) {
+    // Interrupt the fault handling thread if the thread was already blocking
+    // on a read before closing the userfaultfd file descriptor
+    syscall(SYS_tgkill, masterPID, faultHandlerPid, SIGINT);
+    pthread_join(faultHandler, nullptr);
+  }
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::dropCode() {
+  long ret;
+
+  DEBUGMSG(proc.getPid() << ": dropping code pages" << std::endl);
+
+  // The child executes madvise(), which drops code pages.  Upon returning to
+  // userspace, we may cause something like a segfault, causing
+  // parasite::syscall() to return an error; just mask it.
+  parasite::syscall(proc.getParasiteCtl(), SYS_madvise, ret,
+                    PAGE_DOWN(codeStart), PAGE_UP(codeEnd - codeStart),
+                    MADV_DONTNEED);
+  if(ret) return ret_t::DropCodeFailed;
+  else return ret_t::Success;
 }
 
 /* Adjust offset based on stack growth direction */
@@ -219,8 +237,8 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   if(parasite::syscall(parasite, SYS_getpid, mmapRet) != ret_t::Success)
     return ret_t::CompelActionFailed;
 
-  DEBUGMSG("changing child's code section anonymous private mapping for "
-           "userfaultfd" << std::endl);
+  DEBUGMSG("changing " << proc.getPid() << "'s code section to anonymous "
+           "private mapping for userfaultfd" << std::endl);
 
   // For some reason the kernel returns a SIGSEGV to compel as a result of the
   // mmap and thus compel returns an error code, but the mmap call succeeds and
@@ -246,6 +264,8 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
   byte_iterator data;
   MemoryRegionPtr r;
   Timer t;
+
+  DEBUGMSG("populating memory window with code for rewriting" << std::endl);
   t.start();
 
   // Note: by construction of how we're adding regions we don't need to call
@@ -301,7 +321,7 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
   codeWindow.insert(r);
 
   t.end();
-  INFO("Code window setup time: " << t.elapsed(Timer::Micro) << " us"
+  INFO("Code buffer setup time: " << t.elapsed(Timer::Micro) << " us"
        << std::endl);
 
   return ret_t::Success;

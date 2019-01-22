@@ -14,7 +14,7 @@ function print_help {
   echo "Options:"
   echo "  -h | --help        : print help & exit"
   echo "  -c | --criu DIR    : CRIU source directory"
-  echo "  -i | --install DIR : set installation directory"
+  echo "  -i | --install DIR : installation directory (default=$INSTALL)"
   echo "  -n | --no-patch    : don't apply Chameleon's patch to compel sources"
   echo "  -d | --debug       : build debug version of libcompel"
   echo

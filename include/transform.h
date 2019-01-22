@@ -41,24 +41,41 @@ public:
                   size_t batchedFaults = 1,
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
-      slotPadding(slotPadding), faultHandlerPid(-1),
+      slotPadding(slotPadding), faultHandlerPid(-1), faultHandlerExit(false),
       batchedFaults(batchedFaults) {}
   CodeTransformer() = delete;
 
   /**
-   * Destructor for state transformer.
+   * Initialize the code transformer object.  Callers can selectively
+   * enable/disable randomization (if disabled, act just like the OS mapping
+   * pages from disk).  If remap is true, remap the child's code section to be
+   * suitable for attaching userfaultfd file descriptors.  If false, it's
+   * assumed the child's code is already set up for attaching userfaultfd -
+   * just drop the existing pages to force new page faults.
+   *
+   * @param randomize if true, randomize the code
+   * @param remap if true, remap the process' code section for userfaultfd,
+   *              otherwise just drop the existing code pages
+   * @return a return code describing the outcome
+   */
+  ret_t initialize(bool randomize, bool remap);
+
+  /**
+   * Clean up the state transformer, including stopping handling faults.  Users
+   * should not call any other APIs after a call to cleanup().
    *
    * Note: calls Process::detach() in order to close the userfaultfd file
    * descriptor & exit the fault handling thread.
-   */
-  ~CodeTransformer();
-
-  /**
-   * Initialize the code transformer object.
-   * @param randomize if true, randomize the code
+   *
    * @return a return code describing the outcome
    */
-  ret_t initialize(bool randomize);
+  ret_t cleanup();
+
+  /**
+   * Return the PID of the process being transformed.
+   * @return the PID of the process being transformed
+   */
+  pid_t getProcessPid() const { return proc.getPid(); }
 
   /**
    * Return the address of a buffer which can be directly passed to the kernel
@@ -79,6 +96,12 @@ public:
    */
   ret_t project(uintptr_t address, std::vector<char> &buffer) const
   { return codeWindow.project(address, buffer); }
+
+  /**
+   * Drop the child's code pages, forcing them to be brought back in by faults.
+   * @return a return code describing the outcome
+   */
+  ret_t dropCode();
 
   /**
    * Return the userfaultfd file descriptor for the attached process.
@@ -106,6 +129,12 @@ public:
    * @param pid the fault handling thread's PID
    */
   void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
+
+  /**
+   * Return whether the fault handling thread should exit.
+   * @return true if the fault handler should exit, false otherwise
+   */
+  bool shouldFaultHandlerExit() const { return faultHandlerExit; }
 
   /**
    * DynamoRIO operand size in bytes.
@@ -176,6 +205,7 @@ private:
   /* Thread responsible for reading & responding to page faults */
   pthread_t faultHandler;
   pid_t faultHandlerPid;
+  bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
 
   /**
