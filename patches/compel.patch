@@ -1,0 +1,38 @@
+diff --git a/compel/src/lib/infect.c b/compel/src/lib/infect.c
+index abf3a0ab..3ffbe483 100644
+--- a/compel/src/lib/infect.c
++++ b/compel/src/lib/infect.c
+@@ -345,13 +345,13 @@ int compel_resume_task(pid_t pid, int orig_st, int st)
+ 	return 0;
+ }
+ 
+-static int gen_parasite_saddr(struct sockaddr_un *saddr, int key)
++static int gen_parasite_saddr(struct sockaddr_un *saddr, int key1, int key2)
+ {
+ 	int sun_len;
+ 
+ 	saddr->sun_family = AF_UNIX;
+ 	snprintf(saddr->sun_path, UNIX_PATH_MAX,
+-			"X/crtools-pr-%d", key);
++			"X/crtools-pr-%d-%d", key1, key2);
+ 
+ 	sun_len = SUN_LEN(saddr);
+ 	*saddr->sun_path = '\0';
+@@ -367,7 +367,7 @@ static int prepare_tsock(struct parasite_ctl *ctl, pid_t pid,
+ 	struct sockaddr_un addr;
+ 
+ 	pr_info("Putting tsock into pid %d\n", pid);
+-	args->h_addr_len = gen_parasite_saddr(&args->h_addr, getpid());
++	args->h_addr_len = gen_parasite_saddr(&args->h_addr, getpid(), pid);
+ 
+ 	ssock = ctl->ictx.sock;
+ 	sk_len = sizeof(addr);
+@@ -396,7 +396,7 @@ static int prepare_tsock(struct parasite_ctl *ctl, pid_t pid,
+ 
+ 	/* Check a case when parasite can't initialize a command socket */
+ 	if (ctl->ictx.flags & INFECT_FAIL_CONNECT)
+-		args->h_addr_len = gen_parasite_saddr(&args->h_addr, getpid() + 1);
++		args->h_addr_len = gen_parasite_saddr(&args->h_addr, getpid() + 1, pid);
+ 
+ 	/*
+ 	 * Set to -1 to prevent any accidental misuse. The
