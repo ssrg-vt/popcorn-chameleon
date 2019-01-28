@@ -80,7 +80,7 @@ bool uffd::registerRegion(int fd, uintptr_t addr, uint64_t len) {
   if(ioctl(fd, UFFDIO_REGISTER, &ctrl) == -1) return false;
 
   DEBUG(
-    DEBUGMSG("registered 0x" << std::hex << ctrl.range.start << " - "
+    DEBUGMSG("registered 0x" << std::hex << ctrl.range.start << " - 0x"
              << ctrl.range.start + ctrl.range.len << " (size=" << std::dec
              << ctrl.range.len << ")" << std::endl);
     DEBUG_VERBOSE(printIoctls(ctrl.ioctls));

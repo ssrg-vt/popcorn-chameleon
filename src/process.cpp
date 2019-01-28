@@ -97,7 +97,8 @@ ret_t Process::forkAndExec() {
     return ret_t::TraceSetupFailed;
 
   // Finally, get to the other side of the execve
-  if(resume(false) != ret_t::Success || waitInternal(false) != ret_t::Success)
+  if(resume(trace::Continue) != ret_t::Success ||
+     waitInternal(false) != ret_t::Success)
     return ret_t::TraceSetupFailed;
 
   DEBUGMSG("successfully stopped child " << pid << " after execve()"
@@ -119,6 +120,11 @@ ret_t Process::initForkedChild() {
   DEBUGMSG("set up child " << pid << " for tracing" << std::endl);
 
   return ret_t::Success;
+}
+
+ret_t Process::traceThread(pid_t pid) {
+  // TODO handle multi-threading
+  return ret_t::NotImplemented;
 }
 
 ret_t Process::waitInternal(bool reinject) {
@@ -178,20 +184,23 @@ ret_t Process::interrupt() {
   return ret_t::Success;
 }
 
-ret_t Process::resume(bool syscall) {
+ret_t Process::signalProcess(int signo) const
+{ return kill(pid, signo) == 0 ? ret_t::Success : ret_t::SignalFailed; }
+
+ret_t Process::resume(trace::resume_t type) {
   bool success;
 
   switch(status) {
-  // Return immediately if the process is already running
-  case Running: return ret_t::Success;
+  // We can't resume an already running process...
+  case Running: return ret_t::InvalidState;
 
   // We can't resume a process that's dead...
-  case Exited:
+  case Exited: /* fall through */
   case SignalExit: return ret_t::DoesNotExist;
 
   default:
-    if(reinjectSignal) success = trace::resume(pid, signal, syscall);
-    else success = trace::resume(pid, 0, syscall);
+    if(reinjectSignal) success = trace::resume(pid, type, signal);
+    else success = trace::resume(pid, type, 0);
     if(success) {
       status = Running;
       return ret_t::Success;
@@ -200,8 +209,20 @@ ret_t Process::resume(bool syscall) {
   }
 }
 
-ret_t Process::continueToNextEvent(bool syscall) {
-  ret_t retcode = resume(syscall);
+ret_t Process::continueToNextSignal() {
+  ret_t retcode = resume(trace::Continue);
+  if(retcode != ret_t::Success) return retcode;
+  return waitInternal(true);
+}
+
+ret_t Process::continueToNextSignalOrSyscall() {
+  ret_t retcode = resume(trace::Syscall);
+  if(retcode != ret_t::Success) return retcode;
+  return waitInternal(true);
+}
+
+ret_t Process::singleStep() {
+  ret_t retcode = resume(trace::SingleStep);
   if(retcode != ret_t::Success) return retcode;
   return waitInternal(true);
 }
@@ -265,25 +286,6 @@ err:
     parasite = parasite::initialize(pid);
   }
   return code;
-}
-
-ret_t Process::traceThread(pid_t pid) {
-  // TODO handle multi-threading
-  return ret_t::NotImplemented;
-}
-
-ret_t Process::stealUserfaultfd() {
-  ret_t retcode;
-
-  DEBUGMSG(pid << ": stealing userfault from child" << std::endl);
-
-  retcode = parasite::infect(parasite, nthreads);
-  if(retcode != ret_t::Success) return retcode;
-  if((uffd = parasite::stealUFFD(parasite)) == -1)
-    return ret_t::CompelActionFailed;
-  if((retcode = parasite::cure(&parasite)) != ret_t::Success) return retcode;
-  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
-  return ret_t::Success;
 }
 
 pid_t Process::getNewTaskPid() const {
@@ -353,5 +355,19 @@ void Process::dumpRegs() const {
   struct user_fpregs_struct fpregs;
   if(trace::getRegs(pid, regs)) arch::dumpRegs(regs);
   if(trace::getFPRegs(pid, fpregs)) arch::dumpFPRegs(fpregs);
+}
+
+ret_t Process::stealUserfaultfd() {
+  ret_t retcode;
+
+  DEBUGMSG(pid << ": stealing userfault from child" << std::endl);
+
+  retcode = parasite::infect(parasite, nthreads);
+  if(retcode != ret_t::Success) return retcode;
+  if((uffd = parasite::stealUFFD(parasite)) == -1)
+    return ret_t::CompelActionFailed;
+  if((retcode = parasite::cure(&parasite)) != ret_t::Success) return retcode;
+  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  return ret_t::Success;
 }
 

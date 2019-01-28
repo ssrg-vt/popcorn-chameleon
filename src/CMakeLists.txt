@@ -141,6 +141,7 @@ add_executable (chameleon
   transform.cpp
   types.cpp
   userfaultfd.cpp
+  utils.cpp
 )
 add_dependencies(chameleon parasite_lib)
 target_include_directories (chameleon PRIVATE

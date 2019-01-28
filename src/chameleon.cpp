@@ -1,4 +1,3 @@
-#include <iostream>
 #include <list>
 #include <memory>
 #include <cstdlib>
@@ -11,6 +10,10 @@
 #include "transform.h"
 #include "types.h"
 
+#ifdef DEBUG_BUILD
+#include <fstream>
+#endif
+
 using namespace std;
 using namespace chameleon;
 
@@ -18,7 +21,9 @@ pid_t masterPID;
 static int childArgc;
 static char **childArgv;
 static bool randomize = true;
-#ifndef NDEBUG
+#ifdef DEBUG_BUILD
+static const char *traceFilename = nullptr;
+static ofstream traceFile;
 bool verboseDebug = false;
 #endif
 
@@ -32,6 +37,7 @@ static BinaryPtr binary;
 // Note: chameleon will fork the main application and maintain its information
 // in the main thread.  This list holds information for additional children
 // forked during the application's (or its children's) execution.
+static int numChildren = 0;
 static list<ChildHandler> children; /* running children/handlers */
 static list<pthread_t> toJoin; /* children that have exited & need joining */
 static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
@@ -57,12 +63,13 @@ static void printHelp(const char *bin) {
        << bin << "'s arguments must precede '--', after which the user should "
                  "specify a binary and any arguments" << endl << endl
        << "Options:" << endl
-       << "  -h : print help and exit" << endl
-       << "  -n : don't randomize the code section" << endl
-#ifndef NDEBUG
-       << "  -d : print even more debugging information than normal" << endl
+       << "  -h      : print help and exit" << endl
+       << "  -n      : don't randomize the code section" << endl
+#ifdef DEBUG_BUILD
+       << "  -t FILE : trace execution by dumping PC values to FILE (warning: slow!)" << endl
+       << "  -d      : print even more debugging information than normal" << endl
 #endif
-       << "  -v : print Popcorn Chameleon version and exit" << endl;
+       << "  -v      : print Popcorn Chameleon version and exit" << endl;
 }
 
 static void printChameleonInfo() {
@@ -90,12 +97,13 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hndv")) != -1) {
+  while((c = getopt(argc, argv, "hnt:dv")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
     case 'n': randomize = false; break;
-#ifndef NDEBUG
+#ifdef DEBUG_BUILD
+    case 't': traceFilename = optarg; break;
     case 'd': verboseDebug = true; break;
 #endif
     case 'v': printChameleonInfo(); exit(0); break;
@@ -120,12 +128,15 @@ static ret_t addChild(pid_t pid) {
 
   if(pthread_mutex_lock(&childLock)) return ret_t::LockFailed;
 
+  // TODO if anything below fails, need to release childLock & remove child
+  // from children
   children.emplace_back(Process(pid), pthread_t());
   ChildHandler &child = children.back();
   if((code = child.first.initForkedChild()) != ret_t::Success) return code;
   if((code = child.first.detachHandoff()) != ret_t::Success) return code;
   if(pthread_create(&child.second, nullptr, forkedChildLoop, &child.first))
     return ret_t::ChildHandlerSetupFailed;
+  __atomic_add_fetch(&numChildren, 1, __ATOMIC_RELEASE);
 
   if(pthread_mutex_unlock(&childLock)) return ret_t::LockFailed;
 
@@ -146,8 +157,12 @@ static ret_t cleanupChild(const Process *proc) {
         code = ret_t::LockFailed;
         break;
       }
+
       toJoin.emplace_back(it->second);
       children.erase(it);
+      if(__atomic_add_fetch(&numChildren, -1, __ATOMIC_ACQ_REL) == 0)
+        syncWake(&numChildren);
+
       if(pthread_mutex_unlock(&joinLock)) code = ret_t::LockFailed;
       break;
     }
@@ -168,7 +183,7 @@ static ret_t joinHandlers() {
   // compiler into letting us interpret the return value as a ret_t.
   union {
     void *raw;
-    unsigned long rawInt;
+    ret_t retVal;
   } tmp;
 
   // Check if somebody else is already joining children.  It's okay if this
@@ -183,7 +198,7 @@ static ret_t joinHandlers() {
       code = ret_t::ChildHandlerCleanupFailed;
       break;
     }
-    code = (ret_t)tmp.rawInt;
+    code = tmp.retVal;
 
     if(code != ret_t::Success) {
       // TODO print PID of exiting process
@@ -201,13 +216,19 @@ static ret_t joinHandlers() {
 
 static Process::status_t handleEvent(Process &child) {
   pid_t pid = child.getPid();
-  ret_t code = child.continueToNextEvent(false);
+  ret_t code;
+#ifdef DEBUG_BUILD
+  if(traceFilename) code = child.singleStep();
+  else
+#endif
+  code = child.continueToNextSignal();
   if(code != ret_t::Success)
     ERROR(pid << ": could not continue to next event: " << retText(code)
           << endl);
 
   // We're a big happy family, distribute cleanup work between handlers (any
-  // thread is joinable by any other thread).  If we fail, try to limp along...
+  // thread is joinable by any other thread) because we don't want to rely only
+  // on the main thread to join children as it may be waiting for a while.
   code = joinHandlers();
   if(code != ret_t::Success)
     WARN(pid << ": could not join handler: " << retText(code) << endl);
@@ -215,13 +236,18 @@ static Process::status_t handleEvent(Process &child) {
   switch(child.getStatus()) {
   default: INFO(pid << ": unknown status"); return Process::Unknown;
   case Process::Stopped:
+#ifdef DEBUG_BUILD
+    if(traceFilename && child.getSignal() == SIGTRAP)
+      traceFile << dec << pid << " " << hex << child.getPC() << endl;
+    else
+#endif
     DEBUGMSG(pid << ": stopped with signal " << child.getSignal() << " @ 0x"
              << hex << child.getPC() << endl);
 
     switch(child.getStopReason()) {
     default: code = ret_t::Success; break;
     case stop_t::Exec:
-      // TODO implement - need to create a new Binary and remap code section
+      // TODO implement creating a new Binary and remapping code section
       ERROR(pid << ": could not handle execve(): "
             << retText(ret_t::NotImplemented) << endl);
       break;
@@ -296,6 +322,7 @@ static void *forkedChildLoop(void *proc) {
 }
 
 int main(int argc, char **argv) {
+  int remaining;
   ret_t code;
   Process::status_t status;
   Timer t;
@@ -303,6 +330,15 @@ int main(int argc, char **argv) {
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
   parseArgs(argc, argv);
+#ifdef DEBUG_BUILD
+  if(traceFilename) {
+    DEBUGMSG("tracing output to '" << traceFilename << "'" << endl);
+    traceFile.open(traceFilename);
+    if(!traceFile.is_open())
+      ERROR("could not open trace file '" << traceFilename << "': "
+            << strerror(errno) << endl);
+  }
+#endif
 
   DEBUG(printChameleonInfo())
   INFO("Starting '" << childArgv[0] << "'" << endl);
@@ -320,13 +356,11 @@ int main(int argc, char **argv) {
   if(code != ret_t::Success)
     ERROR("could not initialize binary: " << retText(code) << endl);
 
-  // Initialize the main child process
+  // Initialize the main child process & it's transformer
   Process child(childArgc, childArgv);
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
-
-  // Set up the state transfomer
   CodeTransformer transformer(child, *binary);
   code = transformer.initialize(randomize, true);
   if(code != ret_t::Success)
@@ -346,10 +380,14 @@ int main(int argc, char **argv) {
   if(code != ret_t::Success)
     ERROR("could not clean up clean up transformer" << retText(code) << endl);
 
-  // TODO if forked children haven't exited and our handlers are blocked
-  // waiting, then we're force-killing them by exiting.  Need to wait for all
-  // forked children to exit before we return.
-  joinHandlers();
+  // We need to wait for all children to finish up, as exiting the main thread
+  // will kill the handlers and their handled children
+  while((remaining = __atomic_load_n(&numChildren, __ATOMIC_ACQUIRE))) {
+    DEBUGMSG("waiting for all children to join" << endl);
+    if(syncWait(&numChildren, remaining))
+      ERROR("could not wait for children to exit: " << strerror(errno) << endl);
+    joinHandlers();
+  }
 
   return 0;
 }

@@ -31,6 +31,7 @@ namespace chameleon {
   X(WaitFailed, "wait() returned an error") \
   X(PtraceFailed, "ptrace() returned an error") \
   X(InterruptFailed, "could not interrupt task") \
+  X(SignalFailed, "could not send signal to process") \
   X(CompelInitFailed, "compel initialization failed") \
   X(CompelSyscallFailed, "compel child system call failed") \
   X(CompelInfectFailed, "compel infect failed") \
@@ -61,6 +62,7 @@ namespace chameleon {
 /* Other miscellaneous error codes */
 #define MISC_RETCODES \
   X(LockFailed, "locking/unlocking mutex failed") \
+  X(FutexFailed, "futex operation failed") \
   X(NotImplemented, "not implemented") \
   X(NoTimestamp, "could not get timestamp")
 

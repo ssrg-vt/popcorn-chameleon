@@ -71,6 +71,7 @@ ret_t cure(struct parasite_ctl **ctx);
  * Execute a system call in the context of the child process.  Note that the
  * child must have previously been stopped.
  *
+ * @param ctx a pointer to a parasite control context pointer
  * @param syscall the system call number
  * @param sysRet output argument set to return value from system call
  * @param a1-6 arguments to place in registers for syscall
@@ -79,6 +80,13 @@ ret_t cure(struct parasite_ctl **ctx);
 ret_t syscall(struct parasite_ctl *ctx, long syscall, long &sysRet,
               long a1 = 0, long a2 = 0, long a3 = 0,
               long a4 = 0, long a5 = 0, long a6 = 0);
+
+/**
+ * Return the address at which compel will infect the child process.
+ * @param ctx a pointer to a parasite control context pointer
+ * @return address at which infection occurs or 0 if not a valid context
+ */
+uintptr_t infectAddress(struct parasite_ctl *ctx);
 
 }
 }

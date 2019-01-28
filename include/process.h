@@ -70,12 +70,13 @@ public:
   /**
    * Fork a child process to execute the application and set up ptrace.  The
    * call will wait for the forked tracee's initialization and application
-   * execution.  After the tracee receives SIGSTOP (before executing any
+   * execution.  After the tracee receives SIGTRAP (before executing any
    * application code) the tracer will initialize and return with the tracee in
    * the stopped state.
    *
    * Note: the call returns with the child process in the stopped state.  Users
-   * should call resume() or continueToNextEvent() to start the child process.
+   * should call resume() or continue convenience functions to start the child
+   * process.
    *
    * @return a return code describing the outcome
    */
@@ -86,6 +87,12 @@ public:
    * @return a return code describing the outcome
    */
   ret_t initForkedChild();
+
+  /**
+   * Trace a newly created thread.
+   * @param pid the PID of the new thread
+   */
+  ret_t traceThread(pid_t pid);
 
   /**
    * Wait for a child event and update the process' status, which can be
@@ -107,27 +114,51 @@ public:
   ret_t interrupt();
 
   /**
-   * Resume a child.  If syscall = false, tell ptrace to stop at the next
-   * signal delivery to the child.  If syscall = true, tell ptrace to stop at
-   * either the next signal delivery or system call boundary (either going into
-   * or coming out of kernel) by the child.
+   * Send a signal to the child process.  If it is multithreaded, it is
+   * non-deterministic which threads gets the signal.
    *
-   * @param syscall whether or not to trace syscalls
+   * @param signo the signal number
    * @return a return code describing the outcome
    */
-  ret_t resume(bool syscall);
+  ret_t signalProcess(int signo) const;
 
   /**
-   * Continue child execution until the next event.  If syscall = false,
-   * continue until the next signal delivery to the child.  If syscall = true,
-   * continue until either the next signal delivery or system call boundary
-   * (either going into or coming out of kernel) by the child.  Equivalent to
-   * calling resume() followed by wait().
+   * Resume a child.  If type = Continue, tell ptrace to stop at the next
+   * signal delivery to the child.  If type = Syscall, tell ptrace to stop at
+   * either the next signal delivery or system call boundary (either going into
+   * or coming out of kernel) by the child.  If type = SingleStep, execute a
+   * single instruction.  Users must call wait() (even for single-stepping) in
+   * order to synchronize with child's next event.
    *
-   * @param syscall whether or not to trace syscalls
+   * @param type the type of continuation
    * @return a return code describing the outcome
    */
-  ret_t continueToNextEvent(bool syscall);
+  ret_t resume(trace::resume_t type);
+
+  /**
+   * Convenience function to resume child execution and wait until the next
+   * signal.  Equivalent to calling resume(Syscall) followed by wait().
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t continueToNextSignal();
+
+  /**
+   * Convenience function to resume child execution and wait until either the
+   * next signal or syscall boundary (either going into or coming out of
+   * kernel).  Equivalent to calling resume(Continue) followed by wait().
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t continueToNextSignalOrSyscall();
+
+  /**
+   * Convenience function to single-step the child and wait until it stops.
+   * Equivalent to calling resume(SingleStep) followed by wait().
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t singleStep();
 
   /**
    * Attach to a child for tracing.  Does not stop the child.
@@ -157,21 +188,6 @@ public:
    * @return a return code describing the outcome
    */
   ret_t detachHandoff();
-
-  /**
-   * Trace a newly created thread.
-   * @param pid the PID of the new thread
-   */
-  ret_t traceThread(pid_t pid);
-
-  /**
-   * Initialize the userfaultfd in the context of the child and send it to
-   * Chameleon.  After calling, users can query the file descriptor using
-   * getUserfaultfd().
-   *
-   * @return a return code describing the outcome
-   */
-  ret_t stealUserfaultfd();
 
   /////////////////////////////////////////////////////////////////////////////
   // Inspect & modify process state
@@ -264,6 +280,15 @@ public:
    * Dump register contents to an output stream.
    */
   void dumpRegs() const;
+
+  /**
+   * Initialize the userfaultfd in the context of the child and send it to
+   * Chameleon.  After calling, users can query the file descriptor using
+   * getUserfaultfd().
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t stealUserfaultfd();
 
 private:
   /* Arguments */

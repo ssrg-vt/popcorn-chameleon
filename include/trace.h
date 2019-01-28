@@ -69,14 +69,21 @@ bool interrupt(pid_t tracee);
  */
 stop_t stopReason(int wstatus);
 
+/* Type of resume operation */
+enum resume_t {
+  Continue = 0, /* continue until next signal */
+  Syscall,      /* continue until next signal or system call */
+  SingleStep    /* step a single instruction */
+};
+
 /**
  * Resume a tracee (child).
  * @param tracee the tracee's PID
+ * @param type the type of resume operation
  * @param signal signal to be delivered to child if non-zero
- * @param syscall whether to trace syscalls
  * @return true if call succeeded, false otherwise
  */
-bool resume(pid_t tracee, int signal = 0, bool syscall = false);
+bool resume(pid_t tracee, resume_t type, int signal = 0);
 
 /**
  * Detach from a tracee (child).

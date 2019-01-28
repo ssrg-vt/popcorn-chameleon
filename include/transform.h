@@ -19,6 +19,7 @@
 /* Note: arch.h includes DynamoRIO APIs */
 #include "arch.h"
 #include "binary.h"
+#include "log.h"
 #include "memoryview.h"
 #include "parasite.h"
 #include "process.h"
@@ -72,6 +73,20 @@ public:
   ret_t cleanup();
 
   /**
+   * Drop the child's code pages, forcing them to be brought back in by faults.
+   * @return a return code describing the outcome
+   */
+  ret_t dropCode();
+
+#ifdef DEBUG_BUILD
+  /**
+   * Return the Process object to which the CodeTransformer is attached.
+   * @return the attached Process object
+   */
+  Process &getProcess() { return proc; }
+#endif
+
+  /**
    * Return the PID of the process being transformed.
    * @return the PID of the process being transformed
    */
@@ -96,12 +111,6 @@ public:
    */
   ret_t project(uintptr_t address, std::vector<char> &buffer) const
   { return codeWindow.project(address, buffer); }
-
-  /**
-   * Drop the child's code pages, forcing them to be brought back in by faults.
-   * @return a return code describing the outcome
-   */
-  ret_t dropCode();
 
   /**
    * Return the userfaultfd file descriptor for the attached process.
@@ -207,6 +216,17 @@ private:
   pid_t faultHandlerPid;
   bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
+
+  /**
+   * Write a page using the ptrace interface rather than via userfaultfd.
+   * Needed as compel may touch pages during parasite operation; trying to
+   * correctly synchronize compel and userfaultfd to serve what's needed
+   * without causing further problems is not worth the effort.
+   *
+   * @param start address of page
+   * @return a return code describing the outcome
+   */
+  ret_t writePage(uintptr_t start);
 
   /**
    * Remap the code section of the binary to be an anonymous private region

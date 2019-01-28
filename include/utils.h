@@ -9,6 +9,9 @@
 #define _UTILS_H
 
 #include <assert.h>
+#include <sys/types.h>
+
+#include "types.h"
 
 extern pid_t masterPID;
 
@@ -92,6 +95,23 @@ static ssize_t findRight(const T *records, ssize_t nrecords, const V val) {
   else if(mid < nrecords - 1) return mid + 1;
   else return -1;
 }
+
+/**
+ * Sleep until somebody wakes people waiting on the key.  Returns immediately
+ * if *key != val, i.e., somebody has already changed val.
+ *
+ * @param key key used to identify waiting threads
+ * @param val value to check to see if thread should sleep
+ * @return a return code describing the outcome
+ */
+ret_t syncWait(int *key, int val);
+
+/**
+ * Wake any threads waiting (sleeping) on key.
+ * @param key key used to identify waiting threads
+ * @return a return code describing the outcome
+ */
+ret_t syncWake(int *key);
 
 }
 

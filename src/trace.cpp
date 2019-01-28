@@ -42,9 +42,16 @@ stop_t trace::stopReason(int wstatus) {
   else return stop_t::Other;
 }
 
-bool trace::resume(pid_t tracee, int signal, bool syscall) {
-  if(ptrace((syscall ? PTRACE_SYSCALL : PTRACE_CONT),
-            tracee, nullptr, signal) == 0) return true;
+bool trace::resume(pid_t tracee, resume_t type, int signal) {
+  enum __ptrace_request req;
+  switch(type) {
+  default: return false;
+  case Continue: req = PTRACE_CONT; break;
+  case Syscall: req = PTRACE_SYSCALL; break;
+  case SingleStep: req = PTRACE_SINGLESTEP; break;
+  }
+
+  if(ptrace(req, tracee, nullptr, signal) == 0) return true;
   else return false;
 }
 

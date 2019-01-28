@@ -57,3 +57,9 @@ ret_t parasite::syscall(struct parasite_ctl *ctx, long syscall, long &sysRet,
   return ret == 0 ? ret_t::Success : ret_t::CompelSyscallFailed;
 }
 
+uintptr_t parasite::infectAddress(struct parasite_ctl *ctx) {
+  struct infect_ctx *ictx = compel_infect_ctx(ctx);
+  if(ictx) return ictx->syscall_ip;
+  else return 0;
+}
+

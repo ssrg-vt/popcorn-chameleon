@@ -3,7 +3,6 @@
 #include <sys/syscall.h>
 #include <linux/userfaultfd.h>
 
-#include "log.h"
 #include "transform.h"
 #include "utils.h"
 
@@ -49,6 +48,18 @@ static inline ret_t handleFault(CodeTransformer *CT,
            << pageAddr << ", flags=" << msg.arg.pagefault.flags << ", ptid="
            << std::dec << msg.arg.pagefault.feat.ptid << std::endl);
 
+  DEBUG_VERBOSE(
+    // Print the PC causing the fault.  We can't directly interrupt/read child
+    // state (handler isn't the tracer), so poke the child with a signal to get
+    // the tracer to print information (SIGTRAP will get masked by chameleon).
+    Process &theProc = CT->getProcess();
+    if(theProc.signalProcess(SIGTRAP) == ret_t::Success);
+    // TODO ROB the main thread's printing races with the fault handler's
+    // printing, leading to garbled output.  Synchronize better than sleeping.
+    struct timespec time = { 0, 10000000 };
+    nanosleep(&time, nullptr);
+  )
+
   if(!(data = CT->zeroCopy(pageAddr))) {
     if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success) return code;
     data = (uintptr_t)&pageBuf[0];
@@ -72,7 +83,7 @@ static void *handleFaultsAsync(void *arg) {
   pid_t me = syscall(SYS_gettid);
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
   Timer t;
-  std::vector<char> pageBuf(PAGESZ, 0xcc);
+  std::vector<char> pageBuf(PAGESZ);
 
   assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
@@ -82,8 +93,9 @@ static void *handleFaultsAsync(void *arg) {
     ERROR("could not initialize cleanup signal handler" << std::endl);
   CT->setFaultHandlerPid(me);
 
-  DEBUGMSG("fault handler " << me << ": reading from uffd=" << uffd
-           << ", batching " << nfaults << " fault(s)" << std::endl);
+  DEBUGMSG("thread " << me << " is handling faults for " << CT->getProcessPid()
+           << ": reading from uffd=" << uffd << ", batching " << nfaults
+           << " fault(s)" << std::endl);
 
   while(!CT->shouldFaultHandlerExit()) {
     bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);
@@ -133,7 +145,6 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
     WARN("Large padding added between slots: " << slotPadding << std::endl);
 
   // Initialize code & randomize (if requested) to serve initial faults
-
   const Binary::Section &codeSec = binary.getCodeSection();
   const Binary::Segment &codeSeg = binary.getCodeSegment();
   retcode = populateCodeWindow(codeSec, codeSeg);
@@ -180,17 +191,36 @@ ret_t CodeTransformer::cleanup() {
 
 ret_t CodeTransformer::dropCode() {
   long ret;
+  Timer t;
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
+  ret_t code;
 
-  DEBUGMSG(proc.getPid() << ": dropping code pages" << std::endl);
+  assert(parasite && "Invalid parasite control handle");
 
-  // The child executes madvise(), which drops code pages.  Upon returning to
-  // userspace, we may cause something like a segfault, causing
+  t.start();
+  DEBUGMSG(proc.getPid() << ": dropping code pages 0x" << std::hex
+           << PAGE_DOWN(codeStart) << " - 0x" << PAGE_UP(codeEnd)
+           << std::endl);
+
+  // The child executes madvise(), which drops the code pages.  When returning
+  // to userspace, the child causes a page fault.  Because the code section has
+  // been changed to use anonymous private pages, the kernel serves a zero page
+  // and the child immediately segfaults after the page fault handling, causing
   // parasite::syscall() to return an error; just mask it.
-  parasite::syscall(proc.getParasiteCtl(), SYS_madvise, ret,
-                    PAGE_DOWN(codeStart), PAGE_UP(codeEnd - codeStart),
-                    MADV_DONTNEED);
+  parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
+                    PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
   if(ret) return ret_t::DropCodeFailed;
-  else return ret_t::Success;
+
+  // As previously mentioned, the kernel served a zero page; manually rewrite
+  // it with actual instructions.
+  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  if(code != ret_t::Success) return code;
+
+  t.end();
+  INFO(proc.getPid() << ": Dropping code pages: " << t.elapsed(Timer::Micro)
+       << " us" << std::endl);
+
+  return ret_t::Success;
 }
 
 /* Adjust offset based on stack growth direction */
@@ -224,25 +254,62 @@ int32_t CodeTransformer::slotOffsetFromRegister(uint32_t frameSize,
   }
 }
 
+ret_t CodeTransformer::writePage(uintptr_t start) {
+  uint64_t *pageData;
+  std::vector<char> pageBuf;
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
+  ret_t code;
+#ifdef DEBUG_BUILD
+  uintptr_t origStart = PAGE_DOWN(start);
+#endif
+
+  assert(parasite && "Invalid parasite control handle");
+
+  start = PAGE_DOWN(start);
+  if(!(pageData = (uint64_t *)zeroCopy(start))) {
+    pageBuf.resize(PAGESZ);
+    if((code = project(start, pageBuf)) != ret_t::Success) return code;
+    pageData = (uint64_t *)&pageBuf[0];
+  }
+
+  for(size_t i = 0; i < PAGESZ / sizeof(uint64_t);
+      i++, start += sizeof(uint64_t)) {
+    code = proc.write(start, pageData[i]);
+    if(code != ret_t::Success) return code;
+  }
+
+  DEBUGMSG(proc.getPid() << ": manually rewrote page @ 0x" << std::hex
+           << origStart << std::endl);
+
+  return ret_t::Success;
+}
+
 ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   uintptr_t pageStart;
   size_t roundedLen;
   int prot, flags;
   long mmapRet;
   struct parasite_ctl *parasite = proc.getParasiteCtl();
+  ret_t code;
+  Timer t;
 
-  // TODO: for some reason we need to do a dummy syscall to get the child
-  // into a state controllable by us/compel.  Maybe related to not getting into
-  // the correct ptrace-stop mode before running the parasite? ¯\_(ツ)_/¯
+  assert(parasite && "Invalid parasite control handle");
+
+  t.start();
+
+  // TODO: for some reason mmap fails unless we do a dummy syscall.  The
+  // syscall touches a page, maybe the page needs to be brought in before we
+  // can do mmap? ¯\_(ツ)_/¯
   if(parasite::syscall(parasite, SYS_getpid, mmapRet) != ret_t::Success)
     return ret_t::CompelActionFailed;
 
-  DEBUGMSG("changing " << proc.getPid() << "'s code section to anonymous "
+  DEBUGMSG(proc.getPid() << ": changing code section to anonymous "
            "private mapping for userfaultfd" << std::endl);
 
-  // For some reason the kernel returns a SIGSEGV to compel as a result of the
-  // mmap and thus compel returns an error code, but the mmap call succeeds and
-  // compel restores the thread correctly; just mask the error.
+  // compel injects instructions to cause a signal and regain control
+  // post-syscall, but the mmap here causes the kernel to clobber the those
+  // instructions with a zero page.  Upon returning to user-space, the child
+  // causes a segfault; just mask the error.
   pageStart = PAGE_DOWN(start);
   roundedLen = PAGE_ALIGN_LEN(start, len);
   prot = PROT_EXEC | PROT_READ;
@@ -251,8 +318,17 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
                     flags, -1, 0);
   if((uintptr_t)mmapRet != pageStart) return ret_t::RemapCodeFailed;
 
-  DEBUGMSG("remapped 0x" << std::hex << pageStart << " - 0x"
+  DEBUGMSG(proc.getPid() << ": remapped 0x" << std::hex << pageStart << " - 0x"
            << (pageStart + roundedLen) << std::endl);
+
+  // compel touched a page by injecting instructions, so it won't get served
+  // by userfaultfd (the kernel served a zero page); manually rewrite it here.
+  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  if(code != ret_t::Success) return code;
+
+  t.end();
+  INFO(proc.getPid() << ": Code re-mapping: " << t.elapsed(Timer::Micro)
+       << " us" << std::endl);
 
   return ret_t::Success;
 }
@@ -497,7 +573,8 @@ ret_t CodeTransformer::analyzeFunctions() {
                      << " us" << std::endl);
   }
 
-  INFO("Analyze time: " << t.totalElapsed(Timer::Micro) << " us" << std::endl);
+  INFO(proc.getPid() << ": Analysis: " << t.totalElapsed(Timer::Micro)
+       << " us" << std::endl);
 
   return ret_t::Success;
 }
@@ -708,8 +785,8 @@ ret_t CodeTransformer::randomizeFunctions() {
                      << " us" << std::endl);
   }
 
-  INFO("Randomization time: " << t.totalElapsed(Timer::Micro) << " us"
-       << std::endl);
+  INFO(proc.getPid() << ": Randomization: " << t.totalElapsed(Timer::Micro)
+       << " us" << std::endl);
 
   return ret_t::Success;
 }
