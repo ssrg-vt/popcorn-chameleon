@@ -22,6 +22,7 @@ static int childArgc;
 static char **childArgv;
 static bool randomize = true;
 #ifdef DEBUG_BUILD
+pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static const char *traceFilename = nullptr;
 static ofstream traceFile;
 bool verboseDebug = false;
@@ -128,16 +129,16 @@ static ret_t addChild(pid_t pid) {
 
   if(pthread_mutex_lock(&childLock)) return ret_t::LockFailed;
 
-  // TODO if anything below fails, need to release childLock & remove child
-  // from children
   children.emplace_back(Process(pid), pthread_t());
   ChildHandler &child = children.back();
-  if((code = child.first.initForkedChild()) != ret_t::Success) return code;
-  if((code = child.first.detachHandoff()) != ret_t::Success) return code;
-  if(pthread_create(&child.second, nullptr, forkedChildLoop, &child.first))
-    return ret_t::ChildHandlerSetupFailed;
+  if((code = child.first.initForkedChild()) != ret_t::Success) goto cleanup;
+  if(pthread_create(&child.second, nullptr, forkedChildLoop, &child.first)) {
+    code = ret_t::ChildHandlerSetupFailed;
+    goto cleanup;
+  }
+  if((code = child.first.detachHandoff()) != ret_t::Success) goto cleanup;
   __atomic_add_fetch(&numChildren, 1, __ATOMIC_RELEASE);
-
+cleanup:
   if(pthread_mutex_unlock(&childLock)) return ret_t::LockFailed;
 
   return code;
@@ -218,7 +219,10 @@ static Process::status_t handleEvent(Process &child) {
   pid_t pid = child.getPid();
   ret_t code;
 #ifdef DEBUG_BUILD
+  long syscall;
+
   if(traceFilename) code = child.singleStep();
+  else if(verboseDebug) code = child.continueToNextSignalOrSyscall();
   else
 #endif
   code = child.continueToNextSignal();
@@ -243,6 +247,11 @@ static Process::status_t handleEvent(Process &child) {
 #endif
     DEBUGMSG(pid << ": stopped with signal " << child.getSignal() << " @ 0x"
              << hex << child.getPC() << endl);
+    DEBUG_VERBOSE(
+      if(child.getSignal() == SIGTRAP &&
+         child.getSyscallNumber(syscall) == ret_t::Success)
+        DEBUGMSG_VERBOSE(pid << ": system call number " << syscall << endl);
+    )
 
     switch(child.getStopReason()) {
     default: code = ret_t::Success; break;
@@ -357,6 +366,7 @@ int main(int argc, char **argv) {
     ERROR("could not initialize binary: " << retText(code) << endl);
 
   // Initialize the main child process & it's transformer
+  DEBUG(parasite::initializeLog(verboseDebug));
   Process child(childArgc, childArgv);
   code = child.forkAndExec();
   if(code != ret_t::Success)

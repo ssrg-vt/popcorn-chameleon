@@ -94,7 +94,14 @@ uintptr_t pc(const struct user_regs_struct &regs);
  * @param regs a register set
  * @param newPC the new program counter
  */
-void pc(user_regs_struct &regs, uintptr_t newPC);
+void pc(struct user_regs_struct &regs, uintptr_t newPC);
+
+/**
+ * Return the system call number from a register set.
+ * @param regs a previously-populated register set
+ * @return the system call number
+ */
+long syscallNumber(const struct user_regs_struct &regs);
 
 /**
  * Marshal the given arguments into the register set for a function call.

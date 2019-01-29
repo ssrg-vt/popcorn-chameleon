@@ -27,6 +27,14 @@ struct parasite_ctl;
 namespace chameleon {
 namespace parasite {
 
+#ifndef NDEBUG
+/**
+ * Initialize compel logging machinery.
+ * @param verbose if true, print everything, else print errors
+ */
+void initializeLog(bool verbose);
+#endif
+
 /**
  * Initialize the parasite context for controlling the child.  Note that the
  * child must have previously been stopped.

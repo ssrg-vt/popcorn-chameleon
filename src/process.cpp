@@ -19,8 +19,8 @@ using namespace chameleon;
  * Note: compel's API is a little obtuse -- compel_prepare() allocates a
  * context and compel_infect() controls the child, whereas compel_cure() both
  * cures and frees the context.  Process is currently designed to always have a
- * context ready to go, so every parasite::cure() should be accompanied by a
- * parasite::initialize().
+ * context ready to go, so use Process::cure() to both cleanup & initialize the
+ * next parasite.
  */
 
 /**
@@ -80,7 +80,7 @@ ret_t Process::forkAndExec() {
   status = Running;
   nthreads = 1;
 
-  DEBUGMSG("successfully forked child " << pid << std::endl);
+  DEBUGMSG("forked child " << pid << std::endl);
 
   // Attach via seizing (which lets us interrupt the child later) and release
   // the child; we can't configure the child until it reaches a trace-stop.
@@ -172,6 +172,15 @@ ret_t Process::waitInternal(bool reinject) {
   return retval;
 }
 
+ret_t Process::cureAndInitParasite() {
+  ret_t code;
+  if(parasite) {
+    if((code = parasite::cure(&parasite)) != ret_t::Success) return code;
+    if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  }
+  return ret_t::Success;
+}
+
 ret_t Process::wait() { return waitInternal(true); }
 
 ret_t Process::interrupt() {
@@ -228,17 +237,31 @@ ret_t Process::singleStep() {
 }
 
 ret_t Process::attach() {
+  ret_t code;
+
+  // Note: traceProcessControl() *must* be called after attaching; these
+  // options are clobbered otherwise!
   if(!trace::attach(pid, true)) return ret_t::PtraceFailed;
+  if((code = interrupt()) != ret_t::Success) return code;
+  if(!trace::traceProcessControl(pid)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
 ret_t Process::attachHandoff() {
   ret_t code;
   if(sem_wait(&handoff)) return ret_t::HandoffFailed;
+
+  // Child is daemonized and sleeping waiting for commands.  Cure the parasite
+  // to return it to a trace-stop before initializing.
   if(!trace::attach(pid, true)) return ret_t::PtraceFailed;
-  if((code = parasite::cure(&parasite)) != ret_t::Success) return code;
+  if((code = cureAndInitParasite()) != ret_t::Success) return code;
   status = Stopped;
-  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+
+  // Note: traceProcessControl() *must* be called after attaching from the
+  // handoff; these options are clobbered if set before the handing-off thread
+  // detaches!
+  if(!trace::traceProcessControl(pid)) return ret_t::PtraceFailed;
+
   return ret_t::Success;
 }
 
@@ -281,10 +304,7 @@ ret_t Process::detachHandoff() {
 
   return ret_t::Success;
 err:
-  if(parasite::cure(&parasite) == ret_t::Success) {
-    status = Stopped;
-    parasite = parasite::initialize(pid);
-  }
+  if(cureAndInitParasite() == ret_t::Success) status = Stopped;
   return code;
 }
 
@@ -350,6 +370,14 @@ ret_t Process::write(uintptr_t addr, uint64_t data) const {
   return ret_t::Success;
 }
 
+ret_t Process::getSyscallNumber(long &data) const {
+  struct user_regs_struct regs;
+  if(status != Stopped) return ret_t::InvalidState;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  data = arch::syscallNumber(regs);
+  return ret_t::Success;
+}
+
 void Process::dumpRegs() const {
   struct user_regs_struct regs;
   struct user_fpregs_struct fpregs;
@@ -366,8 +394,7 @@ ret_t Process::stealUserfaultfd() {
   if(retcode != ret_t::Success) return retcode;
   if((uffd = parasite::stealUFFD(parasite)) == -1)
     return ret_t::CompelActionFailed;
-  if((retcode = parasite::cure(&parasite)) != ret_t::Success) return retcode;
-  if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
+  if((retcode = cureAndInitParasite()) != ret_t::Success) return retcode;
   return ret_t::Success;
 }
 

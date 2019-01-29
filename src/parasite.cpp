@@ -6,11 +6,26 @@ extern "C" {
 #include <compel/compel.h>
 }
 
+#ifndef NDEBUG
+#include <cstdio>
+#endif
+
 #pragma GCC diagnostic ignored "-Wnarrowing"
 #include "chameleon-parasite.h"
 #include "parasite.h"
 
 using namespace chameleon;
+
+#ifndef NDEBUG
+static void compelPrint(unsigned int lvl, const char *fmt, va_list parms) {
+  printf("[ compel ] DEBUG: LC%u: ", lvl);
+  vprintf(fmt, parms);
+}
+
+void parasite::initializeLog(bool verbose) {
+  compel_log_init(compelPrint, verbose ? COMPEL_LOG_DEBUG : COMPEL_LOG_ERROR);
+}
+#endif
 
 struct parasite_ctl *parasite::initialize(int pid) {
   struct parasite_ctl *ctx = nullptr;

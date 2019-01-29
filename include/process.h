@@ -83,7 +83,8 @@ public:
   ret_t forkAndExec();
 
   /**
-   * Initialize the Process object for a newly-forked child process.
+   * Initialize the Process object for a newly-forked child process.  The child
+   * should be trace-stopped at the fork event.
    * @return a return code describing the outcome
    */
   ret_t initForkedChild();
@@ -277,6 +278,16 @@ public:
   ret_t write(uintptr_t addr, uint64_t data) const;
 
   /**
+   * Get the system call number.  Caller must ensure Process trace-stopped.  If
+   * not stopped at syscall-enter-stop (i.e., entering the kernel for the
+   * system call), returns garbage data.
+   *
+   * @param data output argument set to the system call number
+   * @param a return code describing the outcome
+   */
+  ret_t getSyscallNumber(long &data) const;
+
+  /**
    * Dump register contents to an output stream.
    */
   void dumpRegs() const;
@@ -322,6 +333,16 @@ private:
    * @return a return code describing the outcome
    */
   ret_t waitInternal(bool reinject);
+
+  /**
+   * Cure the compel parasite and initialize another for the next compel
+   * action.  compel splits parasite setup into initialization & infection, but
+   * couples curing & free.  In order to always have a parasite ready to go,
+   * whenever we cure go ahead and initialize the parasite again.
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t cureAndInitParasite();
 };
 
 }

@@ -84,6 +84,9 @@ uintptr_t arch::pc(const struct user_regs_struct &regs) { return regs.rip; }
 void arch::pc(struct user_regs_struct &regs, uintptr_t newPC)
 { regs.rip = newPC; }
 
+long arch::syscallNumber(const struct user_regs_struct &regs)
+{ return regs.orig_rax; }
+
 void arch::marshalFuncCall(struct user_regs_struct &regs,
                            long a1, long a2, long a3,
                            long a4, long a5, long a6) {

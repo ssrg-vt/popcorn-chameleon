@@ -93,9 +93,9 @@ static void *handleFaultsAsync(void *arg) {
     ERROR("could not initialize cleanup signal handler" << std::endl);
   CT->setFaultHandlerPid(me);
 
-  DEBUGMSG("thread " << me << " is handling faults for " << CT->getProcessPid()
-           << ": reading from uffd=" << uffd << ", batching " << nfaults
-           << " fault(s)" << std::endl);
+  DEBUGMSG("chameleon thread " << me << " is handling faults for "
+           << CT->getProcessPid() << ": reading from uffd=" << uffd
+           << ", batching " << nfaults << " fault(s)" << std::endl);
 
   while(!CT->shouldFaultHandlerExit()) {
     bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);

@@ -29,22 +29,36 @@
 
 #ifndef NDEBUG
 /* I can't ever remember how to use NDEBUG, define an easier-to-use macro */
-#define DEBUG_BUILD 1
+# define DEBUG_BUILD 1
 
 /* Debug printing */
+extern pthread_mutex_t logLock;
+
 # define DEBUGMSG( ... ) \
   do { \
+    pthread_mutex_lock(&logLock); \
     std::cerr << "[ " << std::right << std::setw(20) << __FILENAME__ << ":" \
               << std::left << std::setw(3) << __LINE__ << " ] DEBUG: " \
               << __VA_ARGS__ << std::dec; \
+    pthread_mutex_unlock(&logLock); \
   } while(0);
+
 # define DEBUGMSG_RAW( ... ) \
-  do { std::cerr << __VA_ARGS__ << std::dec; } while(0);
+  do { \
+    pthread_mutex_lock(&logLock); \
+    std::cerr << __VA_ARGS__ << std::dec; \
+    pthread_mutex_unlock(&logLock); \
+  } while(0);
+
 # define DEBUGMSG_INSTR( msg, instr ) \
   do { \
-    DEBUGMSG(msg); \
+    pthread_mutex_lock(&logLock); \
+    std::cerr << "[ " << std::right << std::setw(20) << __FILENAME__ << ":" \
+              << std::left << std::setw(3) << __LINE__ << " ] DEBUG: " \
+              << msg << std::dec; \
     instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR); \
-    DEBUGMSG_RAW(std::endl); \
+    std::cerr << std::endl; \
+    pthread_mutex_unlock(&logLock); \
   } while(0);
 
 /* Functionality to be executed only in debug builds */
