@@ -316,13 +316,13 @@ static void *forkedChildLoop(void *proc) {
     return (void *)code;
   }
 
-  INFO("Beginning forked child " << cpid << endl);
+  INFO(cpid << ": beginning forked child" << endl);
 
   do {
     status = handleEvent(*child);
   } while(status != Process::Exited && status != Process::SignalExit);
 
-  INFO("Cleaning up forked child " << cpid << endl);
+  INFO(cpid << ": cleaning up forked child" << endl);
   if(transformer.cleanup() != ret_t::Success)
     WARN(cpid << ": problem cleaning up code transformer" << endl);
   cleanupChild(child);
@@ -377,15 +377,15 @@ int main(int argc, char **argv) {
     ERROR("could not set up state transformer: " << retText(code) << endl);
 
   t.end();
-  INFO("Application startup time: " << t.elapsed(Timer::Micro) << " us"
-       << endl);
-  INFO("Beginning main child " << child.getPid() << endl);
+  INFO(child.getPid() << ": application startup: " << t.elapsed(Timer::Micro)
+       << " us" << endl);
+  INFO(child.getPid() << ": beginning main child" << endl);
 
   do {
     status = handleEvent(child);
   } while(status != Process::Exited && status != Process::SignalExit);
 
-  INFO("Cleaning up child " << child.getPid() << endl);
+  INFO(child.getPid() << ": cleaning up main child " << endl);
   code = transformer.cleanup();
   if(code != ret_t::Success)
     ERROR("could not clean up clean up transformer" << retText(code) << endl);

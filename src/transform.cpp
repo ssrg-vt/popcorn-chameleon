@@ -80,7 +80,7 @@ static void *handleFaultsAsync(void *arg) {
   int uffd = CT->getUserfaultfd();
   size_t nfaults = CT->getNumFaultsBatched(), toHandle, i, handled = 0;
   ssize_t bytesRead;
-  pid_t me = syscall(SYS_gettid);
+  pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
   Timer t;
   std::vector<char> pageBuf(PAGESZ);
@@ -94,7 +94,7 @@ static void *handleFaultsAsync(void *arg) {
   CT->setFaultHandlerPid(me);
 
   DEBUGMSG("chameleon thread " << me << " is handling faults for "
-           << CT->getProcessPid() << ": reading from uffd=" << uffd
+           << cpid << ": reading from uffd=" << uffd
            << ", batching " << nfaults << " fault(s)" << std::endl);
 
   while(!CT->shouldFaultHandlerExit()) {
@@ -122,8 +122,9 @@ static void *handleFaultsAsync(void *arg) {
   delete [] msg;
 
   DEBUGMSG("fault handler " << me << " exiting" << std::endl);
-  INFO("Total fault handling time: " << t.totalElapsed(Timer::Micro)
-       << " us for " << handled << " fault(s)" << std::endl);
+  INFO(cpid << ": fault handling: "
+       << t.totalElapsed(Timer::Micro) << " us for " << handled << " fault(s)"
+       << std::endl);
 
   return nullptr;
 }
@@ -217,7 +218,7 @@ ret_t CodeTransformer::dropCode() {
   if(code != ret_t::Success) return code;
 
   t.end();
-  INFO(proc.getPid() << ": Dropping code pages: " << t.elapsed(Timer::Micro)
+  INFO(proc.getPid() << ": dropping code pages: " << t.elapsed(Timer::Micro)
        << " us" << std::endl);
 
   return ret_t::Success;
@@ -257,9 +258,9 @@ int32_t CodeTransformer::slotOffsetFromRegister(uint32_t frameSize,
 ret_t CodeTransformer::writePage(uintptr_t start) {
   uint64_t *pageData;
   std::vector<char> pageBuf;
-  struct parasite_ctl *parasite = proc.getParasiteCtl();
   ret_t code;
 #ifdef DEBUG_BUILD
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
   uintptr_t origStart = PAGE_DOWN(start);
 #endif
 
@@ -327,7 +328,7 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   if(code != ret_t::Success) return code;
 
   t.end();
-  INFO(proc.getPid() << ": Code re-mapping: " << t.elapsed(Timer::Micro)
+  INFO(proc.getPid() << ": code re-mapping: " << t.elapsed(Timer::Micro)
        << " us" << std::endl);
 
   return ret_t::Success;
@@ -397,8 +398,8 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
   codeWindow.insert(r);
 
   t.end();
-  INFO("Code buffer setup time: " << t.elapsed(Timer::Micro) << " us"
-       << std::endl);
+  INFO(proc.getPid() << ": code buffer setup: " << t.elapsed(Timer::Micro)
+       << " us" << std::endl);
 
   return ret_t::Success;
 }

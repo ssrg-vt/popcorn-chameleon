@@ -53,12 +53,15 @@ public:
    * Construct a process object from an existing task.  Should be called when
    * another traced child calls fork() and the new child is trace-stopped.
    *
+   * Note: the child isn't yet in a usable state; users should call
+   * initForkedChild() to finish initialization.
+   *
    * @param pid the pid of the new task
    * @param argc (optional) number of arguments
    * @param argv (optional) arguments for child process to be executed
    */
   Process(pid_t pid, int argc = 0, char **argv = nullptr)
-    : argc(argc), argv(argv), pid(pid), newTaskPid(-1), status(Stopped),
+    : argc(argc), argv(argv), pid(pid), newTaskPid(-1), status(Running),
       exit(0), stopReason(stop_t::Other), reinjectSignal(false), uffd(-1),
       nthreads(0), parasite(nullptr) {}
   Process() = delete;

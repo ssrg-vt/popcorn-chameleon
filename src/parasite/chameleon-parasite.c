@@ -36,7 +36,7 @@ static int createAndSendUFFD(void) {
   }
   DEBUG("initialized uffd %d\n", uffd);
   ret = fds_send_fd(uffd);
-  if(ret == 0) DEBUG("sent uffd to chameleon\n");
+  if(ret == 0) { DEBUG("sent uffd to chameleon\n"); }
   else DEBUG("could not send uffd to chameleon\n");
   sys_close(uffd);
   return ret;

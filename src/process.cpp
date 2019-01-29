@@ -97,17 +97,20 @@ ret_t Process::forkAndExec() {
     return ret_t::TraceSetupFailed;
 
   // Finally, get to the other side of the execve
-  if(resume(trace::Continue) != ret_t::Success ||
-     waitInternal(false) != ret_t::Success)
+  if(resume(trace::Continue) != ret_t::Success)
     return ret_t::TraceSetupFailed;
 
-  DEBUGMSG("successfully stopped child " << pid << " after execve()"
-           << std::endl);
+  DEBUGMSG("stopped child " << pid << " after execve()" << std::endl);
 
   return initForkedChild();
 }
 
 ret_t Process::initForkedChild() {
+  ret_t code;
+
+  // Wait for the child to reach a trace-stop
+  if((code = waitInternal(false)) != ret_t::Success) return code;
+
   if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
   if(sem_init(&handoff, 0, 0)) return ret_t::TraceSetupFailed;
 
