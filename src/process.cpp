@@ -100,8 +100,6 @@ ret_t Process::forkAndExec() {
   if(resume(trace::Continue) != ret_t::Success)
     return ret_t::TraceSetupFailed;
 
-  DEBUGMSG("stopped child " << pid << " after execve()" << std::endl);
-
   return initForkedChild();
 }
 

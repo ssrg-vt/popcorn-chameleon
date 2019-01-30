@@ -64,7 +64,13 @@ namespace chameleon {
   X(LockFailed, "locking/unlocking mutex failed") \
   X(FutexFailed, "futex operation failed") \
   X(NotImplemented, "not implemented") \
-  X(NoTimestamp, "could not get timestamp")
+  X(NoTimestamp, "could not get timestamp") \
+  X(InvalidAlarm, "invalid alarm configuration") \
+  X(AlarmInitFailed, "alarm initialization failed") \
+  X(AlarmStartFailed, "could not start alarm") \
+  X(AlarmStopFailed, "could not stop alarm") \
+  X(AlarmHandlerStartFailed, "could not start alarm handler") \
+  X(AlarmHandlerWaitFailed, "alarm handler could not wait for alarm") \
 
 enum ret_t {
   Success = 0,

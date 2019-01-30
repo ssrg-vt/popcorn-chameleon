@@ -18,8 +18,9 @@ using namespace chameleon;
  * @return true if successfully initialized or false otherwise
  */
 static inline bool setSignalHandler() {
-  auto sigHandler = [](int signal) {};
+  auto sigHandler = [](int signal){};
   struct sigaction handler;
+  memset(&handler, 0, sizeof(struct sigaction));
   handler.sa_handler = sigHandler;
   if(sigaction(SIGINT, &handler, nullptr) == -1) return false;
   return true;
@@ -184,7 +185,7 @@ ret_t CodeTransformer::cleanup() {
   if(faultHandlerPid > 0) {
     // Interrupt the fault handling thread if the thread was already blocking
     // on a read before closing the userfaultfd file descriptor
-    syscall(SYS_tgkill, masterPID, faultHandlerPid, SIGINT);
+    pthread_kill(faultHandler, SIGINT);
     pthread_join(faultHandler, nullptr);
   }
   return ret_t::Success;

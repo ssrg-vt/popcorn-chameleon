@@ -130,6 +130,7 @@ add_custom_target (parasite_lib
 
 # Create the Chameleon executable
 add_executable (chameleon
+  alarm.cpp
   arch.cpp
   binary.cpp
   chameleon.cpp
@@ -157,6 +158,7 @@ target_compile_options (chameleon PRIVATE
   "-Wall"
   "-Werror")
 target_link_libraries (chameleon
+  -lrt
   ${ELF}
   ${ZLIB_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}

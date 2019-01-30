@@ -4,6 +4,7 @@
 #include <cstring>
 #include <unistd.h>
 
+#include "alarm.h"
 #include "config.h"
 #include "log.h"
 #include "process.h"
@@ -21,6 +22,7 @@ pid_t masterPID;
 static int childArgc;
 static char **childArgv;
 static bool randomize = true;
+static uint64_t randomizePeriod = 0; /* in milliseconds */
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static const char *traceFilename = nullptr;
@@ -65,6 +67,7 @@ static void printHelp(const char *bin) {
                  "specify a binary and any arguments" << endl << endl
        << "Options:" << endl
        << "  -h      : print help and exit" << endl
+       << "  -p MS   : re-randomization period in milliseconds" << endl
        << "  -n      : don't randomize the code section" << endl
 #ifdef DEBUG_BUILD
        << "  -t FILE : trace execution by dumping PC values to FILE (warning: slow!)" << endl
@@ -81,6 +84,7 @@ static void printChameleonInfo() {
 static void parseArgs(int argc, char **argv) {
   int c, i;
   bool foundDelim = false;
+  char *end;
 
   // Find the double-dash delimiter & update arguments accordingly.  Note that
   // if we don't find the delimiter we don't exit immediately; the user could
@@ -98,10 +102,15 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hnt:dv")) != -1) {
+  while((c = getopt(argc, argv, "hp:nt:dv")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
+    case 'p':
+      randomizePeriod = strtoul(optarg, &end, 10);
+      if(end == optarg)
+        ERROR("invalid randomization period '" << optarg << "'" << endl);
+      break;
     case 'n': randomize = false; break;
 #ifdef DEBUG_BUILD
     case 't': traceFilename = optarg; break;
@@ -122,6 +131,10 @@ static void parseArgs(int argc, char **argv) {
       DEBUGMSG_RAW(" " << childArgv[i]);
     DEBUGMSG_RAW(endl);
   )
+}
+
+static void alarmFunction(void *data) {
+  DEBUGMSG("alarm rang" << endl);
 }
 
 static ret_t addChild(pid_t pid) {
@@ -334,6 +347,7 @@ int main(int argc, char **argv) {
   int remaining;
   ret_t code;
   Process::status_t status;
+  Alarm alarm;
   Timer t;
 
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
@@ -352,6 +366,18 @@ int main(int argc, char **argv) {
   DEBUG(printChameleonInfo())
   INFO("Starting '" << childArgv[0] << "'" << endl);
   t.start();
+
+  // Initialize the alarm (if requested).  Note that initAlarmSignaling()
+  // *must* be called before spawning other threads, as it initializes the
+  // signal mask to avoid delivering alarms to incorrect threads.
+  if(randomizePeriod) {
+    code = Alarm::initAlarmSignaling();
+    if(code != ret_t::Success)
+      ERROR("could not initialize alarm signaling: " << retText(code) << endl);
+    code = alarm.initialize(randomizePeriod, alarmFunction, nullptr);
+    if(code != ret_t::Success)
+      ERROR("could not initialize alarm: " << retText(code) << endl);
+  }
 
   // Initialize libelf/disassembler, load the binary (including all metadata)
   code = Binary::initLibELF();
@@ -381,6 +407,12 @@ int main(int argc, char **argv) {
        << " us" << endl);
   INFO(child.getPid() << ": beginning main child" << endl);
 
+  if(randomizePeriod) {
+    code = alarm.start();
+    if(code != ret_t::Success)
+      ERROR("could not start alarm: " << retText(code) << endl);
+  }
+
   do {
     status = handleEvent(child);
   } while(status != Process::Exited && status != Process::SignalExit);
@@ -397,6 +429,12 @@ int main(int argc, char **argv) {
     if(syncWait(&numChildren, remaining))
       ERROR("could not wait for children to exit: " << strerror(errno) << endl);
     joinHandlers();
+  }
+
+  if(randomizePeriod) {
+    code = alarm.stop();
+    if(code != ret_t::Success)
+      ERROR("could not stop alarm: " << retText(code) << endl);
   }
 
   return 0;
