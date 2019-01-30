@@ -1,5 +1,5 @@
 diff --git a/compel/src/lib/infect.c b/compel/src/lib/infect.c
-index abf3a0ab..88e51b15 100644
+index abf3a0ab..c7e9310a 100644
 --- a/compel/src/lib/infect.c
 +++ b/compel/src/lib/infect.c
 @@ -345,13 +345,13 @@ int compel_resume_task(pid_t pid, int orig_st, int st)
@@ -44,3 +44,12 @@ index abf3a0ab..88e51b15 100644
  	ctl->tsock = sock;
  	return 0;
  }
+@@ -998,7 +999,7 @@ err:
+  */
+ static unsigned long find_executable_area(int pid)
+ {
+-	char aux[128];
++	char aux[256];
+ 	FILE *f;
+ 	unsigned long ret = (unsigned long)MAP_FAILED;
+ 
