@@ -28,6 +28,7 @@ pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static const char *traceFilename = nullptr;
 static ofstream traceFile;
 bool verboseDebug = false;
+static size_t alarmsRung = 0;
 #endif
 
 // Some helpful typedefs to safely wrap pointers & make ADTs bearable
@@ -47,6 +48,7 @@ static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
                        joinLock = PTHREAD_MUTEX_INITIALIZER;
 
 // Declare event & child handling APIs to satisfy compiler
+static void alarmCallback(void *data);
 static ret_t addChild(pid_t pid);
 static ret_t cleanupChild(const Process *proc);
 static Process::status_t handleEvent(Process &child);
@@ -79,6 +81,7 @@ static void printHelp(const char *bin) {
 static void printChameleonInfo() {
   INFO("Popcorn Chameleon, version " << VERSION_MAJOR << "."
        << VERSION_MINOR << endl);
+  // TODO print setup
 }
 
 static void parseArgs(int argc, char **argv) {
@@ -133,8 +136,71 @@ static void parseArgs(int argc, char **argv) {
   )
 }
 
-static void alarmFunction(void *data) {
-  DEBUGMSG("alarm rang" << endl);
+static void alarmCallback(void *data) {
+  list<ChildHandler>::iterator it;
+
+  // TODO 1: currently assume that adding/cleaning up children is a rare event
+  // and if somebody is calling either addChild() or cleanupChild(), just skip
+  // this alarm
+  // TODO 2: proper error propagation instead of ERROR when any of the below
+  // actions fail
+  int ret = pthread_mutex_trylock(&childLock);
+  if(ret) {
+    if(ret == EBUSY) return; // Somebody else has the lock
+    else ERROR("could not try to acquire child lock" << endl);
+  }
+
+  // Kick off an action; send a signal to handler threads that are blocked in
+  // waitpid(), which will perform some action on the child inside
+  // handleEvent().  Handlers currently performing other work will skip this
+  // alarm.  There's no race condition between the signaled thread finishing
+  // this alarm's action and the next alarm signal, as signals received when
+  // not blocking in waitpid() are a no-op.
+  if(kill(masterPID, SIGINT))
+    ERROR("could not interrupt handler for main process" << endl);
+  for(it = children.begin(); it != children.end(); it++)
+    if(pthread_kill(it->second, SIGINT))
+      ERROR("could not interrupt handler for child process "
+            << it->first.getPid() << endl);
+
+  alarmsRung++;
+  if(pthread_mutex_unlock(&childLock)) ERROR("could not unlock mutex" << endl);
+}
+
+static ret_t setupSignalsAndAlarm(Alarm &alarm) {
+  struct sigaction handler;
+  auto intHandler = [](int signal){};
+  ret_t code;
+
+  // Note: all threads in the process will share the signal dispositions set up
+  // here.  Additionally, spawned threads will inherit the signal masks set up
+  // here (threads may change masks as needed).
+
+  // Register an empty handler for SIGINT, chameleon's preferred method for
+  // poking other threads.  Always required as SIGINT is used to wake up page
+  // fault handling threads from blocking reads.
+  memset(&handler, 0, sizeof(struct sigaction));
+  handler.sa_handler = intHandler;
+  if(sigaction(SIGINT, &handler, nullptr) == -1) {
+    DEBUGMSG("could not initialize handler: " << strerror(errno) << endl);
+    return ret_t::ChameleonSignalFailed;
+  }
+
+  // Note: initAlarmSignaling() *must* be called before spawning other threads
+  // to avoid delivering alarms to incorrect threads.
+  if(randomizePeriod) {
+    code = Alarm::initAlarmSignaling();
+    if(code != ret_t::Success) {
+      DEBUGMSG("could not initialize alarm signaling" << endl);
+      return code;
+    }
+
+    code = alarm.initialize(randomizePeriod, alarmCallback, nullptr);
+    if(code != ret_t::Success)
+      ERROR("could not initialize alarm: " << retText(code) << endl);
+  }
+
+  return ret_t::Success;
 }
 
 static ret_t addChild(pid_t pid) {
@@ -297,6 +363,9 @@ static Process::status_t handleEvent(Process &child) {
     // TODO dump the instruction at which the child exited
     INFO(pid << ": terminated with signal " << child.getSignal() << endl);
     return Process::SignalExit;
+  case Process::Interrupted:
+    DEBUGMSG("interrupted child " << child.getPid() << endl);
+    return Process::Stopped;
   }
 }
 
@@ -350,9 +419,14 @@ int main(int argc, char **argv) {
   Alarm alarm;
   Timer t;
 
+  t.start();
+
+  DEBUGMSG("initializing chameleon" << endl);
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
   parseArgs(argc, argv);
+  if((code = setupSignalsAndAlarm(alarm)) != ret_t::Success)
+    ERROR("could not initialize chameleon signaling: " << retText(code) << endl);
 #ifdef DEBUG_BUILD
   if(traceFilename) {
     DEBUGMSG("tracing output to '" << traceFilename << "'" << endl);
@@ -362,22 +436,13 @@ int main(int argc, char **argv) {
             << strerror(errno) << endl);
   }
 #endif
-
   DEBUG(printChameleonInfo())
+
+  t.end();
+  INFO("chameleon setup : " << t.elapsed(Timer::Micro) << " us" << endl);
+
   INFO("Starting '" << childArgv[0] << "'" << endl);
   t.start();
-
-  // Initialize the alarm (if requested).  Note that initAlarmSignaling()
-  // *must* be called before spawning other threads, as it initializes the
-  // signal mask to avoid delivering alarms to incorrect threads.
-  if(randomizePeriod) {
-    code = Alarm::initAlarmSignaling();
-    if(code != ret_t::Success)
-      ERROR("could not initialize alarm signaling: " << retText(code) << endl);
-    code = alarm.initialize(randomizePeriod, alarmFunction, nullptr);
-    if(code != ret_t::Success)
-      ERROR("could not initialize alarm: " << retText(code) << endl);
-  }
 
   // Initialize libelf/disassembler, load the binary (including all metadata)
   code = Binary::initLibELF();
@@ -435,6 +500,7 @@ int main(int argc, char **argv) {
     code = alarm.stop();
     if(code != ret_t::Success)
       ERROR("could not stop alarm: " << retText(code) << endl);
+    DEBUGMSG("rang " << alarmsRung << " alarms" << endl);
   }
 
   return 0;

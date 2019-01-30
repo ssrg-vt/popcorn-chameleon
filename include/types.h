@@ -32,15 +32,15 @@ namespace chameleon {
   X(PtraceFailed, "ptrace() returned an error") \
   X(InterruptFailed, "could not interrupt task") \
   X(SignalFailed, "could not send signal to process") \
+  X(HandoffFailed, "handing off tracing to another thread failed") \
+  X(Exists, "process already exists") \
+  X(DoesNotExist, "process exited or terminated") \
+  X(InvalidState, "operation not allowed in current process state") \
   X(CompelInitFailed, "compel initialization failed") \
   X(CompelSyscallFailed, "compel child system call failed") \
   X(CompelInfectFailed, "compel infect failed") \
   X(CompelActionFailed, "compel action in child failed") \
-  X(CompelCureFailed, "compel cure failed") \
-  X(HandoffFailed, "handing off tracing to another thread failed") \
-  X(Exists, "process already exists") \
-  X(DoesNotExist, "process exited or terminated") \
-  X(InvalidState, "operation not allowed in current process state")
+  X(CompelCureFailed, "compel cure failed")
 
 /* State transformation error codes */
 #define TRANSFORM_RETCODES \
@@ -71,6 +71,7 @@ namespace chameleon {
   X(AlarmStopFailed, "could not stop alarm") \
   X(AlarmHandlerStartFailed, "could not start alarm handler") \
   X(AlarmHandlerWaitFailed, "alarm handler could not wait for alarm") \
+  X(ChameleonSignalFailed, "inter-thread signaling failed")
 
 enum ret_t {
   Success = 0,

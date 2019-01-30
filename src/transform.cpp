@@ -13,20 +13,6 @@ using namespace chameleon;
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
- * Set up signal handler for SIGINT.  Required because the calls to read() in
- * handleFaultsAsync are blocking.
- * @return true if successfully initialized or false otherwise
- */
-static inline bool setSignalHandler() {
-  auto sigHandler = [](int signal){};
-  struct sigaction handler;
-  memset(&handler, 0, sizeof(struct sigaction));
-  handler.sa_handler = sigHandler;
-  if(sigaction(SIGINT, &handler, nullptr) == -1) return false;
-  return true;
-}
-
-/**
  * Handle a fault, including mapping in the correct data and randomizing any
  * code pieces.
  *
@@ -89,9 +75,6 @@ static void *handleFaultsAsync(void *arg) {
   assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
   assert(msg && "Page fault message buffer allocation failed");
-
-  if(!setSignalHandler())
-    ERROR("could not initialize cleanup signal handler" << std::endl);
   CT->setFaultHandlerPid(me);
 
   DEBUGMSG("chameleon thread " << me << " is handling faults for "

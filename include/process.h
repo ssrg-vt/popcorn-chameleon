@@ -26,12 +26,13 @@ namespace chameleon {
 class Process {
 public:
   enum status_t {
-    Ready = 0,  /* child is ready to be run */
-    Running,    /* child is running */
-    Exited,     /* child exited */
-    SignalExit, /* child terminated due to signal */
-    Stopped,    /* child is stopped */
-    Unknown     /* child has some other status */
+    Ready = 0,   /* child is ready to be run */
+    Running,     /* child is running */
+    Exited,      /* child exited */
+    SignalExit,  /* child terminated due to signal */
+    Stopped,     /* child is stopped */
+    Interrupted, /* child was interrupted by chameleon */
+    Unknown      /* child has some other status */
   };
 
   /**

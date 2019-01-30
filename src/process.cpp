@@ -29,8 +29,7 @@ using namespace chameleon;
  * @param argv the arguments to pass to the new application
  * @param socket a UNIX domain socket connected to the parent
  */
-[[noreturn]] static void
-execChild(char **argv, int socket) {
+[[noreturn]] static void execChild(char **argv, int socket) {
   bool err = false;
   pid_t me;
 
@@ -138,9 +137,22 @@ ret_t Process::waitInternal(bool reinject) {
 
   // Wait for the child and update the status based on returned values
   if(waitpid(pid, &wstatus, 0) == -1) {
-    status = Unknown;
-    retval = ret_t::WaitFailed;
-    DEBUGMSG("waiting for child returned an error" << std::endl);
+    if(errno == EINTR) {
+      // Somebody interrupted us so that we can perform some action on the
+      // child; interrupt the child as well.
+      if((retval = interrupt()) != ret_t::Success) {
+        DEBUGMSG(pid << "'s handler was interrupted, but the handler could "
+                 "not interrupt the child" << std::endl);
+        status = Unknown;
+        return retval;
+      }
+      status = Interrupted;
+    }
+    else {
+      status = Unknown;
+      retval = ret_t::WaitFailed;
+      DEBUGMSG("waiting for child returned an error" << std::endl);
+    }
   }
   else {
     if(WIFEXITED(wstatus)) {
