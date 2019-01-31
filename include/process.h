@@ -326,6 +326,13 @@ private:
   sem_t handoff; /* coordinate handing off tracing */
 
   /**
+   * Return whether the process is in a traceable state, i.e., it is at a
+   * trace-stop and ptrace calls will succeed.
+   * @return true if the process is in a traceable state or false otherwise
+   */
+  bool traceable() const { return status == Stopped || status == Interrupted; }
+
+  /**
    * Internal wait implementation used to save relevant information depending
    * on whether we need to forward a signal to the child.  If we're waiting for
    * a signal to be delivered that we sent (either directly or indirectly) then

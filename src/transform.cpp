@@ -77,9 +77,9 @@ static void *handleFaultsAsync(void *arg) {
   assert(msg && "Page fault message buffer allocation failed");
   CT->setFaultHandlerPid(me);
 
-  DEBUGMSG("chameleon thread " << me << " is handling faults for "
-           << cpid << ": reading from uffd=" << uffd
-           << ", batching " << nfaults << " fault(s)" << std::endl);
+  DEBUGMSG("chameleon thread " << me << " is handling faults for " << cpid
+           << ", reading from uffd=" << uffd << ", batching " << nfaults
+           << " fault(s)" << std::endl);
 
   while(!CT->shouldFaultHandlerExit()) {
     bytesRead = read(uffd, msg, sizeof(struct uffd_msg) * nfaults);

@@ -91,7 +91,7 @@ ret_t Process::forkAndExec() {
 
   // Wait until the child trace-stops and configure ptrace to allow chameleon
   // to observe task creation events
-  if(waitInternal(false) != ret_t::Success || status != Stopped ||
+  if(waitInternal(false) != ret_t::Success || !traceable() ||
      !trace::traceProcessControl(pid))
     return ret_t::TraceSetupFailed;
 
@@ -146,7 +146,6 @@ ret_t Process::waitInternal(bool reinject) {
         status = Unknown;
         return retval;
       }
-      status = Interrupted;
     }
     else {
       status = Unknown;
@@ -203,6 +202,7 @@ ret_t Process::interrupt() {
   if(!trace::interrupt(pid)) return ret_t::PtraceFailed;
   if((code = waitInternal(false)) != ret_t::Success) return code;
   if(status != Stopped) return ret_t::InterruptFailed;
+  status = Interrupted;
   return ret_t::Success;
 }
 
@@ -334,7 +334,7 @@ int Process::getExitCode() const {
 }
 
 int Process::getSignal() const {
-  if(status == SignalExit || status == Stopped) return signal;
+  if(status == SignalExit || traceable()) return signal;
   else return INT32_MAX;
 }
 
@@ -349,14 +349,14 @@ stop_t Process::getStopReason() const {
 
 uintptr_t Process::getPC() const {
   struct user_regs_struct regs;
-  if(status != Stopped) return 0;
+  if(!traceable()) return 0;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   return arch::pc(regs);
 }
 
 ret_t Process::setPC(uintptr_t newPC) const {
   struct user_regs_struct regs;
-  if(status != Stopped) return ret_t::InvalidState;
+  if(!traceable()) return ret_t::InvalidState;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::pc(regs, newPC);
   if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
@@ -366,7 +366,7 @@ ret_t Process::setPC(uintptr_t newPC) const {
 ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
                                long a4, long a5, long a6) const {
   struct user_regs_struct regs;
-  if(status != Stopped) return ret_t::InvalidState;
+  if(!traceable()) return ret_t::InvalidState;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   arch::marshalFuncCall(regs, a1, a2, a3, a4, a5, a6);
   if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
@@ -374,18 +374,20 @@ ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
 }
 
 ret_t Process::read(uintptr_t addr, uint64_t &data) const {
+  if(!traceable()) return ret_t::InvalidState;
   if(!trace::getMem(pid, addr, data)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
 ret_t Process::write(uintptr_t addr, uint64_t data) const {
+  if(!traceable()) return ret_t::InvalidState;
   if(!trace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
   return ret_t::Success;
 }
 
 ret_t Process::getSyscallNumber(long &data) const {
   struct user_regs_struct regs;
-  if(status != Stopped) return ret_t::InvalidState;
+  if(!traceable()) return ret_t::InvalidState;
   if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
   data = arch::syscallNumber(regs);
   return ret_t::Success;
@@ -394,12 +396,18 @@ ret_t Process::getSyscallNumber(long &data) const {
 void Process::dumpRegs() const {
   struct user_regs_struct regs;
   struct user_fpregs_struct fpregs;
+  if(!traceable()) {
+    WARN("cannot dump registers - invalid state" << std::endl);
+    return;
+  }
   if(trace::getRegs(pid, regs)) arch::dumpRegs(regs);
   if(trace::getFPRegs(pid, fpregs)) arch::dumpFPRegs(fpregs);
 }
 
 ret_t Process::stealUserfaultfd() {
   ret_t retcode;
+
+  if(!traceable()) return ret_t::InvalidState;
 
   DEBUGMSG(pid << ": stealing userfault from child" << std::endl);
 

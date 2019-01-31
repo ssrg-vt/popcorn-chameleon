@@ -151,11 +151,11 @@ static void alarmCallback(void *data) {
   }
 
   // Kick off an action; send a signal to handler threads that are blocked in
-  // waitpid(), which will perform some action on the child inside
-  // handleEvent().  Handlers currently performing other work will skip this
-  // alarm.  There's no race condition between the signaled thread finishing
-  // this alarm's action and the next alarm signal, as signals received when
-  // not blocking in waitpid() are a no-op.
+  // waitpid(), which will perform an action on the child inside handleEvent().
+  // Handlers currently performing other work will skip this alarm.  There's no
+  // race condition between the signaled thread finishing this alarm's action
+  // and the next alarm signal, as signals received when not blocking in
+  // waitpid() are a no-op.
   if(kill(masterPID, SIGINT))
     ERROR("could not interrupt handler for main process" << endl);
   for(it = children.begin(); it != children.end(); it++)
@@ -364,7 +364,8 @@ static Process::status_t handleEvent(Process &child) {
     INFO(pid << ": terminated with signal " << child.getSignal() << endl);
     return Process::SignalExit;
   case Process::Interrupted:
-    DEBUGMSG("interrupted child " << child.getPid() << endl);
+    DEBUGMSG_VERBOSE("interrupted child " << child.getPid() << " at 0x" << hex
+                     << child.getPC() << endl);
     return Process::Stopped;
   }
 }

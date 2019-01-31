@@ -17,7 +17,8 @@ static void *alarmLoop(void *rawArgs) {
   // Allow the alarm object to cancel the thread at any point
   pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr);
 
-  // Block SIGINT, unblock SIGALRM & notify setup thread we're ready
+  // Block SIGINT (we'll use it to notify handlers), unblock SIGALRM & notify
+  // setup thread we're ready
   sigemptyset(&alarmSig);
   sigaddset(&alarmSig, SIGINT);
   if(sigprocmask(SIG_BLOCK, &alarmSig, nullptr))
