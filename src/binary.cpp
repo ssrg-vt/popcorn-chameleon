@@ -267,14 +267,10 @@ size_t Binary::getRemainingFileSize(uintptr_t addr) const {
   else return getRemainingFileSize(addr, tmp);
 }
 
-/**
- * Return whether the address is contained within a function.
- * @param func the function record
- * @param addr the virtual address
- * @return true if contained or false otherwise
- */
-static bool funcContains(const function_record *func, uintptr_t addr)
-{ return CONTAINS_ABOVE(addr, func->addr, func->code_size); }
+bool chameleon::funcContains(const function_record *func, uintptr_t addr) {
+  assert(func && addr && "Invalid arguments");
+  return CONTAINS_ABOVE(addr, func->addr, func->code_size);
+}
 
 /**
  * Return whether the address comes before the start of the function in the
@@ -285,6 +281,16 @@ static bool funcContains(const function_record *func, uintptr_t addr)
  */
 static bool lessThanFunc(const function_record *func, uintptr_t addr)
 { return addr < func->addr; }
+
+const function_record *Binary::getFunction(uintptr_t addr) const {
+  ssize_t idx;
+  const function_record *records = functions.getEntries();
+
+  idx = findRight<function_record, uintptr_t, funcContains, lessThanFunc>
+                 (records, functions.getNumEntries(), addr);
+  if(idx >= 0 && funcContains(&records[idx], addr)) return &records[idx];
+  else return nullptr;
+}
 
 Binary::func_iterator
 Binary::getFunctions(uintptr_t start, uintptr_t end) const {

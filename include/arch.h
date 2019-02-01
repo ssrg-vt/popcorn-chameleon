@@ -48,6 +48,15 @@ namespace arch {
  */
 bool supportedArch(uint16_t arch);
 
+/**
+ * Return instruction bytes that generate an interrupt.
+ * @param mask output argument set to a bitmask for zeroing out bytes for
+ *             interrupt instruction
+ * @param size output argument set to the size of the interrupt instruction
+ * @return instruction bytes that generate an interrupt
+ */
+uint64_t getInterruptInst(uint64_t &mask, size_t &size);
+
 ///////////////////////////////////////////////////////////////////////////////
 // Register information & handling
 ///////////////////////////////////////////////////////////////////////////////

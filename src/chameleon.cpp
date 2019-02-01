@@ -51,7 +51,7 @@ static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
 static void alarmCallback(void *data);
 static ret_t addChild(pid_t pid);
 static ret_t cleanupChild(const Process *proc);
-static Process::status_t handleEvent(Process &child);
+static Process::status_t handleEvent(CodeTransformer &CT);
 static void *forkedChildLoop(void *proc);
 
 static bool checkCompatibility() {
@@ -163,7 +163,7 @@ static void alarmCallback(void *data) {
       ERROR("could not interrupt handler for child process "
             << it->first.getPid() << endl);
 
-  alarmsRung++;
+  DEBUG(alarmsRung++);
   if(pthread_mutex_unlock(&childLock)) ERROR("could not unlock mutex" << endl);
 }
 
@@ -294,9 +294,11 @@ static ret_t joinHandlers() {
   return code;
 }
 
-static Process::status_t handleEvent(Process &child) {
+static Process::status_t handleEvent(CodeTransformer &CT) {
+  Process &child = CT.getProcess();
   pid_t pid = child.getPid();
   ret_t code;
+  uintptr_t pc;
 #ifdef DEBUG_BUILD
   long syscall;
 
@@ -364,8 +366,22 @@ static Process::status_t handleEvent(Process &child) {
     INFO(pid << ": terminated with signal " << child.getSignal() << endl);
     return Process::SignalExit;
   case Process::Interrupted:
+    pc = child.getPC();
+
     DEBUGMSG_VERBOSE("interrupted child " << child.getPid() << " at 0x" << hex
-                     << child.getPC() << endl);
+                     << pc << endl);
+
+    if(randomize) {
+      code = CT.rerandomize();
+      if(code != ret_t::Success) {
+        if(code == ret_t::NoMetadata) {
+           WARN(pid << ": skipping re-randomization, no metadata at 0x" << hex
+                << pc << endl);
+        }
+        else ERROR(pid << ": could not re-randomize child: " << retText(code)
+                   << std::endl);
+      }
+    }
     return Process::Stopped;
   }
 }
@@ -402,7 +418,7 @@ static void *forkedChildLoop(void *proc) {
   INFO(cpid << ": beginning forked child" << endl);
 
   do {
-    status = handleEvent(*child);
+    status = handleEvent(transformer);
   } while(status != Process::Exited && status != Process::SignalExit);
 
   INFO(cpid << ": cleaning up forked child" << endl);
@@ -440,7 +456,7 @@ int main(int argc, char **argv) {
   DEBUG(printChameleonInfo())
 
   t.end();
-  INFO("chameleon setup : " << t.elapsed(Timer::Micro) << " us" << endl);
+  INFO("chameleon setup: " << t.elapsed(Timer::Micro) << " us" << endl);
 
   INFO("Starting '" << childArgv[0] << "'" << endl);
   t.start();
@@ -480,7 +496,7 @@ int main(int argc, char **argv) {
   }
 
   do {
-    status = handleEvent(child);
+    status = handleEvent(transformer);
   } while(status != Process::Exited && status != Process::SignalExit);
 
   INFO(child.getPid() << ": cleaning up main child " << endl);

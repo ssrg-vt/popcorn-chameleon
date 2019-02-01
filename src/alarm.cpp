@@ -11,8 +11,10 @@ static void *alarmLoop(void *rawArgs) {
   int sig;
   sigset_t alarmSig;
   struct Alarm::handlerArgs *args = (struct Alarm::handlerArgs *)rawArgs;
-  pid_t me = syscall(SYS_gettid);
   ret_t code = ret_t::Success;
+#ifdef DEBUG_BUILD
+  pid_t me = syscall(SYS_gettid);
+#endif
 
   // Allow the alarm object to cancel the thread at any point
   pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr);

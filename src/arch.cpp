@@ -20,6 +20,12 @@ bool arch::supportedArch(uint16_t arch) {
   return arch == EM_X86_64;
 }
 
+uint64_t arch::getInterruptInst(uint64_t &mask, size_t &size) {
+  mask = 0xffffffffffffff00;
+  size = 1;
+  return 0xcc;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Register information & handling
 ///////////////////////////////////////////////////////////////////////////////

@@ -163,6 +163,8 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
 }
 
 ret_t CodeTransformer::cleanup() {
+  pid_t pid = proc.getPid();
+
   faultHandlerExit = true;
   proc.detach(); // detaching closes the userfaultfd file descriptor
   if(faultHandlerPid > 0) {
@@ -171,39 +173,66 @@ ret_t CodeTransformer::cleanup() {
     pthread_kill(faultHandler, SIGINT);
     pthread_join(faultHandler, nullptr);
   }
+
+  INFO(pid << ": re-randomize time: " << rerandomizeTime << " us for "
+       << numRandomizations << " randomizations" << std::endl);
+
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::dropCode() {
-  long ret;
-  Timer t;
-  struct parasite_ctl *parasite = proc.getParasiteCtl();
+ret_t CodeTransformer::rerandomize() {
+  uintptr_t pc;
+  size_t interruptSize;
+  RandomizedFunction *info;
+  const function_record *fr;
+  std::unordered_map<uintptr_t, uint64_t> origData;
   ret_t code;
+  Timer t;
+#ifdef DEBUG_BUILD
+  pid_t cpid = proc.getPid();
+#endif
 
-  assert(parasite && "Invalid parasite control handle");
+  assert(proc.traceable() && "Invalid process state");
 
   t.start();
-  DEBUGMSG(proc.getPid() << ": dropping code pages 0x" << std::hex
-           << PAGE_DOWN(codeStart) << " - 0x" << PAGE_UP(codeEnd)
-           << std::endl);
 
-  // The child executes madvise(), which drops the code pages.  When returning
-  // to userspace, the child causes a page fault.  Because the code section has
-  // been changed to use anonymous private pages, the kernel serves a zero page
-  // and the child immediately segfaults after the page fault handling, causing
-  // parasite::syscall() to return an error; just mask it.
-  parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
-                    PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
-  if(ret) return ret_t::DropCodeFailed;
+  // TODO re-randomize & drop the code
 
-  // As previously mentioned, the kernel served a zero page; manually rewrite
-  // it with actual instructions.
-  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
-  if(code != ret_t::Success) return code;
+  pc = proc.getPC();
+  info = getRandomizedFunctionInfo(pc);
+  if(!info) return ret_t::NoMetadata;
+  fr = info->getFunctionRecord();
 
-  t.end();
-  INFO(proc.getPid() << ": dropping code pages: " << t.elapsed(Timer::Micro)
-       << " us" << std::endl);
+  if(pc != fr->addr && !info->isTransformAddr(pc)) {
+    DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
+                     "function at 0x" << std::hex << fr->addr << std::endl);
+
+    // Insert traps at transformation breakpoints & kick child towards them
+    code = sprayTransformBreakpoints(info, origData, interruptSize);
+    if(code != ret_t::Success) return code;
+    t.end(true);
+
+    code = proc.continueToNextSignal();
+
+    t.start();
+    if(code != ret_t::Success) return code;
+    else if(!proc.traceable()) return ret_t::InvalidState;
+    pc = proc.getPC() - interruptSize;
+    if(!info->isTransformAddr(pc)) return ret_t::TransformFailed;
+
+    DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
+                     << std::hex << pc << std::endl);
+
+    if((code = proc.setPC(pc)) != ret_t::Success) return code;
+    code = restoreTransformBreakpoints(info, origData);
+    if(code != ret_t::Success) return code;
+  }
+
+  // TODO transform the stack
+
+  t.end(true);
+  numRandomizations++;
+  rerandomizeTime += t.totalElapsed(Timer::Micro);
 
   return ret_t::Success;
 }
@@ -237,6 +266,83 @@ int32_t CodeTransformer::slotOffsetFromRegister(uint32_t frameSize,
     return DIRECTION(offset - (int32_t)frameSize);
   default: return INT32_MAX;
   }
+}
+
+ret_t
+CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
+                     std::unordered_map<uintptr_t, uint64_t> &origData,
+                     size_t &interruptSize) const {
+  uint64_t interrupt, mask, tmp;
+  const std::unordered_set<uintptr_t> &addrs = info->getTransformAddrs();
+  origData.clear();
+  ret_t code;
+
+  DEBUG(
+    if(addrs.size() > 100)
+      DEBUGMSG(addrs.size() << " transformation points in function at 0x"
+               << std::hex << info->getFunctionRecord()->addr << ", may "
+               "harm performance" << std::endl);
+  )
+
+  // TODO overwriting return instructions can inadvertently overwrite the start
+  // of other functions, may race with other threads spraying start of function
+  // (if added as transform point)
+  interrupt = arch::getInterruptInst(mask, interruptSize);
+  for(auto addr = addrs.begin(); addr != addrs.end(); addr++) {
+    uint64_t &data = origData[*addr];
+    code = proc.read(*addr, data);
+    if(code != ret_t::Success) return code;
+    tmp = (data & mask) | interrupt;
+    code = proc.write(*addr, tmp);
+    if(code != ret_t::Success) return code;
+  }
+
+  return ret_t::Success;
+}
+
+ret_t
+CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
+               const std::unordered_map<uintptr_t, uint64_t> &origData) const {
+  ret_t code = ret_t::Success;
+  for(auto data = origData.begin(); data != origData.end(); data++) {
+    code = proc.write(data->first, data->second);
+    if(code != ret_t::Success) break;
+  }
+  return code;
+}
+
+RandomizedFunction *
+CodeTransformer::getRandomizedFunctionInfo(uintptr_t pc) const {
+  const function_record *fr;
+  RandomizedFunctionMap::const_iterator func;
+
+  fr = binary.getFunction(pc);
+  if(fr) {
+    func = funcMaps.find(fr->addr);
+    if(func != funcMaps.end()) return func->second.get();
+  }
+  return nullptr;
+}
+
+instr_t *
+CodeTransformer::getInstruction(uintptr_t pc, RandomizedFunction *info) const {
+  uintptr_t start;
+  instr_t *instr;
+  const function_record *fr;
+
+  assert(info && "Invalid randomization information object");
+  fr = info->getFunctionRecord();
+  if(!funcContains(fr, pc)) return nullptr;
+
+  start = fr->addr;
+  instr = instrlist_first(info->getInstructions());
+  while(instr && start < pc) {
+    start += instr_length(GLOBAL_DCONTEXT, instr);
+    instr = instr_get_next(instr);
+  }
+  if(start != pc) return nullptr;
+
+  return instr;
 }
 
 ret_t CodeTransformer::writePage(uintptr_t start) {
@@ -313,6 +419,40 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
 
   t.end();
   INFO(proc.getPid() << ": code re-mapping: " << t.elapsed(Timer::Micro)
+       << " us" << std::endl);
+
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::dropCode() {
+  long ret;
+  Timer t;
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
+  ret_t code;
+
+  assert(parasite && "Invalid parasite control handle");
+
+  t.start();
+  DEBUGMSG(proc.getPid() << ": dropping code pages 0x" << std::hex
+           << PAGE_DOWN(codeStart) << " - 0x" << PAGE_UP(codeEnd)
+           << std::endl);
+
+  // The child executes madvise(), which drops the code pages.  When returning
+  // to userspace, the child causes a page fault.  Because the code section has
+  // been changed to use anonymous private pages, the kernel serves a zero page
+  // and the child immediately segfaults after the page fault handling, causing
+  // parasite::syscall() to return an error; just mask it.
+  parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
+                    PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
+  if(ret) return ret_t::DropCodeFailed;
+
+  // As previously mentioned, the kernel served a zero page; manually rewrite
+  // it with actual instructions.
+  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  if(code != ret_t::Success) return code;
+
+  t.end();
+  INFO(proc.getPid() << ": dropping code pages: " << t.elapsed(Timer::Micro)
        << " us" << std::endl);
 
   return ret_t::Success;
@@ -481,10 +621,18 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     }
     instrSize = cur - prev;
     instr_set_raw_bits(instr, prev, instrSize);
-    real += instrSize;
     instrlist_append(instrs, instr);
 
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
+
+    // Record addresses of transformation points
+    if(instr_is_call(instr) || instr_is_return(instr)) {
+      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex << real
+                       << std::endl);
+      info->addTransformAddr((uintptr_t)real);
+    }
+
+    real += instrSize;
 
     code = analyzeOperands<instr_num_srcs, instr_get_src>
                           (info, frameSize, instr);
@@ -522,6 +670,8 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   // Add the remaining slots, i.e., those that don't have any restrictions
   code = info->populateSlots();
 
+  // TODO mark down transformation points from binary metadata
+
   DEBUG_VERBOSE(
     if(frameSize != arch::initialFrameSize())
       DEBUGMSG(" -> function does not clean up frame (not intended to return?)"
@@ -558,7 +708,7 @@ ret_t CodeTransformer::analyzeFunctions() {
                      << " us" << std::endl);
   }
 
-  INFO(proc.getPid() << ": Analysis: " << t.totalElapsed(Timer::Micro)
+  INFO(proc.getPid() << ": analysis: " << t.totalElapsed(Timer::Micro)
        << " us" << std::endl);
 
   return ret_t::Success;
@@ -770,7 +920,7 @@ ret_t CodeTransformer::randomizeFunctions() {
                      << " us" << std::endl);
   }
 
-  INFO(proc.getPid() << ": Randomization: " << t.totalElapsed(Timer::Micro)
+  INFO(proc.getPid() << ": randomization: " << t.totalElapsed(Timer::Micro)
        << " us" << std::endl);
 
   return ret_t::Success;

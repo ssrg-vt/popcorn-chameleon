@@ -417,6 +417,30 @@ public:
   virtual uint32_t getRandomizedBulkFrameUpdate() const = 0;
 
   /**
+   * Return whether a program address is a transformation point.
+   * @param addr a program counter value
+   * @return true if its a transformation point or false otherwise
+   */
+  bool isTransformAddr(uintptr_t addr) const
+  { return transformAddrs.find(addr) != transformAddrs.end(); }
+
+  /**
+   * Get program transformation addresses for the function.
+   * @return vector of program transformation points
+   */
+  const std::unordered_set<uintptr_t> &getTransformAddrs() const
+  { return transformAddrs; }
+
+  /**
+   * Add a program transformation point for the function.
+   * @param addr a program transformation point
+   */
+  void addTransformAddr(uintptr_t addr) {
+    assert(funcContains(func, addr) && "Transformation point not in function");
+    transformAddrs.insert(addr);
+  }
+
+  /**
    * Return whether a frame reference (denoted by an offset) needs to be
    * transformed.
    * @param offset a canonicalized offset
@@ -455,6 +479,9 @@ protected:
 
   /* Disassembled instructions */
   instrlist_t *instrs;
+
+  /* Program counter addresses where we can do a transformation */
+  std::unordered_set<uintptr_t> transformAddrs;
 
   /*
    * Canonicalized slots from metadata for searching.  Randomized versions of

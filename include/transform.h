@@ -43,7 +43,7 @@ public:
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
       slotPadding(slotPadding), faultHandlerPid(-1), faultHandlerExit(false),
-      batchedFaults(batchedFaults) {}
+      batchedFaults(batchedFaults), numRandomizations(0), rerandomizeTime(0) {}
   CodeTransformer() = delete;
 
   /**
@@ -73,18 +73,19 @@ public:
   ret_t cleanup();
 
   /**
-   * Drop the child's code pages, forcing them to be brought back in by faults.
+   * Re-randomize the child process.  This generates a new stack layout,
+   * rewrites threads of the child process using the new layout and drops all
+   * existing code pages.
+   *
    * @return a return code describing the outcome
    */
-  ret_t dropCode();
+  ret_t rerandomize();
 
-#ifdef DEBUG_BUILD
   /**
    * Return the Process object to which the CodeTransformer is attached.
    * @return the attached Process object
    */
   Process &getProcess() { return proc; }
-#endif
 
   /**
    * Return the PID of the process being transformed.
@@ -217,6 +218,57 @@ private:
   bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
 
+  /* Number of and total time spent in re-randomization */
+  size_t numRandomizations;
+  uint64_t rerandomizeTime;
+
+  /**
+   * Insert breakpoints where chameleon can perform a transformation.
+   * @param info randomization information for a function
+   * @param origData output argument populated with original data at the
+   *                 inserted breakpoint locations
+   * @param interruptSize output argument set to the size of the inserted
+   *                      interrupt instruction
+   * @return a return code describing the outcome
+   */
+  ret_t sprayTransformBreakpoints(const RandomizedFunction *info,
+                      std::unordered_map<uintptr_t, uint64_t> &origData,
+                      size_t &interruptSize) const;
+
+  /**
+   * Restore original instruction bytes clobbered by inserting transformation
+   * breakpoints.
+   *
+   * @param info randomization information for a function
+   * @param origData original data at the inserted breakpoint locations
+   * @return a return code describing the outcome
+   */
+  ret_t
+  restoreTransformBreakpoints(const RandomizedFunction *info,
+                const std::unordered_map<uintptr_t, uint64_t> &origData) const;
+
+  /**
+   * Get the randomization information for the function enclosing a given
+   * program counter value.
+   *
+   * @param pc a program counter value
+   * @return randomized function information for the function closing pc, or
+   *         nullptr if not found
+   */
+  RandomizedFunction *getRandomizedFunctionInfo(uintptr_t pc) const;
+
+  /**
+   * Get the IR-level instruction for a given program counter value, enclosed
+   * in the function represented by the specified randomization information.
+   * The instruction is part of an instrlist_t for the enclosing function.
+   *
+   * Note: users can supply the info object using getRandomizedFunctionInfo()
+   *
+   * @return a pointer to the IR-level instruction or nullptr if it could not
+   *         be found
+   */
+  instr_t *getInstruction(uintptr_t pc, RandomizedFunction *info) const;
+
   /**
    * Write a page using the ptrace interface rather than via userfaultfd.
    * Needed as compel may touch pages during parasite operation; trying to
@@ -240,6 +292,12 @@ private:
    * @return a return code describing the outcome
    */
   ret_t remapCodeSegment(uintptr_t start, uint64_t len);
+
+  /**
+   * Drop the child's code pages, forcing them to be brought back in by faults.
+   * @return a return code describing the outcome
+   */
+  ret_t dropCode();
 
   /**
    * Create memory window for the application's code.  The window will be used

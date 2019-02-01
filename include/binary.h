@@ -23,6 +23,14 @@
 
 namespace chameleon {
 
+/**
+ * Return whether the address is contained within a function.
+ * @param func the function record
+ * @param addr the virtual address
+ * @return true if contained or false otherwise
+ */
+bool funcContains(const function_record *func, uintptr_t addr);
+
 class Binary {
 public:
   /**
@@ -287,6 +295,14 @@ public:
    */
   uintptr_t getSymbolAddress(std::string &sym)
   { return symtab.getSymbolAddress(sym); }
+
+  /**
+   * Get the function record of the function encapsulating a given address.
+   * @param addr a program counter address
+   * @return function record of the enclosing function or nullptr if none
+   *         exists
+   */
+  const function_record *getFunction(uintptr_t addr) const;
 
   /**
    * Return a function iterator which can be used to iterate over all

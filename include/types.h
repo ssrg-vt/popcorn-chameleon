@@ -22,7 +22,8 @@ namespace chameleon {
   X(ElfReadError, "could not read ELF metadata") \
   X(InvalidElf, "invalid ELF file/format") \
   X(NoSuchSection, "could not find ELF section/segment") \
-  X(BadMetadata, "invalid metadata encoded in binary")
+  X(BadMetadata, "invalid metadata encoded in binary") \
+  X(NoMetadata, "could not find transformation metadata for function")
 
 /* Process control error codes */
 #define PROCESS_RETCODES \
@@ -50,6 +51,7 @@ namespace chameleon {
   X(DropCodeFailed, "dropping code to force new page faults failed") \
   X(AnalysisFailed, "could not analyze code to ensure correctness") \
   X(RandomizeFailed, "could not randomize code section") \
+  X(TransformFailed, "could not transform stack to match randomization") \
   X(ChildHandlerSetupFailed, "creating child handler thread failed") \
   X(ChildHandlerCleanupFailed, "cleaning up child handler thread failed") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
