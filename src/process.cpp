@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <fstream>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -14,6 +15,12 @@
 #include "process.h"
 
 using namespace chameleon;
+
+/*
+ * Linux by default allocates 8MB stacks.  If using a different default size,
+ * users should set this variable in order to correctly initialize children.
+ */
+size_t Process::defaultStackSize = 8 * 1024 * 1024;
 
 /*
  * Note: compel's API is a little obtuse -- compel_prepare() allocates a
@@ -105,11 +112,11 @@ ret_t Process::forkAndExec() {
 ret_t Process::initForkedChild() {
   ret_t code;
 
-  // Wait for the child to reach a trace-stop
+  // Wait for the child to reach a trace-stop & initialize
   if((code = waitInternal(false)) != ret_t::Success) return code;
-
   if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
   if(sem_init(&handoff, 0, 0)) return ret_t::TraceSetupFailed;
+  if((code = initializeStack()) != ret_t::Success) return code;
 
   // TODO: without reading the registers, we get a floating-point exception
   // when using x87 (which may appear in odd places like printf).  Maybe it
@@ -182,6 +189,49 @@ ret_t Process::waitInternal(bool reinject) {
   }
 
   return retval;
+}
+
+ret_t Process::initializeStack() {
+  size_t dashPos, spacePos;
+  char buf[128];
+  uintptr_t curPage, val;
+  std::string line;
+  ret_t code;
+  Timer t;
+
+  t.start();
+  snprintf(buf, sizeof(buf), "/proc/%d/maps", pid);
+  std::ifstream map(buf);
+  if(!map.is_open()) return ret_t::FileOpenFailed;
+
+  do {
+    std::getline(map, line);
+    if(line.find("[stack]") != std::string::npos) {
+      dashPos = line.find('-');
+      spacePos = line.find(' ');
+      if(dashPos == std::string::npos ||
+         spacePos == std::string::npos) return ret_t::BadFormat;
+      stackBounds.second = std::stoul(line.substr(dashPos + 1, spacePos),
+                                      nullptr, 16);
+      map.close();
+
+      curPage = stackBounds.second - defaultStackSize;
+      code = read(curPage, val);
+      if(code != ret_t::Success) return code;
+      stackBounds.first = curPage;
+
+      t.end();
+      INFO(pid << ": stack setup: " << t.elapsed(Timer::Micro) << " us"
+           << std::endl);
+      DEBUGMSG(pid << ": stack bounds: 0x" << std::hex << stackBounds.first
+               << " - 0x" << stackBounds.second << std::endl);
+
+      return ret_t::Success;
+    }
+  } while(map.good());
+
+  map.close();
+  return ret_t::BadFormat;
 }
 
 ret_t Process::cureAndInitParasite() {
@@ -320,6 +370,7 @@ err:
   if(cureAndInitParasite() == ret_t::Success) status = Stopped;
   return code;
 }
+
 
 pid_t Process::getNewTaskPid() const {
   if(status == Stopped &&

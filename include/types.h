@@ -63,9 +63,11 @@ namespace chameleon {
 
 /* Other miscellaneous error codes */
 #define MISC_RETCODES \
+  X(BadFormat, "bad input format") \
   X(LockFailed, "locking/unlocking mutex failed") \
   X(FutexFailed, "futex operation failed") \
   X(NotImplemented, "not implemented") \
+  X(FileOpenFailed, "could not open file") \
   X(NoTimestamp, "could not get timestamp") \
   X(InvalidAlarm, "invalid alarm configuration") \
   X(AlarmInitFailed, "alarm initialization failed") \
@@ -168,6 +170,7 @@ typedef iterator<unsigned char> byte_iterator;
 
 /* A range of values.  The first element *must* be smaller than the second. */
 typedef std::pair<int64_t, int64_t> range_t;
+typedef std::pair<uint64_t, uint64_t> urange_t;
 
 /**
  * Timer utility for measuring execution times.

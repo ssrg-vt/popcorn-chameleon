@@ -45,7 +45,8 @@ public:
    * @param argv arguments for child process to be executed
    */
   Process(int argc, char **argv) : argc(argc), argv(argv), pid(-1),
-                                   newTaskPid(-1), status(Ready), exit(0),
+                                   stackBounds(0, 0), newTaskPid(-1),
+                                   status(Ready), exit(0),
                                    stopReason(stop_t::Other),
                                    reinjectSignal(false), uffd(-1),
                                    nthreads(0), parasite(nullptr) {}
@@ -113,7 +114,9 @@ public:
   ret_t wait();
 
   /**
-   * Interrupt a child.
+   * Interrupt a child.  Users must call wait() in order to synchronize with
+   * the kernel's interrupt of the child.
+   *
    * @return a return code describing the outcome
    */
   ret_t interrupt();
@@ -212,6 +215,7 @@ public:
   /**
    * Convenience function to return whether the process is in a traceable
    * state, i.e., it is at a trace-stop and ptrace calls will succeed.
+   *
    * @return true if the process is in a traceable state or false otherwise
    */
   bool traceable() const { return status == Stopped || status == Interrupted; }
@@ -264,6 +268,18 @@ public:
   ret_t setPC(uintptr_t newPC) const;
 
   /**
+   * Get the process' current stack pointer.
+   * @return the stack pointer of 0 if it could not be retrieved
+   */
+  uintptr_t getSP() const;
+
+  /**
+   * Set the process' current stack pointer.
+   * @return a return code describing the outcome
+   */
+  ret_t setSP(uintptr_t newSP) const;
+
+  /**
    * Marshal a set of arguments into registers to invoke a function call
    * according to the ISA-specific calling convention.
    * @param a1-6 arguments to the system call
@@ -313,12 +329,16 @@ public:
   ret_t stealUserfaultfd();
 
 private:
+  /* Size of stacks allocated by the OS by default */
+  static size_t defaultStackSize;
+
   /* Arguments */
   int argc;
   char **argv;
 
   /* Process information */
   pid_t pid;
+  urange_t stackBounds;
   pid_t newTaskPid; /* new PID of the cloned/forked child */
   status_t status;
   union {
@@ -344,6 +364,15 @@ private:
    * @return a return code describing the outcome
    */
   ret_t waitInternal(bool reinject);
+
+  /**
+   * Initialize the child's stack by pre-touching all stack pages in
+   * preparation for re-randomization.  The child's stack bounds are stored in
+   * the stackBounds field.
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t initializeStack();
 
   /**
    * Cure the compel parasite and initialize another for the next compel
