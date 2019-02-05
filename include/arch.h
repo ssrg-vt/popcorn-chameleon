@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <stack_transform.h>
 #include <sys/user.h>
 
 #include "randomize.h"
@@ -35,6 +36,9 @@
 #endif
 
 namespace chameleon {
+
+class CodeTransformer;
+
 namespace arch {
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -106,6 +110,20 @@ uintptr_t pc(const struct user_regs_struct &regs);
 void pc(struct user_regs_struct &regs, uintptr_t newPC);
 
 /**
+ * Extract the stack pointer from a register set.
+ * @param regs a register set
+ * @return the stack pointer's value
+ */
+uintptr_t sp(const struct user_regs_struct &regs);
+
+/**
+ * Set a process' stack pointer in a register set.
+ * @param regs a register set
+ * @param newSP the new stack pointer
+ */
+void sp(struct user_regs_struct &regs, uintptr_t newSP);
+
+/**
  * Return the system call number from a register set.
  * @param regs a previously-populated register set
  * @return the system call number
@@ -168,6 +186,30 @@ int32_t framePointerOffset();
  */
 RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
                                             const function_record *func);
+
+/**
+ * Rewrite the child's stack according to the newly-randomized code.
+ *
+ * @param CT a CodeTransformer object containing randomization metadata
+ * @param callback function called by transformation runtime to read
+ *                 transformation metadata
+ * @param meta transformation metadata handle
+ * @param childSrcBase address of source stack's base in child's address space
+ * @param bufSrcBase address of source stack's base in chameleon's address
+ *                   space
+ * @param childDstBase address of destination stack's base in child's address
+ *                     space
+ * @param bufDstBase address of destination stack's base in chameleon's address
+ *                   space
+ * @return a return code describing the outcome
+ */
+ret_t transformStack(CodeTransformer *CT,
+                     get_rand_info callback,
+                     st_handle meta,
+                     uintptr_t childSrcBase,
+                     uintptr_t bufSrcBase,
+                     uintptr_t childDstBase,
+                     uintptr_t bufDstBase);
 
 ///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO interface

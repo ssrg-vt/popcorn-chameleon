@@ -135,6 +135,8 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   retcode = populateCodeWindow(codeSec, codeSeg);
   if(retcode != ret_t::Success) return retcode;
   if(randomize) {
+    rewriteMetadata = st_init(binary.getFilename());
+    if(!rewriteMetadata) return ret_t::BadTransformMetadata;
     retcode = analyzeFunctions();
     if(retcode != ret_t::Success) return retcode;
     retcode = randomizeFunctions();
@@ -154,6 +156,11 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
                            codeSec.address(),
                            codeSec.size()))
     return ret_t::UffdRegisterFailed;
+
+  // Set up a buffer for transforming the child's stack
+  const urange_t &bounds = proc.getStackBounds();
+  size_t stackSize = bounds.second - bounds.first;
+  stackMem.reset(new unsigned char[stackSize]);
 
   // Initialize thread for handling faults
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
@@ -180,12 +187,36 @@ ret_t CodeTransformer::cleanup() {
   return ret_t::Success;
 }
 
+static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
+  CodeTransformer *CT = (CodeTransformer *)rawCT;
+  RandomizedFunction *info;
+  func_rand_info cinfo;
+  cinfo.old_frame_size = UINT64_MAX;
+
+  info = CT->getRandomizedFunctionInfo(addr);
+  if(info) {
+    auto &oldSlots = info->getOriginalSlots();
+    auto &newSlots = info->getRandomizedSlots();
+    cinfo.old_frame_size = info->getOriginalFrameSize();
+    cinfo.new_frame_size = info->getRandomizedFrameSize();
+    cinfo.num_old_slots = oldSlots.size();
+    cinfo.old_rand_slots = (const slotmap *)&oldSlots[0];
+    cinfo.num_new_slots = newSlots.size();
+    cinfo.new_rand_slots = (const slotmap *)&newSlots[0];
+  }
+
+  return cinfo;
+}
+
 ret_t CodeTransformer::rerandomize() {
-  uintptr_t pc;
-  size_t interruptSize;
+  typedef chameleon::RandomizedFunction::TransformType TransformType;
+  uintptr_t pc, sp, rawBuf, mid, childSrcBase,
+            bufSrcBase, childDstBase, bufDstBase;
+  size_t interruptSize, stackSize;
   RandomizedFunction *info;
   const function_record *fr;
   std::unordered_map<uintptr_t, uint64_t> origData;
+  TransformType type;
   ret_t code;
   Timer t;
 #ifdef DEBUG_BUILD
@@ -193,48 +224,104 @@ ret_t CodeTransformer::rerandomize() {
 #endif
 
   assert(proc.traceable() && "Invalid process state");
-
   t.start();
 
-  // TODO re-randomize & drop the code
+  // TODO wait for code re-randomizer to finish & drop the code
 
-  pc = proc.getPC();
+  if(!(pc = proc.getPC())) return ret_t::PtraceFailed;
   info = getRandomizedFunctionInfo(pc);
-  if(!info) return ret_t::NoMetadata;
+  if(!info) return ret_t::NoTransformMetadata;
   fr = info->getFunctionRecord();
 
-  if(pc != fr->addr && !info->isTransformAddr(pc)) {
+  // Make sure the child is at a transformation point.  Either it's already
+  // there (lucky!) or we have to forcibly advance it to one.  All
+  // transformation points should be at the point where a function has just
+  // been called or is returning, allowing us to bootstrap transformation.
+  if(pc != fr->addr &&
+     (type = info->getTransformationType(pc)) == TransformType::None) {
     DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
                      "function at 0x" << std::hex << fr->addr << std::endl);
 
     // Insert traps at transformation breakpoints & kick child towards them
     code = sprayTransformBreakpoints(info, origData, interruptSize);
     if(code != ret_t::Success) return code;
+
     t.end(true);
-
-    code = proc.continueToNextSignal();
-
+    if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
     t.start();
+
+    // Figure out where the child stopped and restore the original instructions
     if(code != ret_t::Success) return code;
     else if(!proc.traceable()) return ret_t::InvalidState;
     pc = proc.getPC() - interruptSize;
-    if(!info->isTransformAddr(pc)) return ret_t::TransformFailed;
+    type = info->getTransformationType(pc);
+    if(type == TransformType::None) return ret_t::TransformFailed;
+    if((code = proc.setPC(pc)) != ret_t::Success) return code;
+    code = restoreTransformBreakpoints(info, origData);
+    if(code != ret_t::Success) return code;
 
     DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
                      << std::hex << pc << std::endl);
 
-    if((code = proc.setPC(pc)) != ret_t::Success) return code;
-    code = restoreTransformBreakpoints(info, origData);
-    if(code != ret_t::Success) return code;
+    // If we stopped at a call instruction, walk it into the called function
+    // in preparation for transformation
+    if(type == TransformType::CallSite)
+      if((code = proc.singleStep()) != ret_t::Success) return code;
   }
 
-  // TODO transform the stack
+  // Read in the child's current stack.  We currently divide the stack into 2
+  // halves and rewrite from one half to the other.
+  if(!(sp = proc.getSP())) return ret_t::PtraceFailed;
+  const urange_t &stackBounds = proc.getStackBounds();
+  assert(sp >= stackBounds.first && sp < stackBounds.second
+         && "Invalid stack pointer");
+  stackSize = stackBounds.second - stackBounds.first;
+  mid = (stackBounds.first + stackBounds.second) / 2;
+  rawBuf = (uintptr_t)stackMem.get();
+  if(sp >= mid) { // Currently using top half
+    bufSrcBase = rawBuf + stackSize;
+    childSrcBase = stackBounds.second;
+    bufDstBase = rawBuf + (stackSize / 2);
+    childDstBase = mid;
+    stackSize = stackBounds.second - sp;
+  }
+  else { // Currently using bottom half
+    bufSrcBase = rawBuf + (stackSize / 2);
+    childSrcBase = mid;
+    bufDstBase = rawBuf + stackSize;
+    childDstBase = stackBounds.second;
+    stackSize = mid - sp;
+  }
+  byte_iterator stackBuf(stackMem.get() + (sp - stackBounds.first), stackSize);
+  code = proc.readRegion(sp, stackBuf);
+  if(code != ret_t::Success) return code;
+
+  // Transform the stack, including switching to the transformed stack
+  code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
+                              childSrcBase, bufSrcBase,
+                              childDstBase, bufDstBase);
+  if(code != ret_t::Success) return ret_t::TransformFailed;
+
+  // TODO write the transformed stack into the child's memory
 
   t.end(true);
   numRandomizations++;
   rerandomizeTime += t.totalElapsed(Timer::Micro);
 
   return ret_t::Success;
+}
+
+RandomizedFunction *
+CodeTransformer::getRandomizedFunctionInfo(uintptr_t pc) const {
+  const function_record *fr;
+  RandomizedFunctionMap::const_iterator func;
+
+  fr = binary.getFunction(pc);
+  if(fr) {
+    func = funcMaps.find(fr->addr);
+    if(func != funcMaps.end()) return func->second.get();
+  }
+  return nullptr;
 }
 
 /* Adjust offset based on stack growth direction */
@@ -273,7 +360,7 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
                      std::unordered_map<uintptr_t, uint64_t> &origData,
                      size_t &interruptSize) const {
   uint64_t interrupt, mask, tmp;
-  const std::unordered_set<uintptr_t> &addrs = info->getTransformAddrs();
+  auto &addrs = info->getTransformAddrs();
   origData.clear();
   ret_t code;
 
@@ -289,11 +376,11 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
   // (if added as transform point)
   interrupt = arch::getInterruptInst(mask, interruptSize);
   for(auto addr = addrs.begin(); addr != addrs.end(); addr++) {
-    uint64_t &data = origData[*addr];
-    code = proc.read(*addr, data);
+    uint64_t &data = origData[addr->first];
+    code = proc.read(addr->first, data);
     if(code != ret_t::Success) return code;
     tmp = (data & mask) | interrupt;
-    code = proc.write(*addr, tmp);
+    code = proc.write(addr->first, tmp);
     if(code != ret_t::Success) return code;
   }
 
@@ -309,19 +396,6 @@ CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
     if(code != ret_t::Success) break;
   }
   return code;
-}
-
-RandomizedFunction *
-CodeTransformer::getRandomizedFunctionInfo(uintptr_t pc) const {
-  const function_record *fr;
-  RandomizedFunctionMap::const_iterator func;
-
-  fr = binary.getFunction(pc);
-  if(fr) {
-    func = funcMaps.find(fr->addr);
-    if(func != funcMaps.end()) return func->second.get();
-  }
-  return nullptr;
 }
 
 instr_t *
@@ -596,7 +670,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     DEBUGMSG("code length encoded in metadata larger than available size: "
              << funcData.getLength() << " vs. " << func->code_size
              << std::endl);
-    return ret_t::BadMetadata;
+    return ret_t::BadTransformMetadata;
   }
 
   if(!cur) {
@@ -626,10 +700,15 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
 
     // Record addresses of transformation points
-    if(instr_is_call(instr) || instr_is_return(instr)) {
+    if(instr_is_call(instr)) {
       DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex << real
                        << std::endl);
-      info->addTransformAddr((uintptr_t)real);
+      info->addTransformAddr((uintptr_t)real, RandomizedFunction::CallSite);
+    }
+    else if(instr_is_return(instr)) {
+      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex << real
+                       << std::endl);
+      info->addTransformAddr((uintptr_t)real, RandomizedFunction::Return);
     }
 
     real += instrSize;
@@ -669,8 +748,6 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
 
   // Add the remaining slots, i.e., those that don't have any restrictions
   code = info->populateSlots();
-
-  // TODO mark down transformation points from binary metadata
 
   DEBUG_VERBOSE(
     if(frameSize != arch::initialFrameSize())
@@ -742,7 +819,7 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
       if(randOffset == INT32_MAX) {
         DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
                        instr);
-        return ret_t::BadMetadata;
+        return ret_t::BadTransformMetadata;
       }
       randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
       opnd_set_disp_ex(&op, randRegOffset, false, false, false);
@@ -830,10 +907,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
 
     // Rewrite stack slot reference operands to their randomized locations
     code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
-                          (info, frameSize, randFrameSize, instr, changed);
+                            (info, frameSize, randFrameSize, instr, changed);
     if(code != ret_t::Success) return code;
     code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
-                          (info, frameSize, randFrameSize, instr, changed);
+                            (info, frameSize, randFrameSize, instr, changed);
     if(code != ret_t::Success) return code;
 
     // Allow each ISA-specific randomized function to have its way

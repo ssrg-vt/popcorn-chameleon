@@ -22,8 +22,8 @@ namespace chameleon {
   X(ElfReadError, "could not read ELF metadata") \
   X(InvalidElf, "invalid ELF file/format") \
   X(NoSuchSection, "could not find ELF section/segment") \
-  X(BadMetadata, "invalid metadata encoded in binary") \
-  X(NoMetadata, "could not find transformation metadata for function")
+  X(BadTransformMetadata, "invalid transformation metadata encoded in binary") \
+  X(NoTransformMetadata, "could not find transformation metadata for function")
 
 /* Process control error codes */
 #define PROCESS_RETCODES \
@@ -41,7 +41,10 @@ namespace chameleon {
   X(CompelSyscallFailed, "compel child system call failed") \
   X(CompelInfectFailed, "compel infect failed") \
   X(CompelActionFailed, "compel action in child failed") \
-  X(CompelCureFailed, "compel cure failed")
+  X(CompelCureFailed, "compel cure failed") \
+  X(ReadFailed, "reading from child memory failed") \
+  X(WriteFailed, "writing to child memory failed") \
+  X(TruncatedAccess, "read/write of region truncated - out of space in child")
 
 /* State transformation error codes */
 #define TRANSFORM_RETCODES \

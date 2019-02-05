@@ -15,6 +15,7 @@
 #include <random>
 #include <unordered_map>
 #include <pthread.h>
+#include <stack_transform.h>
 
 /* Note: arch.h includes DynamoRIO APIs */
 #include "arch.h"
@@ -92,6 +93,16 @@ public:
    * @return the PID of the process being transformed
    */
   pid_t getProcessPid() const { return proc.getPid(); }
+
+  /**
+   * Get the randomization information for the function enclosing a given
+   * program counter value.
+   *
+   * @param pc a program counter value
+   * @return randomized function information for the function closing pc, or
+   *         nullptr if not found
+   */
+  RandomizedFunction *getRandomizedFunctionInfo(uintptr_t pc) const;
 
   /**
    * Return the address of a buffer which can be directly passed to the kernel
@@ -199,6 +210,10 @@ private:
   /* An abstract view of the code segment, used to randomize code */
   MemoryWindow codeWindow;
 
+  /* Child stack transformation buffer & metadata */
+  std::unique_ptr<unsigned char> stackMem;
+  st_handle rewriteMetadata;
+
   /* Randomization machinery */
   typedef std::unordered_map<uintptr_t, RandomizedFunctionPtr>
     RandomizedFunctionMap;
@@ -246,16 +261,6 @@ private:
   ret_t
   restoreTransformBreakpoints(const RandomizedFunction *info,
                 const std::unordered_map<uintptr_t, uint64_t> &origData) const;
-
-  /**
-   * Get the randomization information for the function enclosing a given
-   * program counter value.
-   *
-   * @param pc a program counter value
-   * @return randomized function information for the function closing pc, or
-   *         nullptr if not found
-   */
-  RandomizedFunction *getRandomizedFunctionInfo(uintptr_t pc) const;
 
   /**
    * Get the IR-level instruction for a given program counter value, enclosed

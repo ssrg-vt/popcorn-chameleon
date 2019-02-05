@@ -15,6 +15,7 @@
 #include <memory>
 #include <random>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 #include <cstdint>
@@ -335,10 +336,17 @@ struct RandRestriction {
  */
 class RandomizedFunction {
 public:
+  /* Type of transformation point */
+  enum TransformType {
+    None,
+    CallSite,
+    Return
+  };
+
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary, const function_record *func);
   ~RandomizedFunction()
-  {  if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
+  { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
    * Get alignment requirements for the function's stack frame.
@@ -374,11 +382,13 @@ public:
    * restrictions.  Just to emphasize, this must be called *after* analysis.
    * @return a return code describing the outcome
    */
-  virtual ret_t populateSlots() = 0;
+  virtual ret_t populateSlots();
 
   /**
-   * Randomize a function.  If it was previously randomized, drop all previous
-   * information.
+   * Randomize a function.
+   *
+   * Note: metadata from the previous randomization is kept in order to
+   * translate from previous randomizations to the current randomization.
    *
    * @param seed random number generator seed
    * @param maxPadding maximum randomized padding added between stack slots
@@ -390,13 +400,25 @@ public:
    * Return the original frame size.
    * @return the original frame size
    */
-  uint32_t getOriginalFrameSize() const { return func->frame_size; }
+  uint32_t getOriginalFrameSize() const { return origFrameSize; }
 
   /**
    * Return the randomized frame size.
    * @return the randomized frame size
    */
   uint32_t getRandomizedFrameSize() const { return randomizedFrameSize; }
+
+  /**
+   * Get the the slot remapping information from the previous randomization.
+   * @return slot remapping information for previous randomization
+   */
+  const std::vector<SlotMap> &getOriginalSlots() const { return *prevRand; }
+
+  /**
+   * Get the the slot remapping information for the current randomization.
+   * @return slot remapping information for currentrandomization
+   */
+  const std::vector<SlotMap> &getRandomizedSlots() const { return *curRand; }
 
   /**
    * Typically compilers allocate space for callee-saved registers/immovable
@@ -417,27 +439,32 @@ public:
   virtual uint32_t getRandomizedBulkFrameUpdate() const = 0;
 
   /**
-   * Return whether a program address is a transformation point.
+   * Return whether a program address is a transformation point.  If not,
+   * return a None type; else return the type of the transformation point.
    * @param addr a program counter value
-   * @return true if its a transformation point or false otherwise
+   * @return the type of transformation point or None if it's not a
+   *         transformation point
    */
-  bool isTransformAddr(uintptr_t addr) const
-  { return transformAddrs.find(addr) != transformAddrs.end(); }
+  TransformType getTransformationType(uintptr_t addr) const {
+    auto it = transformAddrs.find(addr);
+    if(it == transformAddrs.end()) return TransformType::None;
+    else return it->second;
+  }
 
   /**
-   * Get program transformation addresses for the function.
+   * Get addresses of valid program transformation points for the function.
    * @return vector of program transformation points
    */
-  const std::unordered_set<uintptr_t> &getTransformAddrs() const
+  const std::unordered_map<uintptr_t, TransformType> &getTransformAddrs() const
   { return transformAddrs; }
 
   /**
    * Add a program transformation point for the function.
    * @param addr a program transformation point
    */
-  void addTransformAddr(uintptr_t addr) {
+  void addTransformAddr(uintptr_t addr, TransformType type) {
     assert(funcContains(func, addr) && "Transformation point not in function");
-    transformAddrs.insert(addr);
+    transformAddrs[addr] = type;;
   }
 
   /**
@@ -480,8 +507,11 @@ protected:
   /* Disassembled instructions */
   instrlist_t *instrs;
 
-  /* Program counter addresses where we can do a transformation */
-  std::unordered_set<uintptr_t> transformAddrs;
+  /*
+   * Map of program counter addresses where we can do a transformation and the
+   * type of transformation point.
+   */
+  std::unordered_map<uintptr_t, TransformType> transformAddrs;
 
   /*
    * Canonicalized slots from metadata for searching.  Randomized versions of
@@ -489,14 +519,24 @@ protected:
    */
   std::vector<std::pair<int, const stack_slot *>> slots;
 
+  /*
+   * Maintain lists of slot remappings from one previous and current
+   * randomization in order to transform thread stacks.
+   *
+   * Note: in general, slot remapping accesses should happen through prevRand
+   * and curRand, *not* _a and _b
+   */
+  std::vector<SlotMap> _a, _b;
+  std::vector<SlotMap> *prevRand, *curRand;
+
   /* Set of previously-seen offsets during analysis */
   std::unordered_set<int> seen;
 
   /* Stack regions.  Laid out by target-specific implementation. */
   std::vector<StackRegionPtr> regions;
 
-  /* Frame size after randomization */
-  uint32_t randomizedFrameSize;
+  /* Frame size from previous and current randomization */
+  uint32_t origFrameSize, randomizedFrameSize;
 
   /**
    * Find the stack slot corresponding to a given offset.

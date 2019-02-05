@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -117,6 +118,7 @@ ret_t Process::initForkedChild() {
   if(!(parasite = parasite::initialize(pid))) return ret_t::CompelInitFailed;
   if(sem_init(&handoff, 0, 0)) return ret_t::TraceSetupFailed;
   if((code = initializeStack()) != ret_t::Success) return code;
+  if((code = initializeMemFD()) != ret_t::Success) return code;
 
   // TODO: without reading the registers, we get a floating-point exception
   // when using x87 (which may appear in odd places like printf).  Maybe it
@@ -234,6 +236,13 @@ ret_t Process::initializeStack() {
   return ret_t::BadFormat;
 }
 
+ret_t Process::initializeMemFD() {
+  char buf[128];
+  snprintf(buf, sizeof(buf), "/proc/%d/mem", pid);
+  if((memFD = open(buf, O_RDWR)) == -1) return ret_t::FileOpenFailed;
+  else return ret_t::Success;
+}
+
 ret_t Process::cureAndInitParasite() {
   ret_t code;
   if(parasite) {
@@ -330,6 +339,7 @@ ret_t Process::attachHandoff() {
 
 ret_t Process::detach() {
   close(uffd);
+  close(memFD);
   pid = newTaskPid = -1;
   status = Ready;
   exit = 0;
@@ -394,6 +404,30 @@ stop_t Process::getStopReason() const {
   else return stop_t::Other;
 }
 
+ret_t Process::readRegs(struct user_regs_struct &regs) const {
+  if(!traceable()) return ret_t::InvalidState;
+  else if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  else return ret_t::Success;
+}
+
+ret_t Process::readFPRegs(struct user_fpregs_struct &regs) const {
+  if(!traceable()) return ret_t::InvalidState;
+  else if(!trace::getFPRegs(pid, regs)) return ret_t::PtraceFailed;
+  else return ret_t::Success;
+}
+
+ret_t Process::writeRegs(struct user_regs_struct &regs) const {
+  if(!traceable()) return ret_t::InvalidState;
+  else if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  else return ret_t::Success;
+}
+
+ret_t Process::writeFPRegs(struct user_fpregs_struct &regs) const {
+  if(!traceable()) return ret_t::InvalidState;
+  else if(!trace::setFPRegs(pid, regs)) return ret_t::PtraceFailed;
+  else return ret_t::Success;
+}
+
 // TODO the functions that only access a single register (i.e., get/setPC())
 // should be converted to use PTRACE_PEEKUSER/POKUSER rather than bulk
 // reading/writing the entire register set
@@ -414,6 +448,21 @@ ret_t Process::setPC(uintptr_t newPC) const {
   return ret_t::Success;
 }
 
+uintptr_t Process::getSP() const {
+  struct user_regs_struct regs;
+  if(!traceable() || !trace::getRegs(pid, regs)) return 0;
+  return arch::sp(regs);
+}
+
+ret_t Process::setSP(uintptr_t newSP) const {
+  struct user_regs_struct regs;
+  if(!traceable()) return ret_t::InvalidState;
+  if(!trace::getRegs(pid, regs)) return ret_t::PtraceFailed;
+  arch::sp(regs, newSP);
+  if(!trace::setRegs(pid, regs)) return ret_t::PtraceFailed;
+  return ret_t::Success;
+}
+
 ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
                                long a4, long a5, long a6) const {
   struct user_regs_struct regs;
@@ -430,10 +479,52 @@ ret_t Process::read(uintptr_t addr, uint64_t &data) const {
   return ret_t::Success;
 }
 
+ret_t Process::readRegion(uintptr_t addr, byte_iterator &buffer) const {
+  ssize_t bytesRead;
+
+  if(!traceable()) return ret_t::InvalidState;
+
+  if(lseek(memFD, addr, SEEK_SET) == -1) {
+    DEBUGMSG("could not seek to address 0x" << std::hex << addr << ": "
+             << strerror(errno) << std::endl);
+    return ret_t::ReadFailed;
+  }
+
+  bytesRead = ::read(memFD, (void *)*buffer, buffer.getLength());
+  if(bytesRead < 0) {
+    DEBUGMSG("error reading child memory: " << strerror(errno) << std::endl);
+    return ret_t::ReadFailed;
+  }
+  else if((size_t)bytesRead < buffer.getLength())
+    return ret_t::TruncatedAccess;
+  else return ret_t::Success;
+}
+
 ret_t Process::write(uintptr_t addr, uint64_t data) const {
   if(!traceable()) return ret_t::InvalidState;
   if(!trace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
   return ret_t::Success;
+}
+
+ret_t Process::writeRegion(uintptr_t addr, const byte_iterator &buffer) const {
+  ssize_t bytesWritten;
+
+  if(!traceable()) return ret_t::InvalidState;
+
+  if(lseek(memFD, addr, SEEK_SET) == -1) {
+    DEBUGMSG("could not seek to address 0x" << std::hex << addr << ": "
+             << strerror(errno) << std::endl);
+    return ret_t::WriteFailed;
+  }
+
+  bytesWritten = ::write(memFD, (void *)*buffer, buffer.getLength());
+  if(bytesWritten < 0) {
+    DEBUGMSG("error writing child memory: " << strerror(errno) << std::endl);
+    return ret_t::WriteFailed;
+  }
+  else if((size_t)bytesWritten < buffer.getLength())
+    return ret_t::TruncatedAccess;
+  else return ret_t::Success;
 }
 
 ret_t Process::getSyscallNumber(long &data) const {

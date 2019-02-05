@@ -35,6 +35,9 @@ public:
     Unknown      /* child has some other status */
   };
 
+  /* Size of stacks allocated by the OS by default */
+  static size_t defaultStackSize;
+
   /**
    * Construct a process object.  Initialize the process' command-line but
    * nothing else; users must call forkAndExec() to start the process.
@@ -44,7 +47,7 @@ public:
    * @param argc number of arguments
    * @param argv arguments for child process to be executed
    */
-  Process(int argc, char **argv) : argc(argc), argv(argv), pid(-1),
+  Process(int argc, char **argv) : argc(argc), argv(argv), pid(-1), memFD(-1),
                                    stackBounds(0, 0), newTaskPid(-1),
                                    status(Ready), exit(0),
                                    stopReason(stop_t::Other),
@@ -207,6 +210,7 @@ public:
   int getArgc() const { return argc; }
   char **getArgv() const { return argv; }
   pid_t getPid() const { return pid; }
+  const urange_t &getStackBounds() const { return stackBounds; }
   status_t getStatus() const { return status; }
   int getUserfaultfd() const { return uffd; }
   size_t getNumThreads() const { return nthreads; }
@@ -256,6 +260,36 @@ public:
   bool stoppedAtSyscall() const { return getSignal() == SIGTRAP; }
 
   /**
+   * Read general purpose registers.
+   * @param regs a register set to be populated with the child's registers
+   * @return a return code describing the outcome
+   */
+  ret_t readRegs(struct user_regs_struct &regs) const;
+
+  /**
+   * Read floating-point registers.
+   * @param regs a floating-point register set to be populated with the child's
+   *             registers
+   * @return a return code describing the outcome
+   */
+  ret_t readFPRegs(struct user_fpregs_struct &regs) const;
+
+  /**
+   * Write general purpose registers.
+   * @param regs a register set with which to set the child's registers
+   * @return a return code describing the outcome
+   */
+  ret_t writeRegs(struct user_regs_struct &regs) const;
+
+  /**
+   * Write floating-point registers.
+   * @param regs a floating-point register set with which to set the child's
+   *             float-point registers
+   * @return a return code describing the outcome
+   */
+  ret_t writeFPRegs(struct user_fpregs_struct &regs) const;
+
+  /**
    * Get the process' current program counter.
    * @return the program counter or 0 if it could not be retrieved
    */
@@ -289,7 +323,7 @@ public:
                         long a4 = 0, long a5 = 0, long a6 = 0) const;
 
   /**
-   * Read 8 bytes of data from a virtual memory address.
+   * Read 8 bytes of data from the child's memory.
    * @param addr the address to read
    * @param data output argument to which bytes will be written
    * @return a return code describing the outcome
@@ -297,12 +331,28 @@ public:
   ret_t read(uintptr_t addr, uint64_t &data) const;
 
   /**
-   * Write 8 bytes of data to a virtual memory address.
+   * Read a region of memory into a buffer.
+   * @param addr virtual address to begin reading
+   * @param buffer data buffer into which data is read
+   * @return a return code describing the outcome
+   */
+  ret_t readRegion(uintptr_t addr, byte_iterator &buffer) const;
+
+  /**
+   * Write 8 bytes of data to the child's memory.
    * @param addr the address to write
    * @param data bytes to write to the address
    * @return a return code describing the outcome
    */
   ret_t write(uintptr_t addr, uint64_t data) const;
+
+  /**
+   * Write a region of memory from a buffer to child memory.
+   * @param addr virtual address to begin writing
+   * @param buffer data buffer of data to be written
+   * @return a return code describing the outcome
+   */
+  ret_t writeRegion(uintptr_t addr, const byte_iterator &buffer) const;
 
   /**
    * Get the system call number.  Caller must ensure Process trace-stopped.  If
@@ -329,15 +379,13 @@ public:
   ret_t stealUserfaultfd();
 
 private:
-  /* Size of stacks allocated by the OS by default */
-  static size_t defaultStackSize;
-
   /* Arguments */
   int argc;
   char **argv;
 
   /* Process information */
   pid_t pid;
+  int memFD; /* File descriptor for child's memory (/proc/<PID>/mem) */
   urange_t stackBounds;
   pid_t newTaskPid; /* new PID of the cloned/forked child */
   status_t status;
@@ -373,6 +421,13 @@ private:
    * @return a return code describing the outcome
    */
   ret_t initializeStack();
+
+  /**
+   * Open a file descriptor which can be used to directly read/write the child
+   * process' address space.
+   * @return a return code describing the outcome
+   */
+  ret_t initializeMemFD();
 
   /**
    * Cure the compel parasite and initialize another for the next compel

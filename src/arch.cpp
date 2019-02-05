@@ -90,6 +90,11 @@ uintptr_t arch::pc(const struct user_regs_struct &regs) { return regs.rip; }
 void arch::pc(struct user_regs_struct &regs, uintptr_t newPC)
 { regs.rip = newPC; }
 
+uintptr_t arch::sp(const struct user_regs_struct &regs) { return regs.rsp; }
+
+void arch::sp(struct user_regs_struct &regs, uintptr_t newSP)
+{ regs.rsp = newSP; }
+
 long arch::syscallNumber(const struct user_regs_struct &regs)
 { return regs.orig_rax; }
 
@@ -486,7 +491,6 @@ public:
   virtual ret_t populateSlots() override {
     int curOffset = 0;
     size_t i;
-    ret_t code = ret_t::Success;
 
     // Add stack slots to the movable region.  During analysis we should have
     // added any restricted slots to their appropriate sections; the remaining
@@ -524,7 +528,7 @@ public:
       }
     }
 
-    return code;
+    return RandomizedFunction::populateSlots();
   }
 
   /**
@@ -622,7 +626,7 @@ private:
       assert(opnd_is_reg(GetOp(instr, 0)) && "Invalid push or pop");
       cs = static_cast<const x86CalleeSaveRegion *>((*region).get());
       randReg = cs->getRandomizedCalleeSaveReg(offset);
-      if(randReg == DR_REG_NULL) return ret_t::BadMetadata;
+      if(randReg == DR_REG_NULL) return ret_t::BadTransformMetadata;
       else if(randReg != DR_REG_XBP) {
         op = opnd_create_reg(randReg);
         SetOp(instr, 0, op);
@@ -638,6 +642,76 @@ RandomizedFunctionPtr
 arch::getRandomizedFunction(const Binary &binary,
                             const function_record *func)
 { return RandomizedFunctionPtr(new x86RandomizedFunction(binary, func)); }
+
+ret_t arch::transformStack(CodeTransformer *CT,
+                           get_rand_info callback,
+                           st_handle meta,
+                           uintptr_t childSrcBase,
+                           uintptr_t bufSrcBase,
+                           uintptr_t childDstBase,
+                           uintptr_t bufDstBase) {
+  struct user_regs_struct src;
+  struct user_fpregs_struct srcFP;
+  struct regset_x86_64 srcST, dstST;
+  Process &proc = CT->getProcess();
+
+  if(!proc.traceable()) return ret_t::InvalidState;
+  if(proc.readRegs(src) != ret_t::Success ||
+     proc.readFPRegs(srcFP) != ret_t::Success)
+    return ret_t::PtraceFailed;
+
+  srcST.rip = (void *)src.rip;
+  srcST.rax = src.rax;
+  srcST.rdx = src.rdx;
+  srcST.rcx = src.rcx;
+  srcST.rbx = src.rbx;
+  srcST.rsi = src.rsi;
+  srcST.rdi = src.rdi;
+  srcST.rbp = src.rbp;
+  srcST.rsp = src.rsp;
+  srcST.r8 = src.r8;
+  srcST.r9 = src.r9;
+  srcST.r10 = src.r10;
+  srcST.r11 = src.r11;
+  srcST.r12 = src.r12;
+  srcST.r13 = src.r13;
+  srcST.r14 = src.r14;
+  srcST.r15 = src.r15;
+  // TODO verify this is copying the right values
+  memcpy(srcST.xmm, srcFP.xmm_space, sizeof(srcST.xmm));
+
+  // Call stack transform API
+  if(st_rewrite_randomized(CT, callback, meta,
+                           &srcST, (void *)childSrcBase, (void *)bufSrcBase,
+                           &dstST, (void *)childDstBase, (void *)bufDstBase))
+    return ret_t::TransformFailed;
+
+  src.rip = (uintptr_t)dstST.rip;
+  src.rax = dstST.rax;
+  src.rdx = dstST.rdx;
+  src.rcx = dstST.rcx;
+  src.rbx = dstST.rbx;
+  src.rsi = dstST.rsi;
+  src.rdi = dstST.rdi;
+  src.rbp = dstST.rbp;
+  src.rsp = dstST.rsp;
+  src.r8 = dstST.r8;
+  src.r9 = dstST.r9;
+  src.r10 = dstST.r10;
+  src.r11 = dstST.r11;
+  src.r12 = dstST.r12;
+  src.r13 = dstST.r13;
+  src.r14 = dstST.r14;
+  src.r15 = dstST.r15;
+  // TODO verify this is copying the right values
+  memcpy(srcFP.xmm_space, dstST.xmm, sizeof(dstST.xmm));
+
+  if(proc.writeRegs(src) != ret_t::Success ||
+     proc.writeFPRegs(srcFP) != ret_t::Success)
+    return ret_t::PtraceFailed;
+
+  return ret_t::Success;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO interface

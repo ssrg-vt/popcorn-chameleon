@@ -126,6 +126,14 @@ bool getFPRegs(pid_t tracee, struct user_fpregs_struct &regs);
 bool setRegs(pid_t tracee, struct user_regs_struct &regs);
 
 /**
+ * Set a tracee's (child) floating-point registers.
+ * @param tracee the tracee's PID
+ * @param regs values for tracee's floating-point registers
+ * @return true if call succeeded, false otherwise
+ */
+bool setFPRegs(pid_t tracee, struct user_fpregs_struct &regs);
+
+/**
  * Read memory from a tracee's (child) address space.
  * @param tracee the tracee's PID
  * @param addr address to read

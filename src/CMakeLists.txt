@@ -85,6 +85,16 @@ if (${POPCORN_REGDESC_DIR} STREQUAL "POPCORN_REGDESC_DIR-NOTFOUND")
                       "installed correctly at ${POPCORN_INSTALL_DIR}")
 endif ()
 
+find_file(POPCORN_STACK_TRANSFORM
+  NAMES libstack-transform.a
+  PATHS ${POPCORN_INSTALL_DIR}/${ARCH}/lib
+)
+if (${POPCORN_STACK_TRANSFORM} STREQUAL "POPCORN_STACK_TRANSFORM-NOTFOUND")
+  message(FATAL_ERROR "Could not find libstack-transform.a for ${ARCH} - "
+                      "please make sure the Popcorn compiler was installed "
+                      "correctly at ${POPCORN_INSTALL_DIR}")
+endif ()
+
 # Create the parasite
 execute_process (
   COMMAND ${COMPEL_BIN_DIR}/compel cflags
@@ -156,9 +166,11 @@ target_compile_options (chameleon PRIVATE
   "-std=c++11"
   "-pthread"
   "-Wall"
-  "-Werror")
+  "-Werror"
+  "-DCHAMELEON")
 target_link_libraries (chameleon
   -lrt
+  ${POPCORN_STACK_TRANSFORM}
   ${ELF}
   ${ZLIB_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}

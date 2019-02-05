@@ -319,12 +319,15 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func)
   : binary(binary), func(func), instrs(nullptr),
-    randomizedFrameSize(UINT32_MAX) {
+    origFrameSize(func->frame_size), randomizedFrameSize(UINT32_MAX) {
   int offset;
   arch::RegType type;
   Binary::slot_iterator si = binary.getStackSlots(func);
 
+  curRand = &_a;
+  prevRand = &_b;
   slots.reserve(si.getLength());
+
   for(; !si.end(); ++si) {
     const stack_slot *slot = *si;
     type = arch::getRegType(slot->base_reg);
@@ -336,10 +339,51 @@ RandomizedFunction::RandomizedFunction(const Binary &binary,
   std::sort(slots.begin(), slots.end(), slotCmp);
 }
 
+/**
+ * Copy slot remapping information from a stack region into another vector.
+ * @param r a stack region
+ * @param slots a vector of slot remapping information
+ * @param curIdx current index of slots at which to start copying
+ * @return the updated index after copying
+ */
+static inline size_t serializeSlots(const StackRegionPtr &r,
+                                    std::vector<SlotMap> &slots,
+                                    size_t curIdx) {
+  const std::vector<SlotMap> &curSlots = (*r).getSlots();
+  memcpy(&slots[curIdx], &curSlots[0], sizeof(SlotMap) * curSlots.size());
+  return curIdx + curSlots.size();
+}
+
+ret_t RandomizedFunction::populateSlots() {
+  // We need to maintain a previous randomization mapping because as we
+  // randomize we rewrite the instructions, clobbering the original offsets.
+  // Start by sizing the slot remapping arrays.
+  size_t count = 0;
+  for(auto r = regions.begin(); r != regions.end(); r++)
+    count += (*r)->getSlots().size();
+  _a.resize(count);
+  _b.resize(count);
+
+  // Now add the slots to the current array to bootstrap
+  count = 0;
+  for(auto r = regions.begin(); r != regions.end(); r++)
+    count = serializeSlots(*r, *curRand, count);
+
+  // Because the child classes are lazy, set the "randomized" offsets to the
+  // original offsets to perform translations for the initial randomization
+  for(count = 0; count < curRand->size(); count++) {
+    auto &ref = curRand->at(count);
+    ref.randomized = ref.original;
+  }
+  std::sort(curRand->begin(), curRand->end(), slotMapCmp);
+
+  return ret_t::Success;
+}
+
 ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
+  size_t i;
   int offset = 0;
   RandUtil ru(seed, maxPadding);
-  randomizedFrameSize = UINT32_MAX;
 
   DEBUG(
     Binary::slot_iterator si = binary.getStackSlots(func);
@@ -362,10 +406,22 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
     ui.reset();
   )
 
+  // Move current mappings to previous so we can serialize the new mappings
+  // into the current slot remapping vector
+  std::vector<SlotMap> *tmp = prevRand;
+  prevRand = curRand;
+  curRand = tmp;
+  i = 0;
+
   for(auto r = regions.begin(); r != regions.end(); r++) {
     (*r)->randomize(offset, ru);
     offset = (*r)->getRandomizedRegionOffset();
+
+    // Serialize the region's slots into the global vector to be passed to the
+    // state transformation runtime
+    i = serializeSlots(*r, *curRand, i);
   }
+  origFrameSize = randomizedFrameSize;
   randomizedFrameSize = regions.back()->getRandomizedRegionOffset();
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
 
@@ -374,10 +430,24 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   return ret_t::Success;
 }
 
+static bool slotMapContainsRand(const SlotMap *slot, int offset)
+{ return CONTAINS_BELOW(offset, slot->randomized, slot->size); }
+
+static bool lessThanSlotMapRand(const SlotMap *slot, int offset)
+{ return offset < slot->randomized; }
+
 int RandomizedFunction::getRandomizedOffset(int orig) const {
-  const StackRegionPtr *region = findRegion(orig);
-  if(region) return (*region)->getRandomizedOffset(orig);
-  else return 0;
+  int offset = INT32_MAX;
+  ssize_t idx;
+
+  idx = findRight<SlotMap, int, slotMapContainsRand, lessThanSlotMapRand>
+                 (&prevRand->at(0), prevRand->size(), orig);
+  if(idx >= 0 && slotMapContainsRand(&prevRand->at(idx), orig)) {
+    assert(prevRand->at(idx).original == curRand->at(idx).original &&
+           "Invalid slot remapping metadata");
+    offset = orig - prevRand->at(idx).randomized + curRand->at(idx).randomized;
+  }
+  return offset;
 }
 
 /**

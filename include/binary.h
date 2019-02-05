@@ -215,6 +215,7 @@ public:
   /**
    * Field getters - return what you ask for.
    */
+  const char *getFilename() const { return filename; }
   const Section &getCodeSection() const { return codeSection; }
   const Segment &getCodeSegment() const { return codeSegment; }
 

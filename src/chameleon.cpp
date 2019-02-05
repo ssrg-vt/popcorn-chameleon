@@ -374,7 +374,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     if(randomize) {
       code = CT.rerandomize();
       if(code != ret_t::Success) {
-        if(code == ret_t::NoMetadata) {
+        if(code == ret_t::NoTransformMetadata) {
            WARN(pid << ": skipping re-randomization, no metadata at 0x" << hex
                 << pc << endl);
         }

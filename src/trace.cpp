@@ -80,6 +80,11 @@ bool trace::setRegs(pid_t tracee,  struct user_regs_struct &regs) {
   else return false;
 }
 
+bool trace::setFPRegs(pid_t tracee, struct user_fpregs_struct &regs) {
+  if(ptrace(PTRACE_SETFPREGS, tracee, nullptr, &regs) == 0) return true;
+  else return false;
+}
+
 bool trace::getMem(pid_t tracee, uintptr_t addr, uint64_t &data) {
   // From the ptrace manpage:
   //   On error, all requests return -1, and errno is set appropriately.  Since

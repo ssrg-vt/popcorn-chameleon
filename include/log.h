@@ -38,7 +38,7 @@ extern pthread_mutex_t logLock;
   do { \
     pthread_mutex_lock(&logLock); \
     std::cerr << "[ " << std::right << std::setw(20) << __FILENAME__ << ":" \
-              << std::left << std::setw(3) << __LINE__ << " ] DEBUG: " \
+              << std::left << std::setw(4) << __LINE__ << " ] DEBUG: " \
               << __VA_ARGS__ << std::dec; \
     pthread_mutex_unlock(&logLock); \
   } while(0);
@@ -54,7 +54,7 @@ extern pthread_mutex_t logLock;
   do { \
     pthread_mutex_lock(&logLock); \
     std::cerr << "[ " << std::right << std::setw(20) << __FILENAME__ << ":" \
-              << std::left << std::setw(3) << __LINE__ << " ] DEBUG: " \
+              << std::left << std::setw(4) << __LINE__ << " ] DEBUG: " \
               << msg << std::dec; \
     instr_disassemble(GLOBAL_DCONTEXT, instr, STDERR); \
     std::cerr << std::endl; \
