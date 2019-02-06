@@ -482,6 +482,7 @@ int main(int argc, char **argv) {
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
+  CodeTransformer::initialize();
   CodeTransformer transformer(child, *binary);
   code = transformer.initialize(randomize, true);
   if(code != ret_t::Success)

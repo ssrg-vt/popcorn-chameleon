@@ -12,6 +12,8 @@ using namespace chameleon;
 // Fault handling
 ///////////////////////////////////////////////////////////////////////////////
 
+static std::vector<unsigned char> intPage(PAGESZ);
+
 /**
  * Handle a fault, including mapping in the correct data and randomizing any
  * code pieces.
@@ -47,7 +49,8 @@ static inline ret_t handleFault(CodeTransformer *CT,
     nanosleep(&time, nullptr);
   )
 
-  if(!(data = CT->zeroCopy(pageAddr))) {
+  if(CT->shouldServeIntPage()) data = (uintptr_t)&intPage[0];
+  else if(!(data = CT->zeroCopy(pageAddr))) {
     if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success) return code;
     data = (uintptr_t)&pageBuf[0];
   }
@@ -116,6 +119,8 @@ static void *handleFaultsAsync(void *arg) {
 ///////////////////////////////////////////////////////////////////////////////
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
+
+void CodeTransformer::initialize() { arch::setInterruptInstructions(intPage); }
 
 ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   ret_t retcode;
@@ -265,7 +270,7 @@ ret_t CodeTransformer::rerandomize() {
   code = proc.writeRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
-  //if((code = dropCode()) != ret_t::Success) return code;
+  if((code = dropCode()) != ret_t::Success) return code;
 
   t.end(true);
   numRandomizations++;
@@ -517,34 +522,47 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
 
 ret_t CodeTransformer::dropCode() {
   long ret;
-  Timer t;
   struct parasite_ctl *parasite = proc.getParasiteCtl();
   ret_t code;
 
   assert(parasite && "Invalid parasite control handle");
 
-  t.start();
   DEBUGMSG(proc.getPid() << ": dropping code pages 0x" << std::hex
            << PAGE_DOWN(codeStart) << " - 0x" << PAGE_UP(codeEnd)
            << std::endl);
 
+  // TODO BANDAGE! compel's APIs restore the thread context from when it was
+  // initialized, not from when we do a syscall
+  struct user_regs_struct regs;
+  if((code = proc.readRegs(regs)) != ret_t::Success) return code;
+
   // The child executes madvise(), which drops the code pages.  When returning
   // to userspace, the child causes a page fault.  Because the code section has
-  // been changed to use anonymous private pages, the kernel serves a zero page
-  // and the child immediately segfaults after the page fault handling, causing
-  // parasite::syscall() to return an error; just mask it.
+  // been changed to use anonymous private pages, one of two things happens:
+  //
+  // 1. If we haven't yet attached a userfaultfd, the kernel serves a zero page
+  // 2. If we have attached a userfaultfd, we get to handle the fault
+  //
+  // Regardless, we want the child to stop directly after the call.  In the
+  // first case, the child will segfault, which we can mask.  In order to make
+  // the second case look like the first, set a flag informing the fault
+  // handling thread to serve a zero page similar to the first case.  Because
+  // the child immediately segfaults after the page fault handling,
+  // parasite::syscall() returns an error; just ignore it.
+  __atomic_store_n(&serveInt, true, __ATOMIC_RELEASE);
   parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
                     PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
   if(ret) return ret_t::DropCodeFailed;
+  __atomic_store_n(&serveInt, false, __ATOMIC_RELEASE);
+
+  // TODO BANDAGE! compel's APIs restore the thread context from when it was
+  // initialized, not from when we do a syscall
+  if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
 
   // As previously mentioned, the kernel served a zero page; manually rewrite
   // it with actual instructions.
   code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
   if(code != ret_t::Success) return code;
-
-  t.end();
-  INFO(proc.getPid() << ": dropping code pages: " << t.elapsed(Timer::Micro)
-       << " us" << std::endl);
 
   return ret_t::Success;
 }

@@ -26,6 +26,9 @@ uint64_t arch::getInterruptInst(uint64_t &mask, size_t &size) {
   return 0xcc;
 }
 
+void arch::setInterruptInstructions(std::vector<unsigned char> &buf)
+{ memset(&buf[0], 0xcc, buf.size()); }
+
 ///////////////////////////////////////////////////////////////////////////////
 // Register information & handling
 ///////////////////////////////////////////////////////////////////////////////

@@ -32,6 +32,9 @@ namespace chameleon {
 
 class CodeTransformer {
 public:
+  /* Initialize data required by all CodeTransformer objects */
+  static void initialize();
+
   /**
    * Construct a code transformer for a given process.  Does not initialize the
    * transformer; users must call initialize().
@@ -44,7 +47,8 @@ public:
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
       slotPadding(slotPadding), faultHandlerPid(-1), faultHandlerExit(false),
-      batchedFaults(batchedFaults), numRandomizations(0), rerandomizeTime(0) {}
+      batchedFaults(batchedFaults), serveInt(false), numRandomizations(0),
+      rerandomizeTime(0) {}
   CodeTransformer() = delete;
 
   /**
@@ -105,26 +109,6 @@ public:
   RandomizedFunction *getRandomizedFunctionInfo(uintptr_t pc) const;
 
   /**
-   * Return the address of a buffer which can be directly passed to the kernel
-   * to handle a fault for an address, or 0 if none can be used for zero-copy.
-   *
-   * @param address faulting page address
-   * @return address of page buffer used to handle fault or 0 if zero-copy is
-   *         not possible
-   */
-  uintptr_t zeroCopy(uintptr_t address) const
-  { return codeWindow.zeroCopy(address); }
-
-  /**
-   * Project the transformed code into the buffer.
-   * @param address page address at which to fill
-   * @param buffer a buffer into which the MemoryRegion's contents are copied
-   * @return a return code describing the outcome
-   */
-  ret_t project(uintptr_t address, std::vector<char> &buffer) const
-  { return codeWindow.project(address, buffer); }
-
-  /**
    * Return the userfaultfd file descriptor for the attached process.
    * @return the userfaultfd file descriptor or -1 if there was an error
    */
@@ -143,19 +127,6 @@ public:
    * @return the fault handling thread's PID or -1 if not initialized
    */
   pid_t getFaultHandlerPid() const { return faultHandlerPid; }
-
-  /**
-   * Set the PID of the fault handling thread.  Should only be called from the
-   * fault handling thread.
-   * @param pid the fault handling thread's PID
-   */
-  void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
-
-  /**
-   * Return whether the fault handling thread should exit.
-   * @return true if the fault handler should exit, false otherwise
-   */
-  bool shouldFaultHandlerExit() const { return faultHandlerExit; }
 
   /**
    * DynamoRIO operand size in bytes.
@@ -197,6 +168,50 @@ public:
                                         arch::RegType reg,
                                         int16_t offset);
 
+  /* The following APIs should *only* be called by the fault-handling thread */
+
+  /**
+   * Return the address of a buffer which can be directly passed to the kernel
+   * to handle a fault for an address, or 0 if none can be used for zero-copy.
+   *
+   * @param address faulting page address
+   * @return address of page buffer used to handle fault or 0 if zero-copy is
+   *         not possible
+   */
+  uintptr_t zeroCopy(uintptr_t address) const
+  { return codeWindow.zeroCopy(address); }
+
+  /**
+   * Project the transformed code into the buffer.
+   * @param address page address at which to fill
+   * @param buffer a buffer into which the MemoryRegion's contents are copied
+   * @return a return code describing the outcome
+   */
+  ret_t project(uintptr_t address, std::vector<char> &buffer) const
+  { return codeWindow.project(address, buffer); }
+
+  /**
+   * Set the PID of the fault handling thread.  Should only be called from the
+   * fault handling thread.
+   * @param pid the fault handling thread's PID
+   */
+  void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
+
+  /**
+   * Return whether the fault handling thread should exit.
+   * @return true if the fault handler should exit, false otherwise
+   */
+  bool shouldFaultHandlerExit() const { return faultHandlerExit; }
+
+  /**
+   * Return whether the fault handling thread should serve a page filled with
+   * interrupt instructions.
+   *
+   * @return true if thread should serve a interrupt page or false otherwise
+   */
+  bool shouldServeIntPage() const
+  { return __atomic_load_n(&serveInt, __ATOMIC_ACQUIRE); }
+
 private:
   /* A previously instantiated process */
   Process &proc;
@@ -232,6 +247,7 @@ private:
   pid_t faultHandlerPid;
   bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
+  bool serveInt; /* Whether to serve an interrupt page */
 
   /* Number of and total time spent in re-randomization */
   size_t numRandomizations;

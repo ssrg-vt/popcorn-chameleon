@@ -61,6 +61,12 @@ bool supportedArch(uint16_t arch);
  */
 uint64_t getInterruptInst(uint64_t &mask, size_t &size);
 
+/**
+ * Fill a buffer with interrupt instructions.
+ * @param buf a buffer to be filled with interrupt instructions
+ */
+void setInterruptInstructions(std::vector<unsigned char> &buf);
+
 ///////////////////////////////////////////////////////////////////////////////
 // Register information & handling
 ///////////////////////////////////////////////////////////////////////////////
