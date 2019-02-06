@@ -204,70 +204,24 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
     cinfo.num_new_slots = newSlots.size();
     cinfo.new_rand_slots = (const slotmap *)&newSlots[0];
   }
+  else memset(&cinfo, 0, sizeof(cinfo));
 
   return cinfo;
 }
 
 ret_t CodeTransformer::rerandomize() {
-  typedef chameleon::RandomizedFunction::TransformType TransformType;
-  uintptr_t pc, sp, rawBuf, mid, childSrcBase,
-            bufSrcBase, childDstBase, bufDstBase;
-  size_t interruptSize, stackSize;
-  RandomizedFunction *info;
-  const function_record *fr;
-  std::unordered_map<uintptr_t, uint64_t> origData;
-  TransformType type;
+  uintptr_t sp, rawBuf, mid, childSrcBase, bufSrcBase,
+            childDstBase, bufDstBase;
+  size_t stackSize;
   ret_t code;
   Timer t;
-#ifdef DEBUG_BUILD
-  pid_t cpid = proc.getPid();
-#endif
 
   assert(proc.traceable() && "Invalid process state");
   t.start();
 
-  // TODO wait for code re-randomizer to finish & drop the code
-
-  if(!(pc = proc.getPC())) return ret_t::PtraceFailed;
-  info = getRandomizedFunctionInfo(pc);
-  if(!info) return ret_t::NoTransformMetadata;
-  fr = info->getFunctionRecord();
-
-  // Make sure the child is at a transformation point.  Either it's already
-  // there (lucky!) or we have to forcibly advance it to one.  All
-  // transformation points should be at the point where a function has just
-  // been called or is returning, allowing us to bootstrap transformation.
-  if(pc != fr->addr &&
-     (type = info->getTransformationType(pc)) == TransformType::None) {
-    DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
-                     "function at 0x" << std::hex << fr->addr << std::endl);
-
-    // Insert traps at transformation breakpoints & kick child towards them
-    code = sprayTransformBreakpoints(info, origData, interruptSize);
-    if(code != ret_t::Success) return code;
-
-    t.end(true);
-    if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
-    t.start();
-
-    // Figure out where the child stopped and restore the original instructions
-    if(code != ret_t::Success) return code;
-    else if(!proc.traceable()) return ret_t::InvalidState;
-    pc = proc.getPC() - interruptSize;
-    type = info->getTransformationType(pc);
-    if(type == TransformType::None) return ret_t::TransformFailed;
-    if((code = proc.setPC(pc)) != ret_t::Success) return code;
-    code = restoreTransformBreakpoints(info, origData);
-    if(code != ret_t::Success) return code;
-
-    DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
-                     << std::hex << pc << std::endl);
-
-    // If we stopped at a call instruction, walk it into the called function
-    // in preparation for transformation
-    if(type == TransformType::CallSite)
-      if((code = proc.singleStep()) != ret_t::Success) return code;
-  }
+  // We only have metadata at transformation points, advance the child to a
+  // transformation point where the stack transformation can bootstrap.
+  if((code = advanceToTransformationPoint(t)) != ret_t::Success) return code;
 
   // Read in the child's current stack.  We currently divide the stack into 2
   // halves and rewrite from one half to the other.
@@ -292,17 +246,26 @@ ret_t CodeTransformer::rerandomize() {
     childDstBase = stackBounds.second;
     stackSize = mid - sp;
   }
-  byte_iterator stackBuf(stackMem.get() + (sp - stackBounds.first), stackSize);
+  byte_iterator stackBuf((unsigned char *)rawBuf + (sp - stackBounds.first),
+                         stackSize);
   code = proc.readRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
+
+  // TODO wait for code re-randomizer to finish
 
   // Transform the stack, including switching to the transformed stack
   code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
                               childSrcBase, bufSrcBase,
-                              childDstBase, bufDstBase);
+                              childDstBase, bufDstBase, sp);
   if(code != ret_t::Success) return ret_t::TransformFailed;
 
-  // TODO write the transformed stack into the child's memory
+  stackSize = childDstBase - sp;
+  stackBuf = byte_iterator((unsigned char *)rawBuf + (sp - stackBounds.first),
+                           stackSize);
+  code = proc.writeRegion(sp, stackBuf);
+  if(code != ret_t::Success) return code;
+
+  //if((code = dropCode()) != ret_t::Success) return code;
 
   t.end(true);
   numRandomizations++;
@@ -398,6 +361,63 @@ CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
   return code;
 }
 
+ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
+  typedef chameleon::RandomizedFunction::TransformType TransformType;
+  uintptr_t pc;
+  size_t interruptSize;
+  const RandomizedFunction *info;
+  const function_record *fr;
+  TransformType type;
+  std::unordered_map<uintptr_t, uint64_t> origData;
+  ret_t code;
+#ifdef DEBUG_BUILD
+  pid_t cpid = proc.getPid();
+#endif
+
+  if(!(pc = proc.getPC())) return ret_t::PtraceFailed;
+  info = getRandomizedFunctionInfo(pc);
+  if(!info) return ret_t::NoTransformMetadata;
+  fr = info->getFunctionRecord();
+
+  // Make sure the child is at a transformation point.  Either it's already
+  // there (lucky!) or we have to forcibly advance it to one.  All
+  // transformation points should be at the point where a function has just
+  // been called or is returning, allowing us to bootstrap transformation.
+  if(pc != fr->addr &&
+     (type = info->getTransformationType(pc)) == TransformType::None) {
+    DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
+                     "function at 0x" << std::hex << fr->addr << std::endl);
+
+    // Insert traps at transformation breakpoints & kick child towards them
+    code = sprayTransformBreakpoints(info, origData, interruptSize);
+    if(code != ret_t::Success) return code;
+
+    t.end(true);
+    if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
+    t.start();
+
+    // Figure out where the child stopped and restore the original instructions
+    if(code != ret_t::Success) return code;
+    else if(!proc.traceable()) return ret_t::InvalidState;
+    pc = proc.getPC() - interruptSize;
+    type = info->getTransformationType(pc);
+    if(type == TransformType::None) return ret_t::TransformFailed;
+    if((code = proc.setPC(pc)) != ret_t::Success) return code;
+    code = restoreTransformBreakpoints(info, origData);
+    if(code != ret_t::Success) return code;
+
+    DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
+                     << std::hex << pc << std::endl);
+
+    // If we stopped at a call instruction, walk it into the called function
+    // in preparation for transformation
+    if(type == TransformType::CallSite)
+      if((code = proc.singleStep()) != ret_t::Success) return code;
+  }
+
+  return ret_t::Success;
+}
+
 instr_t *
 CodeTransformer::getInstruction(uintptr_t pc, RandomizedFunction *info) const {
   uintptr_t start;
@@ -420,7 +440,7 @@ CodeTransformer::getInstruction(uintptr_t pc, RandomizedFunction *info) const {
 }
 
 ret_t CodeTransformer::writePage(uintptr_t start) {
-  uint64_t *pageData;
+  byte *pageData;
   std::vector<char> pageBuf;
   ret_t code;
 #ifdef DEBUG_BUILD
@@ -431,17 +451,14 @@ ret_t CodeTransformer::writePage(uintptr_t start) {
   assert(parasite && "Invalid parasite control handle");
 
   start = PAGE_DOWN(start);
-  if(!(pageData = (uint64_t *)zeroCopy(start))) {
+  if(!(pageData = (byte *)zeroCopy(start))) {
     pageBuf.resize(PAGESZ);
     if((code = project(start, pageBuf)) != ret_t::Success) return code;
-    pageData = (uint64_t *)&pageBuf[0];
+    pageData = (byte *)&pageBuf[0];
   }
 
-  for(size_t i = 0; i < PAGESZ / sizeof(uint64_t);
-      i++, start += sizeof(uint64_t)) {
-    code = proc.write(start, pageData[i]);
-    if(code != ret_t::Success) return code;
-  }
+  byte_iterator buf(pageData, PAGESZ);
+  if((code = proc.writeRegion(start, buf)) != ret_t::Success) return code;
 
   DEBUGMSG(proc.getPid() << ": manually rewrote page @ 0x" << std::hex
            << origStart << std::endl);

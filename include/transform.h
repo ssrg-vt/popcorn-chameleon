@@ -263,6 +263,13 @@ private:
                 const std::unordered_map<uintptr_t, uint64_t> &origData) const;
 
   /**
+   * Advance the child process to a transformation point.
+   * @param t a running timer
+   * @return a return code describing the outcome
+   */
+  ret_t advanceToTransformationPoint(Timer &t) const;
+
+  /**
    * Get the IR-level instruction for a given program counter value, enclosed
    * in the function represented by the specified randomization information.
    * The instruction is part of an instrlist_t for the enclosing function.
@@ -275,7 +282,7 @@ private:
   instr_t *getInstruction(uintptr_t pc, RandomizedFunction *info) const;
 
   /**
-   * Write a page using the ptrace interface rather than via userfaultfd.
+   * Write a page using the process interface rather than via userfaultfd.
    * Needed as compel may touch pages during parasite operation; trying to
    * correctly synchronize compel and userfaultfd to serve what's needed
    * without causing further problems is not worth the effort.

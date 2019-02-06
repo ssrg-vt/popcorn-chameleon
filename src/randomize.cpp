@@ -319,7 +319,7 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func)
   : binary(binary), func(func), instrs(nullptr),
-    origFrameSize(func->frame_size), randomizedFrameSize(UINT32_MAX) {
+    origFrameSize(func->frame_size), randomizedFrameSize(func->frame_size) {
   int offset;
   arch::RegType type;
   Binary::slot_iterator si = binary.getStackSlots(func);

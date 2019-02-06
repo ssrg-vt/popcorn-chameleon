@@ -201,6 +201,7 @@ RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
  *                     space
  * @param bufDstBase address of destination stack's base in chameleon's address
  *                   space
+ * @param newSP output argument set to top of transformed stack
  * @return a return code describing the outcome
  */
 ret_t transformStack(CodeTransformer *CT,
@@ -209,7 +210,8 @@ ret_t transformStack(CodeTransformer *CT,
                      uintptr_t childSrcBase,
                      uintptr_t bufSrcBase,
                      uintptr_t childDstBase,
-                     uintptr_t bufDstBase);
+                     uintptr_t bufDstBase,
+                     uintptr_t &newSp);
 
 ///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO interface

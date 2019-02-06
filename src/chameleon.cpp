@@ -335,7 +335,10 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     )
 
     switch(child.getStopReason()) {
-    default: code = ret_t::Success; break;
+    default:
+      DEBUG_VERBOSE(if(child.getSignal() != SIGTRAP) child.dumpRegs();)
+      code = ret_t::Success;
+      break;
     case stop_t::Exec:
       // TODO implement creating a new Binary and remapping code section
       ERROR(pid << ": could not handle execve(): "

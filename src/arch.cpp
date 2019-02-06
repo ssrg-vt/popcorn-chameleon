@@ -649,16 +649,18 @@ ret_t arch::transformStack(CodeTransformer *CT,
                            uintptr_t childSrcBase,
                            uintptr_t bufSrcBase,
                            uintptr_t childDstBase,
-                           uintptr_t bufDstBase) {
+                           uintptr_t bufDstBase,
+                           uintptr_t &sp) {
   struct user_regs_struct src;
-  struct user_fpregs_struct srcFP;
   struct regset_x86_64 srcST, dstST;
   Process &proc = CT->getProcess();
 
+  // Note: don't mess with FP registers - they don't contain transformable
+  // content (e.g., pointers that must be fixed up) and their locations are not
+  // being randomized.
+
   if(!proc.traceable()) return ret_t::InvalidState;
-  if(proc.readRegs(src) != ret_t::Success ||
-     proc.readFPRegs(srcFP) != ret_t::Success)
-    return ret_t::PtraceFailed;
+  if(proc.readRegs(src) != ret_t::Success) return ret_t::PtraceFailed;
 
   srcST.rip = (void *)src.rip;
   srcST.rax = src.rax;
@@ -677,8 +679,6 @@ ret_t arch::transformStack(CodeTransformer *CT,
   srcST.r13 = src.r13;
   srcST.r14 = src.r14;
   srcST.r15 = src.r15;
-  // TODO verify this is copying the right values
-  memcpy(srcST.xmm, srcFP.xmm_space, sizeof(srcST.xmm));
 
   // Call stack transform API
   if(st_rewrite_randomized(CT, callback, meta,
@@ -703,13 +703,10 @@ ret_t arch::transformStack(CodeTransformer *CT,
   src.r13 = dstST.r13;
   src.r14 = dstST.r14;
   src.r15 = dstST.r15;
-  // TODO verify this is copying the right values
-  memcpy(srcFP.xmm_space, dstST.xmm, sizeof(dstST.xmm));
 
-  if(proc.writeRegs(src) != ret_t::Success ||
-     proc.writeFPRegs(srcFP) != ret_t::Success)
-    return ret_t::PtraceFailed;
+  if(proc.writeRegs(src) != ret_t::Success) return ret_t::PtraceFailed;
 
+  sp = src.rsp;
   return ret_t::Success;
 }
 
