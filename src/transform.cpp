@@ -1106,8 +1106,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 }
 
 ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
-  Timer t;
   ret_t code;
+#ifdef DEBUG_BUILD
+  Timer t;
+#endif
 
   for(auto &it : funcMaps) {
     RandomizedFunctionPtr &info = it.second;
@@ -1117,18 +1119,17 @@ ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
       DEBUGMSG("randomizing function @ " << std::hex << func->addr
                << ", size = " << std::dec << func->code_size << std::endl);
     )
-    t.start();
+    DEBUG_VERBOSE(t.start());
 
     code = randomizeFunction(info, buffer);
     if(code != ret_t::Success) return code;
 
-    t.end(true);
-    DEBUGMSG_VERBOSE("randomizing function took " << t.elapsed(Timer::Micro)
-                     << " us" << std::endl);
+    DEBUG_VERBOSE(
+      t.end(true);
+      DEBUGMSG_VERBOSE("randomizing function took " << t.elapsed(Timer::Micro)
+                       << " us" << std::endl);
+    )
   }
-
-  INFO(proc.getPid() << ": randomization: " << t.totalElapsed(Timer::Micro)
-       << " us" << std::endl);
 
   return ret_t::Success;
 }

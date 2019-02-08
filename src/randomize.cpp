@@ -423,6 +423,7 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
 
   i = 0;
   for(auto r = regions.begin(); r != regions.end(); r++) {
+    offset = std::max(offset, (*r)->getMinRandOffset());
     (*r)->randomize(offset, ru);
     offset = (*r)->getRandomizedRegionOffset();
 

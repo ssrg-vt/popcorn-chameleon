@@ -411,6 +411,7 @@ public:
     regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
     regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited));
     regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
+    regions.back()->setMinRandOffset(144); // Don't spill into FP-limited
     regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
   }
@@ -788,7 +789,8 @@ int32_t arch::getFrameUpdateSize(instr_t *instr) {
   case OP_call: case OP_call_ind: case OP_call_far: case OP_call_far_ind:
   case OP_ret:  case OP_ret_far: return 0;
 
-  default: WARN("Unhandled update to stack pointer" << std::endl); return 0;
+  default:
+    DEBUG(WARN("Unhandled update to stack pointer" << std::endl)); return 0;
   }
 }
 

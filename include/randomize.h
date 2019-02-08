@@ -126,7 +126,7 @@ class StackRegion {
 public:
   StackRegion(int32_t flags = 0)
     : flags(flags), origOffset(INT32_MAX), randomizedOffset(INT32_MAX),
-      origSize(0), randomizedSize(0) {}
+      origSize(0), randomizedSize(0), minRandOffset(0) {}
 
   /**
    * Add a slot to the region.
@@ -213,6 +213,8 @@ public:
   size_t getOriginalRegionSize() const { return origSize; }
   int32_t getRandomizedRegionOffset() const { return randomizedOffset; }
   size_t getRandomizedRegionSize() const { return randomizedSize; }
+  void setMinRandOffset(int32_t offset) { this->minRandOffset = offset; }
+  int32_t getMinRandOffset() const { return minRandOffset; }
   size_t numSlots() const { return slots.size(); }
   const std::vector<SlotMap> &getSlots() const { return slots; }
 
@@ -229,6 +231,9 @@ protected:
    */
   int32_t origOffset, randomizedOffset;
   uint32_t origSize, randomizedSize;
+
+  /* Restrictions on beginning and ending offsets of region */
+  int32_t minRandOffset;
 
   ///////////////////////////////////////////////////////////////////////////
   // Note: maintain information as vectors because we interface with C and //
