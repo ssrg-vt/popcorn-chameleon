@@ -58,6 +58,7 @@ namespace chameleon {
   X(ChildHandlerSetupFailed, "creating child handler thread failed") \
   X(ChildHandlerCleanupFailed, "cleaning up child handler thread failed") \
   X(FaultHandlerFailed, "could not start fault handling thread") \
+  X(ScramblerFailed, "could not start code randomization thread") \
   X(UffdHandshakeFailed, "userfaultfd API handshake failed") \
   X(UffdRegisterFailed, "userfaultfd register region failed") \
   X(UffdCopyFailed, "userfaultfd copy failed") \

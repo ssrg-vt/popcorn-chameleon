@@ -47,8 +47,8 @@ public:
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
       slotPadding(slotPadding), faultHandlerPid(-1), faultHandlerExit(false),
-      batchedFaults(batchedFaults), serveInt(false), numRandomizations(0),
-      rerandomizeTime(0) {}
+      batchedFaults(batchedFaults), serveInt(false), scramblerPid(-1),
+      scramblerExit(false), numRandomizations(0), rerandomizeTime(0) {}
   CodeTransformer() = delete;
 
   /**
@@ -99,6 +99,12 @@ public:
   pid_t getProcessPid() const { return proc.getPid(); }
 
   /**
+   * Return the transformer's code buffer.
+   * @return the memory window object representing the code segment
+   */
+  const MemoryWindow &getCodeWindow() const { return codeWindow; }
+
+  /**
    * Get the randomization information for the function enclosing a given
    * program counter value.
    *
@@ -127,6 +133,13 @@ public:
    * @return the fault handling thread's PID or -1 if not initialized
    */
   pid_t getFaultHandlerPid() const { return faultHandlerPid; }
+
+  /**
+   * Return the code re-randomization ("scrambler") thread's PID.  Only valid
+   * after successful calls to initialize().
+   * @return the scrambler thread's PID or -1 if not initialized
+   */
+  pid_t getScramblerPid() const { return scramblerPid; }
 
   /**
    * DynamoRIO operand size in bytes.
@@ -167,6 +180,13 @@ public:
   static int32_t slotOffsetFromRegister(uint32_t frameSize,
                                         arch::RegType reg,
                                         int16_t offset);
+
+  /**
+   * Randomize all functions contained in the memory window.
+   * @param buffer buffer into which randomized code will be written
+   * @return a return code describing the outcome
+   */
+  ret_t randomizeFunctions(MemoryWindow &buffer);
 
   /* The following APIs should *only* be called by the fault-handling thread */
 
@@ -212,6 +232,40 @@ public:
   bool shouldServeIntPage() const
   { return __atomic_load_n(&serveInt, __ATOMIC_ACQUIRE); }
 
+  /* The following APIs should *only* be called by the scrambling thread */
+
+  /**
+   * Return the transformer's code buffer for the next randomized version.
+   * @return the memory window object representing the code segment
+   */
+  MemoryWindow &getNextCodeWindow() { return nextCodeWindow; }
+
+  /**
+   * Set the scrambler thread's PID.
+   * @param pid the scrambler thread's PID
+   */
+  void setScramberPid(pid_t pid) { scramblerPid = pid; }
+
+  /**
+   * Return whether the scrambler thread should exit.
+   * @return true if the scrambler thread should exit or false otherwise
+   */
+  bool shouldScramblerExit() const { return scramblerExit; }
+
+  /**
+   * Get the semaphore signaling the scrambler thread should generate a new
+   * randomized version of the code.
+   * @return the semaphore signaling to randomized code
+   */
+  sem_t *getScrambleSem() { return &scramble; }
+
+  /**
+   * Get the semaphore used by the scrambler thread to signal that it has
+   * finished a randomization.
+   * @return the semaphore signaling randomization has finished
+   */
+  sem_t *getFinishedScrambleSem() { return &finishedScrambling; }
+
 private:
   /* A previously instantiated process */
   Process &proc;
@@ -223,7 +277,7 @@ private:
   uintptr_t codeStart, codeEnd;
 
   /* An abstract view of the code segment, used to randomize code */
-  MemoryWindow codeWindow;
+  MemoryWindow codeWindow, nextCodeWindow;
 
   /* Child stack transformation buffer & metadata */
   std::unique_ptr<unsigned char> stackMem;
@@ -242,14 +296,19 @@ private:
   // Hence we can't check if it's a true RNG from the entropy() function.
   std::random_device rng;
 
-  /* Thread responsible for reading & responding to page faults */
+  /* Reading & responding to page faults */
   pthread_t faultHandler;
   pid_t faultHandlerPid;
   bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
   bool serveInt; /* Whether to serve an interrupt page */
 
-  /* Number of and total time spent in re-randomization */
+  /* Re-randomization */
+  pthread_t scrambler;
+  pid_t scramblerPid;
+  bool scramblerExit;
+  sem_t scramble, /* Begin generating a new set of randomized code */
+        finishedScrambling; /* Scrambler has finished randomizing */
   size_t numRandomizations;
   uint64_t rerandomizeTime;
 
@@ -398,16 +457,10 @@ private:
   /**
    * Randomize and re-encode a function.
    * @param info randomization information for a function
+   * @param buffer buffer into which randomized code will be written
    * @return a return code describing the outcome
    */
-  ret_t randomizeFunction(RandomizedFunctionPtr &info);
-
-  /**
-   * Load the code segment from disk into the memory window and randomize
-   * all functions.
-   * @return a return code describing the outcome
-   */
-  ret_t randomizeFunctions();
+  ret_t randomizeFunction(RandomizedFunctionPtr &info, MemoryWindow &buffer);
 };
 
 }

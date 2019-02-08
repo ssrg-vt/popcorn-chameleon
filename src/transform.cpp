@@ -109,9 +109,52 @@ static void *handleFaultsAsync(void *arg) {
   delete [] msg;
 
   DEBUGMSG("fault handler " << me << " exiting" << std::endl);
-  INFO(cpid << ": fault handling: "
-       << t.totalElapsed(Timer::Micro) << " us for " << handled << " fault(s)"
-       << std::endl);
+  INFO(cpid << ": fault handling: " << t.totalElapsed(Timer::Micro)
+       << " us for " << handled << " fault(s)" << std::endl);
+
+  return nullptr;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Re-randomizing code
+///////////////////////////////////////////////////////////////////////////////
+
+void *randomizeCodeAsync(void *arg) {
+  size_t scrambles = 0;
+  CodeTransformer *CT = (CodeTransformer *)arg;
+  sem_t *randomize = CT->getScrambleSem(),
+        *finished = CT->getFinishedScrambleSem();
+  pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
+  MemoryWindow &nextCode = CT->getNextCodeWindow();
+  Timer t;
+  ret_t code;
+
+  CT->setScramberPid(me);
+  sem_wait(randomize);
+
+  DEBUGMSG("chameleon thread " << me << " is scrambling code for " << cpid
+           << std::endl);
+
+  while(!CT->shouldScramblerExit()) {
+    t.start();
+
+    nextCode.copy(CT->getCodeWindow());
+    code = CT->randomizeFunctions(nextCode);
+    // TODO need to signal handler something bad happened, this will deadlock
+    if(code != ret_t::Success) break;
+    scrambles++;
+
+    t.end(true);
+    DEBUGMSG_VERBOSE("code randomization time: " << t.elapsed(Timer::Micro)
+                     << std::endl);
+
+    sem_post(finished);
+    sem_wait(randomize);
+  }
+
+  DEBUGMSG("scrambler " << me << " exiting" << std::endl);
+  INFO(cpid << ": async code randomization: " << t.totalElapsed(Timer::Micro)
+       << " us for " << scrambles << " randomization(s)" << std::endl);
 
   return nullptr;
 }
@@ -144,7 +187,7 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
     if(!rewriteMetadata) return ret_t::BadTransformMetadata;
     retcode = analyzeFunctions();
     if(retcode != ret_t::Success) return retcode;
-    retcode = randomizeFunctions();
+    retcode = randomizeFunctions(codeWindow);
     if(retcode != ret_t::Success) return retcode;
   }
 
@@ -171,6 +214,12 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
 
+  // Initialize thread re-randomizing code
+  if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
+    return ret_t::ScramblerFailed;
+  if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
+    return ret_t::ScramblerFailed;
+
   return ret_t::Success;
 }
 
@@ -186,8 +235,14 @@ ret_t CodeTransformer::cleanup() {
     pthread_join(faultHandler, nullptr);
   }
 
-  INFO(pid << ": re-randomize time: " << rerandomizeTime << " us for "
-       << numRandomizations << " randomizations" << std::endl);
+  scramblerExit = true;
+  if(scramblerPid > 0) {
+    sem_post(&scramble);
+    pthread_join(scrambler, nullptr);
+  }
+
+  INFO(pid << ": switching to new randomization: " << rerandomizeTime
+       << " us for " << numRandomizations << " randomizations" << std::endl);
 
   return ret_t::Success;
 }
@@ -200,9 +255,9 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
 
   info = CT->getRandomizedFunctionInfo(addr);
   if(info) {
-    auto &oldSlots = info->getOriginalSlots();
+    auto &oldSlots = info->getPrevRandSlots();
     auto &newSlots = info->getRandomizedSlots();
-    cinfo.old_frame_size = info->getOriginalFrameSize();
+    cinfo.old_frame_size = info->getPrevRandFrameSize();
     cinfo.new_frame_size = info->getRandomizedFrameSize();
     cinfo.num_old_slots = oldSlots.size();
     cinfo.old_rand_slots = (const slotmap *)&oldSlots[0];
@@ -256,7 +311,10 @@ ret_t CodeTransformer::rerandomize() {
   code = proc.readRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
-  // TODO wait for code re-randomizer to finish
+  // Wait for code re-randomizer to finish and set the current code buffer to
+  // the newly randomized code
+  if(sem_wait(&finishedScrambling)) return ret_t::RandomizeFailed;
+  codeWindow = nextCodeWindow;
 
   // Transform the stack, including switching to the transformed stack
   code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
@@ -271,6 +329,7 @@ ret_t CodeTransformer::rerandomize() {
   if(code != ret_t::Success) return code;
 
   if((code = dropCode()) != ret_t::Success) return code;
+  if(sem_post(&scramble)) return ret_t::RandomizeFailed;
 
   t.end(true);
   numRandomizations++;
@@ -736,13 +795,13 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
 
     // Record addresses of transformation points
     if(instr_is_call(instr)) {
-      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex << real
-                       << std::endl);
+      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
+                       << (uintptr_t)real << ")" << std::endl);
       info->addTransformAddr((uintptr_t)real, RandomizedFunction::CallSite);
     }
     else if(instr_is_return(instr)) {
-      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex << real
-                       << std::endl);
+      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
+                       << (uintptr_t)real << ")" << std::endl);
       info->addTransformAddr((uintptr_t)real, RandomizedFunction::Return);
     }
 
@@ -847,23 +906,35 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
   enum arch::RegType type;
 
   for(i = 0; i < NumOp(instr); i++) {
+    // At this point, the instruction's operands have been rewritten with a
+    // previous randomization; translate from the previous to the current
+    // randomization.  First, get the previously randomized offset (if this
+    // operand is a stack offset).
     op = GetOp(instr, i);
     offset = getStackOffset(frameSize, op, type);
-    if(offset && info->transformOffset(offset)) {
-      randOffset = info->getRandomizedOffset(offset);
-      if(randOffset == INT32_MAX) {
-        DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
-                       instr);
-        return ret_t::BadTransformMetadata;
-      }
-      randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
-      opnd_set_disp_ex(&op, randRegOffset, false, false, false);
-      SetOp(instr, i, op);
-      changed = true;
+    if(!offset) continue;
 
-      DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
-                       << randOffset << std::endl);
+    // Next, convert the previously-randomized offset to the original offset &
+    // check if it's a randomizable slot
+    offset = info->getOriginalOffset(offset);
+    if(offset == INT32_MAX || !info->shouldTransformSlot(offset)) continue;
+
+    // Finally, convert the original offset to the new randomized offset & set
+    // the operand
+    randOffset = info->getRandomizedOffset(offset);
+    if(randOffset == INT32_MAX) {
+      DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
+                     instr);
+      return ret_t::BadTransformMetadata;
     }
+
+    randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
+    opnd_set_disp_ex(&op, randRegOffset, false, false, false);
+    SetOp(instr, i, op);
+    changed = true;
+
+    DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
+                     << randOffset << std::endl);
   }
 
   return ret_t::Success;
@@ -894,7 +965,7 @@ static void compareInstructions(byte *real,
     instr_reset(GLOBAL_DCONTEXT, &orig);
     start = decode_from_copy(GLOBAL_DCONTEXT, start, real, &orig);
     if(!start) {
-      DEBUGMSG("couldn't decode compareInstructions()" << std::endl);
+      DEBUGMSG("couldn't decode in compareInstructions()" << std::endl);
       return;
     }
     origLen = start - prev;
@@ -910,14 +981,15 @@ static void compareInstructions(byte *real,
 }
 #endif
 
-ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
+ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
+                                         MemoryWindow &buffer) {
   bool changed;
   int32_t update, offset, instrSize;
   uint32_t frameSize = arch::initialFrameSize(),
            randFrameSize = arch::initialFrameSize(),
            count = 0;
   const function_record *func = info->getFunctionRecord();
-  byte_iterator funcData = codeWindow.getData(func->addr);
+  byte_iterator funcData = buffer.getData(func->addr);
   byte *real = (byte *)func->addr, *cur = funcData[0];
   instrlist_t *instrs = info->getInstructions();
   instr_t *instr;
@@ -960,8 +1032,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
         offset = (update > 0) ? update : 0;
         offset = canonicalizeSlotOffset(frameSize + offset,
                                         arch::RegType::StackPointer, 0);
-        if(info->transformBulkFrameUpdate(offset) &&
-           offset <= (int)func->frame_size) {
+        if(info->isBulkFrameUpdate(offset) &&
+           offset <= (int)info->getPrevRandFrameSize()) {
           offset = info->getRandomizedBulkFrameUpdate();
           offset = update > 0 ? offset : -offset;
           code = arch::rewriteFrameUpdate(instr, offset, changed);
@@ -980,9 +1052,25 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
     // randomization *may* change the size of individual instructions; the net
     // code size *must* be identical.
     if(changed) {
+      // The instruction's raw bits are currently pointing to the last version
+      // of the buffer.  We need to do the following things:
+      //
+      //   1. Point the instruction's raw bits to the current buffer and mark
+      //      them as invalid so that DynamoRIO *actually* re-encodes them
+      //   2. Encode the changed instruction into the buffer
+      //   3. Set the bits as valid, because apparently re-encoding does not
+      //      do this (probably because we're encoding to a copy).
+      //
+      // The last task is required because at the next randomization when we
+      // call instr_length() above, if the bits are not marked valid DynamoRIO
+      // will re-encode the instruction (potentially in a different format) and
+      // may change the instruction's size.
       DEBUG_VERBOSE(prev = cur);
+      instr_set_raw_bits(instr, cur, instrSize);
+      instr_set_raw_bits_valid(instr, false);
       cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
       if(!cur) return ret_t::RandomizeFailed;
+      instr_set_raw_bits_valid(instr, true);
 
       count++;
       DEBUG_VERBOSE(
@@ -999,7 +1087,9 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
   }
 
   if((uintptr_t)real != (func->addr + func->code_size)) {
-    WARN("changed size of function's instructions" << std::endl);
+    WARN("changed size of function's instructions, ended with 0x" << std::hex
+         << (uintptr_t)real << " but expected 0x"
+         << (uintptr_t)(func->addr + func->code_size) << std::endl);
     DEBUG(compareInstructions((byte *)func->addr, funcData[0],
                               funcData[0] + func->code_size, instrs));
     return ret_t::RandomizeFailed;
@@ -1010,7 +1100,7 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info) {
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::randomizeFunctions() {
+ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
   Timer t;
   ret_t code;
 
@@ -1024,7 +1114,7 @@ ret_t CodeTransformer::randomizeFunctions() {
     )
     t.start();
 
-    code = randomizeFunction(info);
+    code = randomizeFunction(info, buffer);
     if(code != ret_t::Success) return code;
 
     t.end(true);

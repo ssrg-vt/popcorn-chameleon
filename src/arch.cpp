@@ -538,7 +538,7 @@ public:
    * For x86-64, the bulk frame update allocates space for all regions below
    * the callee-save/immovable region; search for an update within that region.
    */
-  virtual bool transformBulkFrameUpdate(int offset) const override {
+  virtual bool isBulkFrameUpdate(int offset) const override {
     size_t i = 0;
 
     // Note: the immovable region may have been pruned if it was empty
@@ -561,7 +561,7 @@ public:
     return randomizedFrameSize - (regions[i]->getRandomizedRegionOffset());
   }
 
-  virtual bool transformOffset(int offset) const override {
+  virtual bool shouldTransformSlot(int offset) const override {
     int regionType;
     const StackRegionPtr *region = findRegion(offset);
     if(region) {

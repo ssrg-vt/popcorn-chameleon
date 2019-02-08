@@ -9,6 +9,9 @@ using namespace chameleon;
 // MemoryRegion implementation
 ///////////////////////////////////////////////////////////////////////////////
 
+MemoryRegion *FileRegion::copy() const
+{ return new FileRegion(start, len, fileLen, data); }
+
 size_t FileRegion::populate(uintptr_t address,
                             std::vector<char> &buffer,
                             size_t offset) const {
@@ -35,6 +38,11 @@ byte_iterator FileRegion::getData(uintptr_t address) {
   if(regOffset >= 0 && remainingLen >= 0)
     return byte_iterator(data[regOffset], remainingLen);
   else return byte_iterator::empty();
+}
+
+MemoryRegion *BufferedRegion::copy() const {
+  byte_iterator buf(data.get(), len);
+  return new BufferedRegion(start, len, len, buf);
 }
 
 BufferedRegion::BufferedRegion(uintptr_t start,
@@ -69,6 +77,20 @@ byte_iterator BufferedRegion::getData(uintptr_t address) {
 ///////////////////////////////////////////////////////////////////////////////
 // MemoryWindow implementation
 ///////////////////////////////////////////////////////////////////////////////
+
+void MemoryWindow::operator=(MemoryWindow &rhs) {
+  regions.clear();
+  regions.reserve(rhs.regions.size());
+  for(auto &r : rhs.regions) regions.emplace_back(std::move(r));
+  rhs.regions.clear();
+}
+
+void MemoryWindow::copy(const MemoryWindow &toCopy) {
+  regions.clear();
+  regions.reserve(toCopy.regions.size());
+  for(auto &r : toCopy.regions)
+    regions.emplace_back(MemoryRegionPtr(r->copy()));
+}
 
 /**
  * Return whether the address is contained within a region.

@@ -38,6 +38,12 @@ public:
   MemoryRegion() : start(UINT64_MAX), end(UINT64_MAX), len(UINT64_MAX) {}
 
   /**
+   * Create a copy of this memory region, including its content.
+   * @return a copy of the MemoryRegion object
+   */
+  virtual MemoryRegion *copy() const = 0;
+
+  /**
    * Populate the buffer with the region's memory.
    * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
@@ -110,6 +116,12 @@ public:
   { assert(data.getLength() >= fileLen && "Invalid FileRegion"); }
 
   /**
+   * Create a copy of this memory region, including its content.
+   * @return a copy of the MemoryRegion object
+   */
+  virtual MemoryRegion *copy() const;
+
+  /**
    * Populate the buffer with the region's memory.
    * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
@@ -157,6 +169,12 @@ public:
                  byte_iterator data);
 
   /**
+   * Create a copy of this memory region, including its content.
+   * @return a copy of the MemoryRegion object
+   */
+  virtual MemoryRegion *copy() const;
+
+  /**
    * Populate the buffer with the region's memory.
    * @param address the starting address to copy into the buffer
    * @param buffer buffer to populate with region's memory
@@ -188,6 +206,22 @@ private:
 class MemoryWindow {
 public:
   MemoryWindow() { regions.reserve(8); }
+
+  /**
+   * Set the contents of the current memory window to the contents of another
+   * memory window.  The other window's contents are cleared.
+   * @param rhs a memory window
+   */
+  void operator=(MemoryWindow &rhs);
+
+  /**
+   * Copy another memory window's memory regions.  Regions that are backed in
+   * memory are deep-copied, other regions (e.g., file-backed) are
+   * shallow-copied.
+   *
+   * @param toCopy other memory region to copy
+   */
+  void copy(const MemoryWindow &toCopy);
 
   /**
    * Remove all regions from the window.

@@ -189,8 +189,9 @@ public:
   int getRandomizedOffset(int orig);
 
   /**
-   * Return whether an offset falls within the region's bounds.  Note that this
-   * does *not* necessarily mean there's a slot associated with the offset.
+   * Return whether an offset falls within the region's original bounds.  Note
+   * that this does *not* necessarily mean there's a slot associated with the
+   * offset.
    *
    * @param orig a canonicalized offset
    * @return true if the offset falls within the region, false otherwise
@@ -397,10 +398,10 @@ public:
   ret_t randomize(int seed, size_t maxPadding);
 
   /**
-   * Return the original frame size.
-   * @return the original frame size
+   * Return the previously-randomized frame size.
+   * @return the previously-randomized frame size
    */
-  uint32_t getOriginalFrameSize() const { return origFrameSize; }
+  uint32_t getPrevRandFrameSize() const { return prevRandFrameSize; }
 
   /**
    * Return the randomized frame size.
@@ -412,7 +413,7 @@ public:
    * Get the the slot remapping information from the previous randomization.
    * @return slot remapping information for previous randomization
    */
-  const std::vector<SlotMap> &getOriginalSlots() const { return *prevRand; }
+  const std::vector<SlotMap> &getPrevRandSlots() const { return *prevRand; }
 
   /**
    * Get the the slot remapping information for the current randomization.
@@ -421,22 +422,13 @@ public:
   const std::vector<SlotMap> &getRandomizedSlots() const { return *curRand; }
 
   /**
-   * Typically compilers allocate space for callee-saved registers/immovable
-   * slots by storing registers onto the stack and then bulk-allocating the
-   * remaining frame space with a single math operation.  Return whether a
-   * frame size update (denoted by an offset) is the bulk-update and needs to
-   * be transformed.
-   *
-   * @param offset a canonicalized offset
-   * @return true if it needs to be transformed, false otherwise
+   * Add a program transformation point for the function.
+   * @param addr a program transformation point
    */
-  virtual bool transformBulkFrameUpdate(int offset) const = 0;
-
-  /**
-   * Return the bulk frame update size for the randomized frame.
-   * @return bulk frame update size for randomized frame
-   */
-  virtual uint32_t getRandomizedBulkFrameUpdate() const = 0;
+  void addTransformAddr(uintptr_t addr, TransformType type) {
+    assert(funcContains(func, addr) && "Transformation point not in function");
+    transformAddrs[addr] = type;;
+  }
 
   /**
    * Return whether a program address is a transformation point.  If not,
@@ -459,30 +451,49 @@ public:
   { return transformAddrs; }
 
   /**
-   * Add a program transformation point for the function.
-   * @param addr a program transformation point
-   */
-  void addTransformAddr(uintptr_t addr, TransformType type) {
-    assert(funcContains(func, addr) && "Transformation point not in function");
-    transformAddrs[addr] = type;;
-  }
-
-  /**
-   * Return whether a frame reference (denoted by an offset) needs to be
-   * transformed.
+   * Typically compilers allocate space for callee-saved registers/immovable
+   * slots by storing registers onto the stack and then bulk-allocating the
+   * remaining frame space with a single math operation.  Return whether a
+   * frame size update (denoted by an offset) is the bulk-update and needs to
+   * be transformed.
+   *
    * @param offset a canonicalized offset
-   * @return true if the reference needs to be transformed, false otherwise
+   * @return true if it needs to be transformed, false otherwise
    */
-  virtual bool transformOffset(int offset) const = 0;
+  virtual bool isBulkFrameUpdate(int offset) const = 0;
 
   /**
-   * Get the randomized offset for a stack slot
+   * Return the bulk frame update size for the randomized frame.
+   * @return bulk frame update size for randomized frame
+   */
+  virtual uint32_t getRandomizedBulkFrameUpdate() const = 0;
+
+  /**
+   * Convert a previously-randomized offset to the original offset.
+   * @param prev the canonicalized stack slot offset from a previous
+   *             randomization
+   * @return the canonicalized original offset, or INT32_MAX if prevRand
+   *         doesn't correspond to any stack slot
+   */
+  int getOriginalOffset(int prev) const;
+
+  /**
+   * Get the randomized offset for a stack slot.  Note that based on
+   * restrictions or entropy, the randomized offset may not actually be
+   * different than the original offset.
    *
    * @param orig the canonicalized original stack slot offset
    * @return the canonicalized randomized offset, or INT32_MAX if orig
    *         doesn't correspond to any stack slot
    */
   int getRandomizedOffset(int orig) const;
+
+  /**
+   * Return whether a given offset should be transformed.
+   * @param offset a canonicalized stack offset from the previous randomization
+   * @return true if the offset should be randomized or false otherwise
+   */
+  virtual bool shouldTransformSlot(int offset) const = 0;
 
   /**
    * Hook to allow ISA-specific implementations to do any other transformations
@@ -536,7 +547,7 @@ protected:
   std::vector<StackRegionPtr> regions;
 
   /* Frame size from previous and current randomization */
-  uint32_t origFrameSize, randomizedFrameSize;
+  uint32_t prevRandFrameSize, randomizedFrameSize;
 
   /**
    * Find the stack slot corresponding to a given offset.

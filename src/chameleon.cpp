@@ -366,7 +366,8 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     return Process::Exited;
   case Process::SignalExit:
     // TODO dump the instruction at which the child exited
-    INFO(pid << ": terminated with signal " << child.getSignal() << endl);
+    INFO(pid << ": terminated with signal " << child.getSignal() << " at 0x"
+         << hex << child.getPC() << endl);
     return Process::SignalExit;
   case Process::Interrupted:
     pc = child.getPC();
