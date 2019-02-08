@@ -363,6 +363,7 @@ ret_t RandomizedFunction::populateSlots() {
     count += (*r)->getSlots().size();
   _a.resize(count);
   _b.resize(count);
+  prevSortedByRand.resize(count);
 
   // Now add the slots to the current array to bootstrap
   count = 0;
@@ -379,6 +380,9 @@ ret_t RandomizedFunction::populateSlots() {
 
   return ret_t::Success;
 }
+
+static bool slotMapCmpRand(const SlotMap &a, const SlotMap &b)
+{ return a.randomized < b.randomized; }
 
 ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   size_t i;
@@ -407,12 +411,17 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   )
 
   // Move current mappings to previous so we can serialize the new mappings
-  // into the current slot remapping vector
+  // into the current slot remapping vector.  Create a secondary vector of the
+  // previous mapping sorted by the randomized offset (instead of original) so
+  // that we can use a binary search in getOriginalMapping().
   std::vector<SlotMap> *tmp = prevRand;
   prevRand = curRand;
   curRand = tmp;
-  i = 0;
+  memcpy(&prevSortedByRand[0], &prevRand->at(0),
+         sizeof(SlotMap) * prevSortedByRand.size());
+  std::sort(prevSortedByRand.begin(), prevSortedByRand.end(), slotMapCmpRand);
 
+  i = 0;
   for(auto r = regions.begin(); r != regions.end(); r++) {
     (*r)->randomize(offset, ru);
     offset = (*r)->getRandomizedRegionOffset();
@@ -441,9 +450,10 @@ int RandomizedFunction::getOriginalOffset(int prev) const {
   ssize_t idx;
 
   idx = findRight<SlotMap, int, slotMapContainsRand, lessThanSlotMapRand>
-                 (&prevRand->at(0), prevRand->size(), prev);
-  if(idx >= 0 && slotMapContainsRand(&prevRand->at(idx), prev))
-    offset = prev - prevRand->at(idx).randomized + prevRand->at(idx).original;
+                 (&prevSortedByRand[0], prevSortedByRand.size(), prev);
+  if(idx >= 0 && slotMapContainsRand(&prevSortedByRand[idx], prev))
+    offset = prev - prevSortedByRand[idx].randomized +
+                    prevSortedByRand[idx].original;
   return offset;
 }
 

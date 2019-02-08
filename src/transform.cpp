@@ -901,7 +901,7 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
                                          uint32_t randFrameSize,
                                          instr_t *instr,
                                          bool &changed) {
-  int i, offset, randOffset, randRegOffset;
+  int i, prevOffset, origOffset, newOffset, regOffset;
   opnd_t op;
   enum arch::RegType type;
 
@@ -911,30 +911,35 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     // randomization.  First, get the previously randomized offset (if this
     // operand is a stack offset).
     op = GetOp(instr, i);
-    offset = getStackOffset(frameSize, op, type);
-    if(!offset) continue;
+    prevOffset = getStackOffset(frameSize, op, type);
+    if(!prevOffset) continue;
 
     // Next, convert the previously-randomized offset to the original offset &
     // check if it's a randomizable slot
-    offset = info->getOriginalOffset(offset);
-    if(offset == INT32_MAX || !info->shouldTransformSlot(offset)) continue;
+    origOffset = info->getOriginalOffset(prevOffset);
+    if(origOffset == INT32_MAX) {
+      DEBUGMSG_INSTR("couldn't find previous slot for offset " << prevOffset <<
+                     " in ", instr);
+      continue;
+    }
+    else if(!info->shouldTransformSlot(origOffset)) continue;
 
     // Finally, convert the original offset to the new randomized offset & set
     // the operand
-    randOffset = info->getRandomizedOffset(offset);
-    if(randOffset == INT32_MAX) {
-      DEBUGMSG_INSTR("couldn't find slot for offset " << offset << " in ",
+    newOffset = info->getRandomizedOffset(origOffset);
+    if(newOffset == INT32_MAX) {
+      DEBUGMSG_INSTR("couldn't find slot for offset " << origOffset << " in ",
                      instr);
       return ret_t::BadTransformMetadata;
     }
 
-    randRegOffset = slotOffsetFromRegister(randFrameSize, type, randOffset);
-    opnd_set_disp_ex(&op, randRegOffset, false, false, false);
+    regOffset = slotOffsetFromRegister(randFrameSize, type, newOffset);
+    opnd_set_disp_ex(&op, regOffset, false, false, false);
     SetOp(instr, i, op);
     changed = true;
 
-    DEBUGMSG_VERBOSE(" -> remap stack offset " << offset << " -> "
-                     << randOffset << std::endl);
+    DEBUGMSG_VERBOSE(" -> remap stack offset " << prevOffset << " -> "
+                     << newOffset << std::endl);
   }
 
   return ret_t::Success;
@@ -990,14 +995,11 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
            count = 0;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = buffer.getData(func->addr);
-  byte *real = (byte *)func->addr, *cur = funcData[0];
+  byte *real = (byte *)func->addr, *cur = funcData[0], *prev;
   instrlist_t *instrs = info->getInstructions();
   instr_t *instr;
   reg_id_t drsp;
   ret_t code;
-#ifdef DEBUG_BUILD
-  byte *prev;
-#endif
 
   // Randomize the function's layout according to the metadata
   code = info->randomize(rng(), slotPadding);
@@ -1058,27 +1060,30 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
       //   1. Point the instruction's raw bits to the current buffer and mark
       //      them as invalid so that DynamoRIO *actually* re-encodes them
       //   2. Encode the changed instruction into the buffer
-      //   3. Set the bits as valid, because apparently re-encoding does not
-      //      do this (probably because we're encoding to a copy).
+      //   3. Reset the bits with the instruction's new length, because
+      //      apparently re-encoding does not do this (probably because we're
+      //      encoding to a copy).
       //
       // The last task is required because at the next randomization when we
       // call instr_length() above, if the bits are not marked valid DynamoRIO
       // will re-encode the instruction (potentially in a different format) and
       // may change the instruction's size.
-      DEBUG_VERBOSE(prev = cur);
+      prev = cur;
       instr_set_raw_bits(instr, cur, instrSize);
       instr_set_raw_bits_valid(instr, false);
       cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
       if(!cur) return ret_t::RandomizeFailed;
-      instr_set_raw_bits_valid(instr, true);
+      instr_set_raw_bits(instr, prev, cur - prev);
 
-      count++;
       DEBUG_VERBOSE(
         if(instrSize != (cur - prev))
           DEBUGMSG_VERBOSE(" -> changed size of instruction: " << instrSize
                            << " vs. " << (cur - prev) << std::endl);
         DEBUGMSG_INSTR(" -> rewrote: ", instr)
       );
+
+      count++;
+      instrSize = cur - prev;
     }
     else cur += instrSize;
     real += instrSize;

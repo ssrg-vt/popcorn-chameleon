@@ -534,10 +534,10 @@ protected:
    * Maintain lists of slot remappings from one previous and current
    * randomization in order to transform thread stacks.
    *
-   * Note: in general, slot remapping accesses should happen through prevRand
-   * and curRand, *not* _a and _b
+   * Note: in general, slot remapping accesses should happen through prevRand,
+   * curRand, and prevSortedByRand, *not* _a and _b
    */
-  std::vector<SlotMap> _a, _b;
+  std::vector<SlotMap> _a, _b, prevSortedByRand;
   std::vector<SlotMap> *prevRand, *curRand;
 
   /* Set of previously-seen offsets during analysis */
