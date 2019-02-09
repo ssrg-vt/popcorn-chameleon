@@ -360,7 +360,7 @@ CodeTransformer::getRandomizedFunctionInfo(uintptr_t pc) const {
 
 int32_t CodeTransformer::canonicalizeSlotOffset(uint32_t frameSize,
                                                 arch::RegType reg,
-                                                int16_t offset) {
+                                                int32_t offset) {
   switch(reg) {
   case arch::RegType::FramePointer:
     return DIRECTION(arch::framePointerOffset() + offset);
@@ -372,7 +372,7 @@ int32_t CodeTransformer::canonicalizeSlotOffset(uint32_t frameSize,
 
 int32_t CodeTransformer::slotOffsetFromRegister(uint32_t frameSize,
                                                 arch::RegType reg,
-                                                int16_t offset) {
+                                                int32_t offset) {
   switch(reg) {
   case arch::RegType::FramePointer:
     return DIRECTION(offset) - arch::framePointerOffset();

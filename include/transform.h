@@ -164,7 +164,7 @@ public:
    */
   static int32_t canonicalizeSlotOffset(uint32_t framesize,
                                         arch::RegType reg,
-                                        int16_t offset);
+                                        int32_t offset);
 
   /**
    * Convert an offset from the canonical frame address (CFA) to an offset from
@@ -179,7 +179,7 @@ public:
    */
   static int32_t slotOffsetFromRegister(uint32_t frameSize,
                                         arch::RegType reg,
-                                        int16_t offset);
+                                        int32_t offset);
 
   /**
    * Randomize all functions contained in the memory window.
