@@ -718,6 +718,10 @@ static inline int getStackOffset(uint32_t frameSize,
     type = arch::getRegTypeDR(opnd_get_base(op));
     offset = opnd_get_disp(op);
     offset = CodeTransformer::canonicalizeSlotOffset(frameSize, type, offset);
+    DEBUG_VERBOSE(
+      if(offset != INT32_MAX)
+        DEBUGMSG_VERBOSE(" -> detected offset " << offset << std::endl);
+    )
     if(offset <= 0 || offset > (int)frameSize) offset = 0;
   }
   return offset;
@@ -918,9 +922,10 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     // check if it's a randomizable slot
     origOffset = info->getOriginalOffset(prevOffset);
     if(origOffset == INT32_MAX) {
-      DEBUGMSG_INSTR("couldn't find previous slot for offset " << prevOffset <<
-                     " in ", instr);
-      continue;
+      DEBUGMSG_INSTR("missing original offset for ", instr);
+      WARN("couldn't find original offset for previously-randomized slot at "
+           "offset " << prevOffset  << std::endl);
+      return ret_t::BadTransformMetadata;
     }
     else if(!info->shouldTransformSlot(origOffset)) continue;
 
@@ -928,8 +933,9 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     // the operand
     newOffset = info->getRandomizedOffset(origOffset);
     if(newOffset == INT32_MAX) {
-      DEBUGMSG_INSTR("couldn't find slot for offset " << origOffset << " in ",
-                     instr);
+      DEBUGMSG_INSTR("missing new randomized offset for ", instr);
+      WARN("couldn't find new randomized offset for slot originally at offset "
+           << origOffset << std::endl);
       return ret_t::BadTransformMetadata;
     }
 

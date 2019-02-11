@@ -18,8 +18,8 @@ using namespace chameleon;
 
 #ifndef NDEBUG
 static void compelPrint(unsigned int lvl, const char *fmt, va_list parms) {
-  printf("[ compel ] DEBUG: LC%u: ", lvl);
-  vprintf(fmt, parms);
+  fprintf(stderr, "[ compel ] DEBUG: LC%u: ", lvl);
+  vfprintf(stderr, fmt, parms);
 }
 
 void parasite::initializeLog(bool verbose) {

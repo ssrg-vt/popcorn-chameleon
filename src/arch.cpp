@@ -194,7 +194,8 @@ int32_t arch::framePointerOffset() { return -16; }
 enum x86Restriction {
   F_None = 0x0,
   F_Immovable = 0x1,
-  F_RangeLimited = 0x2
+  F_RangeLimited = 0x2,
+  F_FrameSizeLimited = 0x3
 };
 
 /*
@@ -435,11 +436,19 @@ public:
     }
 
     // Avoid adding multiple restrictions for a single slot
+    // Note: frame size limitations are not set to an individual slot, so don't
+    // count a frame size restriction as a "seen" slot
     // TODO what if there are multiple types of restrictions for a single stack
     // slot, e.g., one use causes a FP-limited displacement and another causes
     // the slot to be immovable?
-    if(seen.count(offset)) return code;
-    else seen.insert(offset);
+    if(res.flags != x86Restriction::F_FrameSizeLimited) {
+      if(seen.count(offset)) {
+        DEBUGMSG_VERBOSE(" -> previously handled offset " << offset
+                         << std::endl);
+        return code;
+      }
+      else seen.insert(offset);
+    }
 
     // Add to the appropriate region depending on the restriction type
     switch(res.flags) {
@@ -483,6 +492,13 @@ public:
       }
 
       break;
+    case x86Restriction::F_FrameSizeLimited: {
+      const StackRegionPtr &cs = regions[x86Region::R_CalleeSave];
+      maxFrameSize = ROUND_DOWN(cs->getOriginalRegionOffset() + INT8_MAX,
+                                this->alignment);
+      DEBUGMSG(" -> maximum frame size: " << maxFrameSize << std::endl);
+      break;
+    }
     default:
       DEBUGMSG("invalid x86 restriction type: " << res.flags << std::endl);
       code = ret_t::AnalysisFailed;
@@ -492,9 +508,9 @@ public:
     return code;
   }
 
-  virtual ret_t populateSlots() override {
-    int curOffset = 0;
-    size_t i;
+  void populateMovable() {
+    StackRegionPtr &r = regions[x86Region::R_Movable];
+    const char *name = x86RegionName[x86Region::R_Movable];
 
     // Add stack slots to the movable region.  During analysis we should have
     // added any restricted slots to their appropriate sections; the remaining
@@ -502,13 +518,60 @@ public:
     for(auto &s : slots) {
       if(!seen.count(s.first)) {
         const stack_slot *slot = s.second;
-        regions[x86Region::R_Movable]->addSlot(s.first,
-                                               slot->size,
-                                               slot->alignment);
-        DEBUGMSG(" -> randomizable slot @ " << s.first << " (size = "
-                 << slot->size << ")" << std::endl);
+        r->addSlot(s.first, slot->size, slot->alignment);
+        DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
+                 << ") is in " << name << " region" << std::endl);
       }
     }
+  }
+
+  void populateWithRestrictions() {
+    // Swap the movable region with a permutable region in order to stay within
+    // the maximum frame size
+    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable);
+    regions[x86Region::R_Movable].reset(newMov);
+    StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
+                   &movable = regions[x86Region::R_Movable];
+    const char *fpLimitedName = x86RegionName[x86Region::R_FPLimited],
+               *movableName = x86RegionName[x86Region::R_Movable];
+
+    DEBUGMSG(" -> changed movable to permutable region to stay within "
+             "maximum frame size" << std::endl);
+
+    // Sometimes, due to encoding restrictions, our frame size is limited to
+    // 1-byte offsets (bulk frame update only uses 1 byte).  To avoid
+    // accidentally forcing a larger encoding for the bulk frame update, put
+    // slots in the FP-limited region.  However, sometimes the situation arises
+    // where stack slots in the metadata are beyond what is addressable from
+    // FBP + 1 byte.  For these slots, throw them in the movable region - if we
+    // put them in the FP-limited region, it's possible some slot that is
+    // addressable from the FBP + 1 byte would be placed out of range, forcing
+    // DynamoRIO to encode the offset using a 4-byte encoding.
+    // TODO this doesn't handle SP-limited slots
+    for(auto &s : slots) {
+      if(!seen.count(s.first)) {
+        const stack_slot *slot = s.second;
+        if(s.first <= 144) {
+          fpLimited->addSlot(s.first, slot->size, slot->alignment);
+          DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
+                   << ") is in " << fpLimitedName << " region" << std::endl);
+        }
+        else {
+          movable->addSlot(s.first, slot->size, slot->alignment);
+          DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
+                   << ") is in " << movableName << " region" << std::endl);
+        }
+      }
+    }
+  }
+
+  virtual ret_t populateSlots() override {
+    int curOffset = 0;
+    size_t i;
+
+    // Put the slots for which we did not detect a restriction into sections
+    if(maxFrameSize == UINT32_MAX) populateMovable();
+    else populateWithRestrictions();
 
     // Calculate section offsets & prune empty sections.
     // TODO is it faster to search through unsorted slots in each section to
@@ -532,7 +595,67 @@ public:
       }
     }
 
+    // The regions sizes for SP-based offsets may have been artificially
+    // inflated due to frame alignment restrictions
+    for(i = regions.size() - 1; i > 0; i--) {
+      StackRegionPtr &region = regions[i];
+      if(REGION_TYPE(region->getFlags()) != x86Region::R_SPLimited &&
+         REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
+      const SlotMap &first = region->getSlots().front();
+      region->setRegionSize(region->getOriginalRegionOffset() -
+                            (first.original - first.size));
+      DEBUGMSG_VERBOSE("updated region size for " <<
+                       x86RegionName[REGION_TYPE(region->getFlags())]
+                       << " region to " << region->getOriginalRegionSize()
+                       << std::endl);
+    }
+
+    assert(regions.back()->getOriginalRegionOffset() < maxFrameSize);
+
     return RandomizedFunction::populateSlots();
+  }
+
+  virtual ret_t randomize(int seed, size_t maxPadding) override {
+    int start;
+    size_t nslots;
+    ssize_t i, slotIdx;
+    ZeroPad zp;
+
+    ret_t code = RandomizedFunction::randomize(seed, maxPadding);
+    if(code != ret_t::Success) return code;
+
+    // Due to alignment restrictions, we may have increased the frame size,
+    // invalidating previously-calculated SP-based offsets.  Update to account
+    // for the new size.
+    // TODO this is incorrect for SP-limited offsets
+    start = randomizedFrameSize;
+    slotIdx = curRand->size();
+    for(i = regions.size() - 1; i >= 0; i--) {
+      if(REGION_TYPE(regions[i]->getFlags()) != x86Region::R_SPLimited &&
+         REGION_TYPE(regions[i]->getFlags()) != x86Region::R_Call) break;
+
+      StackRegionPtr &r = regions[i];
+      if(start == r->getRandomizedRegionOffset()) break;
+      start -= r->getRandomizedRegionSize();
+      r->calculateOffsets<ZeroPad>(0, start, zp);
+      nslots = r->getSlots().size();
+      slotIdx -= nslots;
+      memcpy(&curRand->at(slotIdx),
+             &r->getSlots()[0],
+             sizeof(SlotMap) * nslots);
+
+      DEBUG_VERBOSE(
+        DEBUGMSG_VERBOSE("updated "
+                         << x86RegionName[REGION_TYPE(r->getFlags())]
+                         << " region slots:" << std::endl);
+        for(auto &sm : r->getSlots()) {
+          DEBUGMSG_VERBOSE("  " << sm.original << " -> " << sm.randomized
+                           << std::endl);
+        }
+      )
+    }
+
+    return ret_t::Success;
   }
 
   /**
@@ -840,9 +963,23 @@ bool arch::getRestriction(instr_t *instr, opnd_t op, RandRestriction &res) {
 }
 
 bool arch::getRestriction(instr_t *instr, RandRestriction &res) {
+  int update;
+
   switch(instr_get_opcode(instr)) {
   case OP_push: case OP_pushf: case OP_pop: case OP_popf:
     res.flags = x86Restriction::F_Immovable;
+    return true;
+  case OP_sub: case OP_add:
+    // Although the frame size may be larger than a byte's range, if the update
+    // to the stack pointer itself is within the byte range then we must limit
+    // the randomized frame size
+    // Note: assumes we've already determined we're updating the stack pointer
+    if(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
+                           DR_QUERY_DEFAULT)) {
+      update = getFrameUpdateSize(instr);
+      if(INT8_MIN <= update && update <= INT8_MAX)
+        res.flags = x86Restriction::F_FrameSizeLimited;
+    }
     return true;
   default: return false;
   }

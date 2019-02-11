@@ -400,7 +400,7 @@ public:
    * @param maxPadding maximum randomized padding added between stack slots
    * @return a return code describing the outcome
    */
-  ret_t randomize(int seed, size_t maxPadding);
+  virtual ret_t randomize(int seed, size_t maxPadding);
 
   /**
    * Return the previously-randomized frame size.
@@ -522,6 +522,9 @@ protected:
 
   /* Disassembled instructions */
   instrlist_t *instrs;
+
+  /* Maximum size of frame */
+  uint32_t maxFrameSize;
 
   /*
    * Map of program counter addresses where we can do a transformation and the

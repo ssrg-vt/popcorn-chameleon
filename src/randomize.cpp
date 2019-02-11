@@ -318,7 +318,7 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func)
-  : binary(binary), func(func), instrs(nullptr),
+  : binary(binary), func(func), instrs(nullptr), maxFrameSize(UINT32_MAX),
     prevRandFrameSize(func->frame_size), randomizedFrameSize(func->frame_size) {
   int offset;
   arch::RegType type;
