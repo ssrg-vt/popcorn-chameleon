@@ -204,21 +204,21 @@ enum x86Restriction {
  */
 enum x86Region {
   R_CalleeSave = 0,
-  R_Immovable,
   R_FPLimited,
   R_Movable,
   R_SPLimited,
   R_Call,
+  R_Immovable,
 };
 
 /* x86 region names (corresponds to indexs above) */
 const char *x86RegionName[] {
   "callee-save",
-  "immovable",
   "FP-limited",
   "movable",
   "SP-limited",
   "call",
+  "immovable",
 };
 
 /**
@@ -340,10 +340,6 @@ private:
  * |                       | v
  * |-----------------------|
  * |                       | ^
- * |    Immovable area     | | Immutable
- * |                       | v
- * |-----------------------|
- * |                       | ^
  * |    FP-limited area    | | Permutable
  * |                       | v
  * |-----------------------|
@@ -358,6 +354,10 @@ private:
  * |                       | ^
  * |       Call area       | | Immutable
  * |  (spilled arguments)  | |
+ * |                       | v
+ * |-----------------------|
+ * |                       | ^
+ * |    Immovable area     | | Immutable
  * |                       | v
  * |-----------------------|
  *
@@ -409,12 +409,12 @@ public:
 
     // Add x86-specific regions ordered by highest stack address first.
     regions.push_back(StackRegionPtr(cs));
-    regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
     regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited));
     regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
     regions.back()->setMinRandOffset(144); // Don't spill into FP-limited
     regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
+    regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
   }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
@@ -610,7 +610,7 @@ public:
                        << std::endl);
     }
 
-    assert(regions.back()->getOriginalRegionOffset() < maxFrameSize);
+    assert((uint32_t)regions.back()->getOriginalRegionOffset() <= maxFrameSize);
 
     return RandomizedFunction::populateSlots();
   }
@@ -977,10 +977,12 @@ bool arch::getRestriction(instr_t *instr, RandRestriction &res) {
     if(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
                            DR_QUERY_DEFAULT)) {
       update = getFrameUpdateSize(instr);
-      if(INT8_MIN <= update && update <= INT8_MAX)
+      if(INT8_MIN <= update && update <= INT8_MAX) {
         res.flags = x86Restriction::F_FrameSizeLimited;
+        return true;
+      }
     }
-    return true;
+    /* fall through */
   default: return false;
   }
 }
