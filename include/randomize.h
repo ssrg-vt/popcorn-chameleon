@@ -462,10 +462,11 @@ public:
    * frame size update (denoted by an offset) is the bulk-update and needs to
    * be transformed.
    *
+   * @param instr an instruction
    * @param offset a canonicalized offset
    * @return true if it needs to be transformed, false otherwise
    */
-  virtual bool isBulkFrameUpdate(int offset) const = 0;
+  virtual bool isBulkFrameUpdate(instr_t *instr, int offset) const = 0;
 
   /**
    * Return the bulk frame update size for the randomized frame.

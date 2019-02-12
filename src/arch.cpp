@@ -372,12 +372,7 @@ private:
  * create incorrect behavior.  For example, moving a stack slot from the
  * completely randomizable area into a permutable area may violate the
  * restrictions on those objects.
- *
- * Note 2: we assume all immovable objects are in a contiguous region adjacent
- * to the callee-save region
  */
-// TODO is the immovable region actually just stack alignment inserted by the
-// compiler?
 // TODO we don't do any checking regarding if a single stack slot is accessed
 // via both frame and stack pointer or crosses regions and thus could
 // potentially fall into one or more regions
@@ -419,12 +414,27 @@ public:
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
 
+  void setMaxFrameSize() {
+    const StackRegionPtr &cs = regions[x86Region::R_CalleeSave];
+    maxFrameSize = ROUND_DOWN(cs->getOriginalRegionOffset() + INT8_MAX,
+                              this->alignment);
+
+    DEBUGMSG(" -> maximum frame size: " << maxFrameSize << std::endl);
+  }
+
   virtual ret_t addRestriction(const RandRestriction &res) override {
     bool foundSlot = false;
     int offset = res.offset;
     uint32_t size = res.size, alignment = res.alignment;
     ret_t code = ret_t::Success;
     std::pair<int, const stack_slot *> slot;
+
+    // Frame size restrictions are handled separately, as they don't apply to
+    // any particular slot
+    if(res.flags == x86Restriction::F_FrameSizeLimited) {
+      setMaxFrameSize();
+      return ret_t::Success;
+    }
 
     // Convert offsets to their containing slots, if any
     slot = findSlot(offset);
@@ -436,19 +446,15 @@ public:
     }
 
     // Avoid adding multiple restrictions for a single slot
-    // Note: frame size limitations are not set to an individual slot, so don't
-    // count a frame size restriction as a "seen" slot
     // TODO what if there are multiple types of restrictions for a single stack
-    // slot, e.g., one use causes a FP-limited displacement and another causes
+    // slot, e.g., one use causes a SP-limited displacement and another causes
     // the slot to be immovable?
-    if(res.flags != x86Restriction::F_FrameSizeLimited) {
-      if(seen.count(offset)) {
-        DEBUGMSG_VERBOSE(" -> previously handled offset " << offset
-                         << std::endl);
-        return code;
-      }
-      else seen.insert(offset);
+    if(seen.count(offset)) {
+      DEBUGMSG_VERBOSE(" -> previously handled offset " << offset
+                       << std::endl);
+      return code;
     }
+    else seen.insert(offset);
 
     // Add to the appropriate region depending on the restriction type
     switch(res.flags) {
@@ -492,13 +498,6 @@ public:
       }
 
       break;
-    case x86Restriction::F_FrameSizeLimited: {
-      const StackRegionPtr &cs = regions[x86Region::R_CalleeSave];
-      maxFrameSize = ROUND_DOWN(cs->getOriginalRegionOffset() + INT8_MAX,
-                                this->alignment);
-      DEBUGMSG(" -> maximum frame size: " << maxFrameSize << std::endl);
-      break;
-    }
     default:
       DEBUGMSG("invalid x86 restriction type: " << res.flags << std::endl);
       code = ret_t::AnalysisFailed;
@@ -535,8 +534,8 @@ public:
     const char *fpLimitedName = x86RegionName[x86Region::R_FPLimited],
                *movableName = x86RegionName[x86Region::R_Movable];
 
-    DEBUGMSG(" -> changed movable to permutable region to stay within "
-             "maximum frame size" << std::endl);
+    DEBUGMSG("changed movable to permutable region to stay within maximum "
+             "frame size" << std::endl);
 
     // Sometimes, due to encoding restrictions, our frame size is limited to
     // 1-byte offsets (bulk frame update only uses 1 byte).  To avoid
@@ -660,29 +659,26 @@ public:
 
   /**
    * For x86-64, the bulk frame update allocates space for all regions below
-   * the callee-save/immovable region; search for an update within that region.
+   * the callee-save region; search for an update within that region.
    */
-  virtual bool isBulkFrameUpdate(int offset) const override {
-    size_t i = 0;
-
-    // Note: the immovable region may have been pruned if it was empty
-    if(regions.size() > 1 &&
-       REGION_TYPE(regions[1]->getFlags()) == x86Region::R_Immovable) i = 1;
-    if(offset > regions[i]->getOriginalRegionOffset()) return true;
-    else return false;
+  virtual bool isBulkFrameUpdate(instr_t *instr, int offset) const override {
+    switch(instr_get_opcode(instr)) {
+    default: return false;
+    case OP_add: case OP_sub:
+      // Note: it should be okay to check against the original offset as the
+      // callee-save region shouldn't change size
+      if(offset > regions[0]->getOriginalRegionOffset()) return true;
+      else return false;
+    }
   }
 
   /**
-   * For x86-64, the bulk update consists of the movable & call regions.
+   * For x86-64, the bulk update consists of the FP-limited, movable,
+   * SP-limited, call and immovable regions.
    */
   virtual uint32_t getRandomizedBulkFrameUpdate() const override {
-    size_t i = 0;
-
     assert(regions.size() > 1 && "No bulk frame update");
-
-    // Note: the immovable region may have been pruned if it was empty
-    if(REGION_TYPE(regions[1]->getFlags()) == x86Region::R_Immovable) i = 1;
-    return randomizedFrameSize - (regions[i]->getRandomizedRegionOffset());
+    return randomizedFrameSize - (regions[0]->getRandomizedRegionOffset());
   }
 
   virtual bool shouldTransformSlot(int offset) const override {
@@ -977,7 +973,7 @@ bool arch::getRestriction(instr_t *instr, RandRestriction &res) {
     if(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
                            DR_QUERY_DEFAULT)) {
       update = getFrameUpdateSize(instr);
-      if(INT8_MIN <= update && update <= INT8_MAX) {
+      if((INT8_MIN + 1) <= update && update <= INT8_MAX) {
         res.flags = x86Restriction::F_FrameSizeLimited;
         return true;
       }

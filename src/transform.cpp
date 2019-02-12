@@ -447,37 +447,39 @@ ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
   // there (lucky!) or we have to forcibly advance it to one.  All
   // transformation points should be at the point where a function has just
   // been called or is returning, allowing us to bootstrap transformation.
-  if(pc != fr->addr &&
-     (type = info->getTransformationType(pc)) == TransformType::None) {
-    DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
-                     "function at 0x" << std::hex << fr->addr << std::endl);
-
-    // Insert traps at transformation breakpoints & kick child towards them
-    code = sprayTransformBreakpoints(info, origData, interruptSize);
-    if(code != ret_t::Success) return code;
-
-    t.end(true);
-    if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
-    t.start();
-
-    // Figure out where the child stopped and restore the original instructions
-    if(code != ret_t::Success) return code;
-    else if(!proc.traceable()) return ret_t::InvalidState;
-    pc = proc.getPC() - interruptSize;
+  if(pc != fr->addr) {
     type = info->getTransformationType(pc);
-    if(type == TransformType::None) return ret_t::TransformFailed;
-    if((code = proc.setPC(pc)) != ret_t::Success) return code;
-    code = restoreTransformBreakpoints(info, origData);
-    if(code != ret_t::Success) return code;
+    if(type == TransformType::None) {
+      DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
+                       "function at 0x" << std::hex << fr->addr << std::endl);
 
-    DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
-                     << std::hex << pc << std::endl);
+      // Insert traps at transformation breakpoints & kick child towards them
+      code = sprayTransformBreakpoints(info, origData, interruptSize);
+      if(code != ret_t::Success) return code;
 
-    // If we stopped at a call instruction, walk it into the called function
-    // in preparation for transformation
+      t.end(true);
+      if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
+      t.start();
+
+      // Figure out where child stopped and restore the original instructions
+      if(code != ret_t::Success) return code;
+      else if(!proc.traceable()) return ret_t::InvalidState;
+      pc = proc.getPC() - interruptSize;
+      type = info->getTransformationType(pc);
+      if(type == TransformType::None) return ret_t::TransformFailed;
+      if((code = proc.setPC(pc)) != ret_t::Success) return code;
+      code = restoreTransformBreakpoints(info, origData);
+      if(code != ret_t::Success) return code;
+    }
+
+    // If we stopped at a call instruction, walk it into the called function in
+    // preparation for transformation
     if(type == TransformType::CallSite)
       if((code = proc.singleStep()) != ret_t::Success) return code;
   }
+
+  DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
+                   << std::hex << pc << std::endl);
 
   return ret_t::Success;
 }
@@ -822,6 +824,8 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     // size; if not, mark the associated stack slot as immovable.  To determine
     // the associated slot, keep track of the frame's size as it's expanded
     // (prologue) and shrunk (epilogue) to canonicalize stack slot references.
+    // TODO this logic should be moved into arch.cpp and a function should only
+    // return the frame update size
     if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
       update = arch::getFrameUpdateSize(instr);
       if(update) {
@@ -1034,13 +1038,15 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 
     // Keep track of stack pointer updates & rewrite frame update instructions
     // with randomized size
+    // TODO this logic should be moved into arch.cpp and a function should only
+    // return the frame update/randomized frame update size
     if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
       update = arch::getFrameUpdateSize(instr);
       if(update) {
         offset = (update > 0) ? update : 0;
         offset = canonicalizeSlotOffset(frameSize + offset,
                                         arch::RegType::StackPointer, 0);
-        if(info->isBulkFrameUpdate(offset) &&
+        if(info->isBulkFrameUpdate(instr, offset) &&
            offset <= (int)info->getPrevRandFrameSize()) {
           offset = info->getRandomizedBulkFrameUpdate();
           offset = update > 0 ? offset : -offset;
