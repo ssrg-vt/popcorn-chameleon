@@ -768,6 +768,7 @@ arch::getRandomizedFunction(const Binary &binary,
 ret_t arch::transformStack(CodeTransformer *CT,
                            get_rand_info callback,
                            st_handle meta,
+                           bool isReturn,
                            uintptr_t childSrcBase,
                            uintptr_t bufSrcBase,
                            uintptr_t childDstBase,
@@ -803,7 +804,7 @@ ret_t arch::transformStack(CodeTransformer *CT,
   srcST.r15 = src.r15;
 
   // Call stack transform API
-  if(st_rewrite_randomized(CT, callback, meta,
+  if(st_rewrite_randomized(CT, callback, meta, isReturn,
                            &srcST, (void *)childSrcBase, (void *)bufSrcBase,
                            &dstST, (void *)childDstBase, (void *)bufDstBase))
     return ret_t::TransformFailed;

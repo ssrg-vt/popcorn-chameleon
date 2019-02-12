@@ -28,7 +28,7 @@
 #define DOWN 1 /* grows from higher addresses to lower addresses */
 
 #ifdef __x86_64__
-# define WORDSZ 4UL
+# define WORDSZ 8UL
 # define STACK_DIRECTION DOWN
 #endif
 
@@ -199,6 +199,7 @@ RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
  * @param callback function called by transformation runtime to read
  *                 transformation metadata
  * @param meta transformation metadata handle
+ * @param isReturn true if we stopped at a return instruction
  * @param childSrcBase address of source stack's base in child's address space
  * @param bufSrcBase address of source stack's base in chameleon's address
  *                   space
@@ -212,6 +213,7 @@ RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
 ret_t transformStack(CodeTransformer *CT,
                      get_rand_info callback,
                      st_handle meta,
+                     bool isReturn,
                      uintptr_t childSrcBase,
                      uintptr_t bufSrcBase,
                      uintptr_t childDstBase,

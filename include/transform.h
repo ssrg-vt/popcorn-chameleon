@@ -339,10 +339,13 @@ private:
 
   /**
    * Advance the child process to a transformation point.
-   * @param t a running timer
+   * @param ty output argument set to the type of transformation point at which
+   *           the child was stopp
+   * @param t a running timer which will be paused while advancing forward
    * @return a return code describing the outcome
    */
-  ret_t advanceToTransformationPoint(Timer &t) const;
+  ret_t advanceToTransformationPoint(RandomizedFunction::TransformType &Ty,
+                                     Timer &t) const;
 
   /**
    * Get the IR-level instruction for a given program counter value, enclosed

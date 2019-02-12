@@ -270,9 +270,11 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
 }
 
 ret_t CodeTransformer::rerandomize() {
+  typedef RandomizedFunction::TransformType TransformType;
   uintptr_t sp, rawBuf, mid, childSrcBase, bufSrcBase,
             childDstBase, bufDstBase;
   size_t stackSize;
+  TransformType StopTy;
   ret_t code;
   Timer t;
 
@@ -281,7 +283,8 @@ ret_t CodeTransformer::rerandomize() {
 
   // We only have metadata at transformation points, advance the child to a
   // transformation point where the stack transformation can bootstrap.
-  if((code = advanceToTransformationPoint(t)) != ret_t::Success) return code;
+  code = advanceToTransformationPoint(StopTy, t);
+  if(code != ret_t::Success) return code;
 
   // Read in the child's current stack.  We currently divide the stack into 2
   // halves and rewrite from one half to the other.
@@ -318,6 +321,7 @@ ret_t CodeTransformer::rerandomize() {
 
   // Transform the stack, including switching to the transformed stack
   code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
+                              StopTy == TransformType::Return,
                               childSrcBase, bufSrcBase,
                               childDstBase, bufDstBase, sp);
   if(code != ret_t::Success) return ret_t::TransformFailed;
@@ -464,13 +468,14 @@ CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
   return code;
 }
 
-ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
-  typedef chameleon::RandomizedFunction::TransformType TransformType;
+ret_t
+CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType &Ty,
+                                                              Timer &t) const {
+  typedef RandomizedFunction::TransformType TransformType;
   uintptr_t pc;
   size_t interruptSize;
   const RandomizedFunction *info;
   const function_record *fr;
-  TransformType type;
   std::unordered_map<uintptr_t, uint64_t> origData;
   ret_t code;
 #ifdef DEBUG_BUILD
@@ -487,8 +492,8 @@ ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
   // transformation points should be at the point where a function has just
   // been called or is returning, allowing us to bootstrap transformation.
   if(pc != fr->addr) {
-    type = info->getTransformationType(pc);
-    if(type == TransformType::None) {
+    Ty = info->getTransformationType(pc);
+    if(Ty == TransformType::None) {
       DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
                        "function at 0x" << std::hex << fr->addr << std::endl);
 
@@ -504,8 +509,8 @@ ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
       if(code != ret_t::Success) return code;
       else if(!proc.traceable()) return ret_t::InvalidState;
       pc = proc.getPC() - interruptSize;
-      type = info->getTransformationType(pc);
-      if(type == TransformType::None) return ret_t::TransformFailed;
+      Ty = info->getTransformationType(pc);
+      if(Ty == TransformType::None) return ret_t::TransformFailed;
       if((code = proc.setPC(pc)) != ret_t::Success) return code;
       code = restoreTransformBreakpoints(info, origData);
       if(code != ret_t::Success) return code;
@@ -513,9 +518,10 @@ ret_t CodeTransformer::advanceToTransformationPoint(Timer &t) const {
 
     // If we stopped at a call instruction, walk it into the called function in
     // preparation for transformation
-    if(type == TransformType::CallSite)
+    if(Ty == TransformType::CallSite)
       if((code = proc.singleStep()) != ret_t::Success) return code;
   }
+  else Ty = TransformType::None;
 
   DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
                    << std::hex << pc << std::endl);
