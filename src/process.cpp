@@ -475,7 +475,11 @@ ret_t Process::setFuncCallRegs(long a1, long a2, long a3,
 
 ret_t Process::read(uintptr_t addr, uint64_t &data) const {
   if(!traceable()) return ret_t::InvalidState;
-  if(!trace::getMem(pid, addr, data)) return ret_t::PtraceFailed;
+  if(!trace::getMem(pid, addr, data)) {
+    DEBUGMSG("ptrace read failed at address 0x" << std::hex << addr << ": "
+             << strerror(errno) << std::endl);
+    return ret_t::PtraceFailed;
+  }
   return ret_t::Success;
 }
 
@@ -502,7 +506,11 @@ ret_t Process::readRegion(uintptr_t addr, byte_iterator &buffer) const {
 
 ret_t Process::write(uintptr_t addr, uint64_t data) const {
   if(!traceable()) return ret_t::InvalidState;
-  if(!trace::setMem(pid, addr, data)) return ret_t::PtraceFailed;
+  if(!trace::setMem(pid, addr, data)) {
+    DEBUGMSG("ptrace write failed at address 0x" << std::hex << addr << ": "
+             << strerror(errno) << std::endl);
+    return ret_t::PtraceFailed;
+  }
   return ret_t::Success;
 }
 

@@ -28,11 +28,12 @@
 #define DOWN 1 /* grows from higher addresses to lower addresses */
 
 #ifdef __x86_64__
+# define WORDSZ 4UL
 # define STACK_DIRECTION DOWN
 #endif
 
-#ifndef STACK_DIRECTION
-# error Each ISA must define which direction the stack grows
+#if !defined WORDSZ || !defined STACK_DIRECTION
+# error Each ISA must define its word size and which direction the stack grows
 #endif
 
 namespace chameleon {
@@ -54,12 +55,10 @@ bool supportedArch(uint16_t arch);
 
 /**
  * Return instruction bytes that generate an interrupt.
- * @param mask output argument set to a bitmask for zeroing out bytes for
- *             interrupt instruction
  * @param size output argument set to the size of the interrupt instruction
  * @return instruction bytes that generate an interrupt
  */
-uint64_t getInterruptInst(uint64_t &mask, size_t &size);
+uint64_t getInterruptInst(size_t &size);
 
 /**
  * Fill a buffer with interrupt instructions.

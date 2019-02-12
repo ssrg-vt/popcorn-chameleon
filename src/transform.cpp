@@ -382,11 +382,42 @@ int32_t CodeTransformer::slotOffsetFromRegister(uint32_t frameSize,
   }
 }
 
+static inline uint64_t replaceBits(uint64_t origBits,
+                                   uint64_t newBits,
+                                   size_t position,
+                                   size_t size) {
+  uint64_t mask = 0;
+
+  assert(position < sizeof(uint64_t) && size < sizeof(uint64_t) &&
+         (position + size) <= sizeof(uint64_t) &&
+         "Invalid interrupt bits - runs past end of buffer");
+
+  // Generate the mask
+  switch(size) {
+  case 1: mask = 0xffUL; break;
+  case 2: mask = 0xffffUL; break;
+  case 3: mask = 0xffffffUL; break;
+  case 4: mask = 0xffffffffUL; break;
+  case 5: mask = 0xffffffffffUL; break;
+  case 6: mask = 0xffffffffffffUL; break;
+  case 7: mask = 0xffffffffffffffUL; break;
+  case 8: mask = 0xffffffffffffffffUL; break;
+  default: assert(false && "Invalid interrupt size"); return UINT64_MAX;
+  }
+  mask = ~(mask << (position * 8));
+
+  // Mask out the old instruction bits and or in the new bits
+  newBits <<= (position * 8);
+  return (origBits & mask) | newBits;
+}
+
 ret_t
 CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
                      std::unordered_map<uintptr_t, uint64_t> &origData,
                      size_t &interruptSize) const {
-  uint64_t interrupt, mask, tmp;
+  uint64_t interrupt, newBits;
+  uintptr_t alignedAddr;
+  size_t position;
   auto &addrs = info->getTransformAddrs();
   origData.clear();
   ret_t code;
@@ -398,16 +429,22 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
                "harm performance" << std::endl);
   )
 
-  // TODO overwriting return instructions can inadvertently overwrite the start
-  // of other functions, may race with other threads spraying start of function
-  // (if added as transform point)
-  interrupt = arch::getInterruptInst(mask, interruptSize);
+  interrupt = arch::getInterruptInst(interruptSize);
   for(auto addr = addrs.begin(); addr != addrs.end(); addr++) {
-    uint64_t &data = origData[addr->first];
-    code = proc.read(addr->first, data);
+    // Read & save original data, write in interrupt instruction bits, and
+    // write the instruction back to the child's address space.  Note that
+    // ptrace requires reads/writes to be word aligned; make it so.
+    // TODO overwriting return instructions can inadvertently overwrite the
+    // start of other functions, may race with other threads spraying start of
+    // function (if added as transform point)
+    alignedAddr = ROUND_DOWN(addr->first, WORDSZ);
+    uint64_t &data = origData[alignedAddr];
+    code = proc.read(alignedAddr, data);
     if(code != ret_t::Success) return code;
-    tmp = (data & mask) | interrupt;
-    code = proc.write(addr->first, tmp);
+
+    position = addr->first - alignedAddr;
+    newBits = replaceBits(data, interrupt, position, interruptSize);
+    code = proc.write(alignedAddr, newBits);
     if(code != ret_t::Success) return code;
   }
 
@@ -419,6 +456,8 @@ CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
                const std::unordered_map<uintptr_t, uint64_t> &origData) const {
   ret_t code = ret_t::Success;
   for(auto data = origData.begin(); data != origData.end(); data++) {
+    assert(data->first == ROUND_DOWN(data->first, WORDSZ) &&
+           "Non-aligned transformation address");
     code = proc.write(data->first, data->second);
     if(code != ret_t::Success) break;
   }
