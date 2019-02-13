@@ -61,7 +61,7 @@ extern pid_t masterPID;
 #define MASK_INT( ... ) \
   ({ \
     int ret; \
-    do { ret = __VA_ARGS__; } while(ret && errno != EINTR); \
+    do { ret = __VA_ARGS__; } while(ret && errno == EINTR); \
     ret; \
   })
 
