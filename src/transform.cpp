@@ -419,11 +419,10 @@ ret_t
 CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
                      std::unordered_map<uintptr_t, uint64_t> &origData,
                      size_t &interruptSize) const {
-  uint64_t interrupt, newBits;
+  uint64_t interrupt, origBits, newBits;
   uintptr_t alignedAddr;
   size_t position;
   auto &addrs = info->getTransformAddrs();
-  origData.clear();
   ret_t code;
 
   DEBUG(
@@ -433,6 +432,7 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
                "harm performance" << std::endl);
   )
 
+  origData.clear();
   interrupt = arch::getInterruptInst(interruptSize);
   for(auto addr = addrs.begin(); addr != addrs.end(); addr++) {
     // Read & save original data, write in interrupt instruction bits, and
@@ -442,12 +442,17 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
     // start of other functions, may race with other threads spraying start of
     // function (if added as transform point)
     alignedAddr = ROUND_DOWN(addr->first, WORDSZ);
-    uint64_t &data = origData[alignedAddr];
-    code = proc.read(alignedAddr, data);
-    if(code != ret_t::Success) return code;
+    code = proc.read(alignedAddr, origBits);
+    if(code != ret_t::Success) {
+      // ptrace fails with EIO if the page data isn't already mapped; we'll
+      // just warn the user rather than dying
+      if(errno == EIO) return ret_t::UnmappedMemory;
+      else return code;
+    }
 
+    origData[alignedAddr] = origBits;
     position = addr->first - alignedAddr;
-    newBits = replaceBits(data, interrupt, position, interruptSize);
+    newBits = replaceBits(origBits, interrupt, position, interruptSize);
     code = proc.write(alignedAddr, newBits);
     if(code != ret_t::Success) return code;
   }
@@ -499,7 +504,10 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
 
       // Insert traps at transformation breakpoints & kick child towards them
       code = sprayTransformBreakpoints(info, origData, interruptSize);
-      if(code != ret_t::Success) return code;
+      if(code != ret_t::Success) {
+        restoreTransformBreakpoints(info, origData);
+        return code;
+      }
 
       t.end(true);
       if((code = proc.continueToNextSignal()) != ret_t::Success) return code;

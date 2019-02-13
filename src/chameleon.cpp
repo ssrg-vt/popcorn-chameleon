@@ -375,13 +375,16 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
 
     if(randomize) {
       code = CT.rerandomize();
-      if(code != ret_t::Success) {
-        if(code == ret_t::NoTransformMetadata) {
-           WARN(pid << ": skipping re-randomization, no metadata at 0x" << hex
-                << pc << endl);
-        }
-        else ERROR(pid << ": could not re-randomize child: " << retText(code)
-                   << std::endl);
+      switch(code) {
+      case ret_t::Success: break;
+      case ret_t::NoTransformMetadata: // fall through
+      case ret_t::UnmappedMemory:
+        WARN(pid << ": skipping re-randomization at 0x" << hex << pc << ": "
+             << retText(code) << endl);
+        break;
+      default:
+        ERROR(pid << ": could not re-randomize child: " << retText(code)
+              << std::endl);
       }
     }
     return Process::Stopped;
