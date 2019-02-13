@@ -903,10 +903,11 @@ int32_t arch::getFrameUpdateSize(instr_t *instr) {
   case OP_pop:
     return -CodeTransformer::getOperandSize(instr_get_dst(instr, 0));
   case OP_popf: return -8;
+  case OP_ret:  case OP_ret_far: return -8;
 
   // Instructions that modify the stack pointer in a way we don't care about
   case OP_call: case OP_call_ind: case OP_call_far: case OP_call_far_ind:
-  case OP_ret:  case OP_ret_far: return 0;
+    return 0;
 
   default:
     DEBUG(WARN("Unhandled update to stack pointer" << std::endl)); return 0;

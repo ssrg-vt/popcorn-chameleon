@@ -52,6 +52,19 @@ extern pid_t masterPID;
 /* Mask to only keep page offset bits (i.e., keep lower bits) */
 #define PAGE_OFFSET_BITS( addr ) (addr & (PAGESZ-1))
 
+/*
+ * Perform an expression (probably a C library or system call), masking EINTR
+ * errors caused by SIGINT signals.
+ *
+ * Note: assumes the expressions returns 0 upon successfully completing
+ */
+#define MASK_INT( ... ) \
+  ({ \
+    int ret; \
+    do { ret = __VA_ARGS__; } while(ret && errno != EINTR); \
+    ret; \
+  })
+
 namespace chameleon {
 
 /**

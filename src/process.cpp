@@ -321,7 +321,7 @@ ret_t Process::attach() {
 
 ret_t Process::attachHandoff() {
   ret_t code;
-  if(sem_wait(&handoff)) return ret_t::HandoffFailed;
+  if(MASK_INT(sem_wait(&handoff))) return ret_t::HandoffFailed;
 
   // Child is daemonized and sleeping waiting for commands.  Cure the parasite
   // to return it to a trace-stop before initializing.

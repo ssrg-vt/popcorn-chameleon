@@ -146,7 +146,7 @@ void *randomizeCodeAsync(void *arg) {
 
     t.end(true);
     DEBUGMSG_VERBOSE("code randomization time: " << t.elapsed(Timer::Micro)
-                     << std::endl);
+                     << " us" << std::endl);
 
     sem_post(finished);
     sem_wait(randomize);
@@ -316,16 +316,25 @@ ret_t CodeTransformer::rerandomize() {
 
   // Wait for code re-randomizer to finish and set the current code buffer to
   // the newly randomized code
-  if(sem_wait(&finishedScrambling)) return ret_t::RandomizeFailed;
+  if(MASK_INT(sem_wait(&finishedScrambling))) return ret_t::RandomizeFailed;
   codeWindow = nextCodeWindow;
 
-  // Transform the stack, including switching to the transformed stack
+  // Transform the stack; transformStack() internally sets the register set
+  // (including swinging the SP) to the transformed registers
   code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
                               StopTy == TransformType::Return,
                               childSrcBase, bufSrcBase,
                               childDstBase, bufDstBase, sp);
-  if(code != ret_t::Success) return ret_t::TransformFailed;
+  if(code != ret_t::Success) {
+    // We didn't actually switch to the new randomization/stack because the
+    // transform failed.  Restore the memory window & previously-consumed
+    // semaphore to avoid deadlocking when trying to transform the stack again.
+    nextCodeWindow = codeWindow;
+    sem_post(&finishedScrambling);
+    return ret_t::TransformFailed;
+  }
 
+  // Write the transformed stack into the child's memory
   stackSize = childDstBase - sp;
   stackBuf = byte_iterator((unsigned char *)rawBuf + (sp - stackBounds.first),
                            stackSize);
@@ -807,7 +816,7 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
 
 ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   int32_t update, offset;
-  uint32_t frameSize = arch::initialFrameSize();
+  uint32_t frameSize = arch::initialFrameSize(), maxFrameSize = 0;
   size_t instrSize;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = codeWindow.getData(func->addr);
@@ -828,7 +837,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
 
   if(!cur) {
     DEBUGMSG("invalid code iterator" << std::endl);
-    return ret_t::RandomizeFailed;
+    return ret_t::AnalysisFailed;
   }
 
   // Construct a list of instructions & analyze for restrictions.
@@ -866,6 +875,18 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
 
     real += instrSize;
 
+    // For functions with multiple return instructions, the frame size may drop
+    // to zero and screw up our analyses.  Restore to original size.  Note this
+    // *should* be okay, because if the compiler had to do any frame cleanup it
+    // would make the function single exit so that it didn't have to emit the
+    // epilogue multiple times.
+    if(!frameSize) {
+      assert(maxFrameSize && "Max frame size is unset");
+      DEBUGMSG_VERBOSE("found epilogue inside function body, restoring frame "
+                       "size to" << maxFrameSize << std::endl);
+      frameSize = maxFrameSize;
+    }
+
     code = analyzeOperands<instr_num_srcs, instr_get_src>
                           (info, frameSize, instr);
     if(code != ret_t::Success) goto out;
@@ -897,6 +918,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
           if((code = info->addRestriction(res)) != ret_t::Success) goto out;
         }
         frameSize += update;
+        maxFrameSize = std::max(frameSize, maxFrameSize);
       }
     }
   }
@@ -905,7 +927,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   code = info->populateSlots();
 
   DEBUG_VERBOSE(
-    if(frameSize != arch::initialFrameSize())
+    if(frameSize)
       DEBUGMSG(" -> function does not clean up frame (not intended to return?)"
                << std::endl);
   )
@@ -1053,8 +1075,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
                                          MemoryWindow &buffer) {
   bool changed;
   int32_t update, offset, instrSize;
-  uint32_t frameSize = arch::initialFrameSize(),
-           randFrameSize = arch::initialFrameSize(),
+  uint32_t frameSize = arch::initialFrameSize(), maxFrameSize = 0,
+           randFrameSize = arch::initialFrameSize(), maxRandFrameSize = 0,
            count = 0;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = buffer.getData(func->addr);
@@ -1076,6 +1098,16 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
     instrSize = instr_length(GLOBAL_DCONTEXT, instr);
 
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
+
+    // See frame size cleanup comment in analyzeFunction()
+    if(!frameSize) {
+      assert(maxFrameSize && maxRandFrameSize && "Max frame size is unset");
+      DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
+                       "to " << maxFrameSize << " (prev), " << maxRandFrameSize
+                       << " (cur)" << std::endl);
+      frameSize = maxFrameSize;
+      randFrameSize = maxRandFrameSize;
+    }
 
     // Rewrite stack slot reference operands to their randomized locations
     code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
@@ -1112,6 +1144,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
         }
         else randFrameSize += update;
         frameSize += update;
+        maxFrameSize = std::max(frameSize, maxFrameSize);
+        maxRandFrameSize = std::max(randFrameSize, maxRandFrameSize);
       }
     }
 
@@ -1137,7 +1171,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
       instr_set_raw_bits(instr, cur, instrSize);
       instr_set_raw_bits_valid(instr, false);
       cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
-      if(!cur) return ret_t::RandomizeFailed;
+      if(!cur) {
+        WARN("re-encoding changed instruction failed" << std::endl);
+        return ret_t::RandomizeFailed;
+      }
       instr_set_raw_bits(instr, prev, cur - prev);
 
       DEBUG_VERBOSE(
