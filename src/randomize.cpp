@@ -18,9 +18,6 @@ using namespace chameleon;
 bool chameleon::slotMapCmp(const SlotMap &a, const SlotMap &b)
 { return a.original < b.original; }
 
-bool chameleon::slotMapCmpReverse(const SlotMap &a, const SlotMap &b)
-{ return a.original > b.original; }
-
 bool chameleon::slotMapContains(const SlotMap *slot, int offset)
 { return CONTAINS_BELOW(offset, slot->original, slot->size); }
 
@@ -257,8 +254,8 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
 
   // If permutation failed, resort to original ordering
   if(randomizedOffset > origOffset) {
-    WARN("Could not permute slots in " << origOffset << " -> "
-         << origOffset + origSize << " region" << std::endl);
+    DEBUG(WARN("Could not permute slots in " << origOffset << " -> "
+               << origOffset + origSize << " region" << std::endl));
     for(auto &sm : slots) sm.randomized = sm.original;
   }
   else if(randomizedOffset < origOffset) {
@@ -354,7 +351,7 @@ static inline size_t serializeSlots(const StackRegionPtr &r,
   return curIdx + curSlots.size();
 }
 
-ret_t RandomizedFunction::populateSlots() {
+ret_t RandomizedFunction::finalizeAnalysis() {
   // We need to maintain a previous randomization mapping because as we
   // randomize we rewrite the instructions, clobbering the original offsets.
   // Start by sizing the slot remapping arrays.
@@ -381,6 +378,14 @@ ret_t RandomizedFunction::populateSlots() {
   return ret_t::Success;
 }
 
+/**
+ * Comparison function for sorting & searching a SlotMap.  Searches based on
+ * the randomized offset.
+ *
+ * @param first slot mapping
+ * @param second slot mapping
+ * @return true if a's first element is less than b's first element
+ */
 static bool slotMapCmpRand(const SlotMap &a, const SlotMap &b)
 { return a.randomized < b.randomized; }
 
@@ -414,9 +419,7 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   // into the current slot remapping vector.  Create a secondary vector of the
   // previous mapping sorted by the randomized offset (instead of original) so
   // that we can use a binary search in getOriginalMapping().
-  std::vector<SlotMap> *tmp = prevRand;
-  prevRand = curRand;
-  curRand = tmp;
+  std::swap(prevRand, curRand);
   memcpy(&prevSortedByRand[0], &prevRand->at(0),
          sizeof(SlotMap) * prevSortedByRand.size());
   std::sort(prevSortedByRand.begin(), prevSortedByRand.end(), slotMapCmpRand);
@@ -440,9 +443,26 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   return ret_t::Success;
 }
 
+/**
+ * Return whether the SlotMap contains a given offset.  Uses the slot's
+ * randomized offset.
+ *
+ * @param slot a slot mapping
+ * @offset a canonicalized stack offset
+ * @param true if the slot contains the offset or false otherwise
+ */
 static bool slotMapContainsRand(const SlotMap *slot, int offset)
 { return CONTAINS_BELOW(offset, slot->randomized, slot->size); }
 
+/**
+ * Return whether an offset would appear in a SlotMap before the specified
+ * SlotMap in a sorted ordering of SlotMaps.  Uses the slot's randomized
+ * offset.
+ *
+ * @param slot a slot mapping
+ * @param offset a canonicalized stack offseta
+ * @return true if the offset would appear before the slot or false otherwise
+ */
 static bool lessThanSlotMapRand(const SlotMap *slot, int offset)
 { return offset < slot->randomized; }
 

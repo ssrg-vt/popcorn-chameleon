@@ -52,16 +52,6 @@ typedef struct SlotMap {
 bool slotMapCmp(const SlotMap &a, const SlotMap &b);
 
 /**
- * Comparison function for sorting a SlotMap.  Searches based on the original
- * offset in a reverse ordering, i.e., higher offsets first.
- *
- * @param first slot mapping
- * @param second slot mapping
- * @return true if a's first element is greater than b's first element
- */
-bool slotMapCmpReverse(const SlotMap &a, const SlotMap &b);
-
-/**
  * Return whether the SlotMap contains a given offset.  Uses the slot's
  * original offset.
  *
@@ -73,12 +63,11 @@ bool slotMapContains(const SlotMap *slot, int offset);
 
 /**
  * Return whether an offset would appear in a SlotMap before the specified
- * SlotMap in a sorted ordering of SlotMaps.
+ * SlotMap in a sorted ordering of SlotMaps.  Uses the slot's original offset.
  *
  * @param slot a slot mapping
  * @param offset a canonicalized stack offset
- * @return true if the offset would appear before the slot or false
- *         otherwise
+ * @return true if the offset would appear before the slot or false otherwise
  */
 bool lessThanSlotMap(const SlotMap *slot, int offset);
 
@@ -140,13 +129,6 @@ public:
    * Sort the slots so they can be searched.
    */
   void sortSlots() { std::sort(slots.begin(), slots.end(), slotMapCmp); }
-
-  /**
-   * Sort the slots in reverse ordering.  Note that they *must* be re-sorted
-   * using sortSlots() to be searchable!
-   */
-  void sortSlotsReverse()
-  { std::sort(slots.begin(), slots.end(), slotMapCmpReverse); }
 
   /**
    * Calculate randomized slot offsets and add padding using the templated
@@ -384,11 +366,14 @@ public:
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
 
   /**
-   * Populate stack regions with stack slots from metadata after analyzing
-   * restrictions.  Just to emphasize, this must be called *after* analysis.
+   * Finalize all analysis, including generating any extra information required
+   * for randomization and populating stack regions with stack slots from
+   * metadata after analyzing restrictions.  Just to emphasize, this must be
+   * called *after* analysis.
+   *
    * @return a return code describing the outcome
    */
-  virtual ret_t populateSlots();
+  virtual ret_t finalizeAnalysis();
 
   /**
    * Randomize a function.

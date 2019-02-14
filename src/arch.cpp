@@ -207,7 +207,7 @@ enum x86Region {
   R_Movable,
   R_SPLimited,
   R_Call,
-  R_Immovable,
+  R_Alignment,
 };
 
 /* x86 region names (corresponds to indexs above) */
@@ -217,7 +217,7 @@ const char *x86RegionName[] {
   "movable",
   "SP-limited",
   "call",
-  "immovable",
+  "alignment",
 };
 
 /**
@@ -356,25 +356,25 @@ private:
  * |                       | v
  * |-----------------------|
  * |                       | ^
- * |    Immovable area     | | Immutable
+ * |    Alignment area     | | Immutable
  * |                       | v
  * |-----------------------|
  *
- * The bulk of the randomization applies to regular stack slots and the
- * callee-save area.  For stack slots, x86-64 allows 1-byte displacements for
- * base + displacement memory references; the displacement for these objects
- * cannot fall outside -128 <-> 127, meaning the randomizer is limited in what
- * it can do with these slots.  Thus the FP-limited and SP-limited stack slots
- * are only permutable and not fully randomizable.
+ * The regions above the call area are randomizable (with limitations).
+ *
+ * - Most compilers emit callee-saved register save/restore procedures as a
+ *   series of push/pop instructions; the ordering of this procedure can be
+ *   permuted but not fully randomized
+ * - x86-64 allows 1-byte displacement encodings for base + displacement memory
+ *   references; the displacement for these objects cannot fall outside
+ *   -128 <-> 127 (as it will increase the encoding size), so the FP-limited
+ *   and SP-limited stack slots are only permutable and not fully randomizable
  *
  * Note 1: we don't move stack objects between their original regions as it may
  * create incorrect behavior.  For example, moving a stack slot from the
  * completely randomizable area into a permutable area may violate the
  * restrictions on those objects.
  */
-// TODO we don't do any checking regarding if a single stack slot is accessed
-// via both frame and stack pointer or crosses regions and thus could
-// potentially fall into one or more regions
 class x86RandomizedFunction : public RandomizedFunction {
 public:
   x86RandomizedFunction(const Binary &binary, const function_record *func)
@@ -382,7 +382,7 @@ public:
     int offset;
     size_t size, regionSize = 0;
 
-    // Add the callee-save slots to the callee-save area
+    // Add the callee-save slots to the callee-save region
     Binary::unwind_iterator ui = binary.getUnwindLocations(func);
     x86CalleeSaveRegion *cs = new x86CalleeSaveRegion(x86Region::R_CalleeSave);
     for(; !ui.end(); ++ui) {
@@ -408,7 +408,7 @@ public:
     regions.back()->setMinRandOffset(144); // Don't spill into FP-limited
     regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
-    regions.emplace_back(new ImmutableRegion(x86Region::R_Immovable));
+    regions.emplace_back(new ImmutableRegion(x86Region::R_Alignment));
   }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
@@ -435,7 +435,9 @@ public:
       return ret_t::Success;
     }
 
-    // Convert offsets to their containing slots, if any
+    // Convert offsets to their containing slots, if any, so that we can avoid
+    // adding multiple restrictions for the same slot (e.g., different offsets
+    // within the same slot)
     slot = findSlot(offset);
     if(slot.first != INT32_MAX) {
       offset = slot.first;
@@ -447,7 +449,7 @@ public:
     // Avoid adding multiple restrictions for a single slot
     // TODO what if there are multiple types of restrictions for a single stack
     // slot, e.g., one use causes a SP-limited displacement and another causes
-    // the slot to be immovable?
+    // the slot to be immutable?
     if(seen.count(offset)) {
       DEBUGMSG_VERBOSE(" -> previously handled offset " << offset
                        << std::endl);
@@ -461,8 +463,9 @@ public:
       if(!regions[x86Region::R_CalleeSave]->contains(offset)) {
         // Some functions (e.g., Popcorn's migration library) access offsets
         // beyond the frame size in the metadata; ignore thoses accesses.
+        // TODO what about red zone usage?
         if(offset <= (int)func->frame_size) {
-          regions[x86Region::R_Immovable]->addSlot(offset, size, alignment);
+          regions[x86Region::R_Alignment]->addSlot(offset, size, alignment);
           DEBUGMSG(" -> cannot randomize slot @ " << offset << " (size = "
                    << size << ")" << std::endl);
         }
@@ -508,7 +511,9 @@ public:
 
   void populateMovable() {
     StackRegionPtr &r = regions[x86Region::R_Movable];
+#ifdef DEBUG_BUILD
     const char *name = x86RegionName[x86Region::R_Movable];
+#endif
 
     // Add stack slots to the movable region.  During analysis we should have
     // added any restricted slots to their appropriate sections; the remaining
@@ -530,8 +535,10 @@ public:
     regions[x86Region::R_Movable].reset(newMov);
     StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
                    &movable = regions[x86Region::R_Movable];
+#ifdef DEBUG_BUILD
     const char *fpLimitedName = x86RegionName[x86Region::R_FPLimited],
                *movableName = x86RegionName[x86Region::R_Movable];
+#endif
 
     DEBUGMSG("changed movable to permutable region to stay within maximum "
              "frame size" << std::endl);
@@ -541,10 +548,10 @@ public:
     // accidentally forcing a larger encoding for the bulk frame update, put
     // slots in the FP-limited region.  However, sometimes the situation arises
     // where stack slots in the metadata are beyond what is addressable from
-    // FBP + 1 byte.  For these slots, throw them in the movable region - if we
-    // put them in the FP-limited region, it's possible some slot that is
-    // addressable from the FBP + 1 byte would be placed out of range, forcing
-    // DynamoRIO to encode the offset using a 4-byte encoding.
+    // FBP + 128.  For these slots, throw them in the movable region - if we
+    // put them in the FP-limited region, it's possible some slot that *is*
+    // addressable from FBP + 128 would be placed out of range, forcing a
+    // larger encoding.
     // TODO this doesn't handle SP-limited slots
     for(auto &s : slots) {
       if(!seen.count(s.first)) {
@@ -563,7 +570,7 @@ public:
     }
   }
 
-  virtual ret_t populateSlots() override {
+  virtual ret_t finalizeAnalysis() override {
     int curOffset = 0;
     size_t i;
 
@@ -572,12 +579,12 @@ public:
     else populateWithRestrictions();
 
     // Calculate section offsets & prune empty sections.
-    // TODO is it faster to search through unsorted slots in each section to
-    // find the bottom offset?
     curOffset = regions[0]->getOriginalRegionOffset();
     for(i = 1; i < regions.size(); i++) {
       if(regions[i]->numSlots() > 0) {
         StackRegionPtr &region = regions[i];
+        // TODO is it faster to search through unsorted slots in each section
+        // to find the bottom offset?
         region->sortSlots();
         const SlotMap &bottom = region->getSlots().back();
         region->setRegionOffset(bottom.original);
@@ -608,9 +615,10 @@ public:
                        << std::endl);
     }
 
-    assert((uint32_t)regions.back()->getOriginalRegionOffset() <= maxFrameSize);
+    assert((uint32_t)regions.back()->getOriginalRegionOffset() <=
+           maxFrameSize);
 
-    return RandomizedFunction::populateSlots();
+    return RandomizedFunction::finalizeAnalysis();
   }
 
   virtual ret_t randomize(int seed, size_t maxPadding) override {
@@ -673,7 +681,7 @@ public:
 
   /**
    * For x86-64, the bulk update consists of the FP-limited, movable,
-   * SP-limited, call and immovable regions.
+   * SP-limited, call and alignment regions.
    */
   virtual uint32_t getRandomizedBulkFrameUpdate() const override {
     assert(regions.size() > 1 && "No bulk frame update");
@@ -914,14 +922,15 @@ int32_t arch::getFrameUpdateSize(instr_t *instr) {
   }
 }
 
-bool arch::getRestriction(instr_t *instr, opnd_t op, RandRestriction &res) {
+bool
+arch::getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res) {
   bool restricted = false;
   int disp;
   arch::RegType base;
 
   switch(instr_get_opcode(instr)) {
   // Push/pop instructions look like restricted frame references, but they're
-  // also frame updates; handle separately in other version of getRestriction()
+  // also frame updates; handle separately in getStackUpdateRestriction()
   case OP_push: case OP_pushf: case OP_pop: case OP_popf: return false;
 
   // Similarly, ret & call instructions modify the stack pointer in a way we
@@ -933,34 +942,38 @@ bool arch::getRestriction(instr_t *instr, opnd_t op, RandRestriction &res) {
   default: break;
   }
 
+  assert(opnd_is_base_disp(op) && "Invalid operand - expected base + disp");
+
   // TODO if moving YMM/ZMM registers to/from the stack, do we need to increase
   // alignment to 32 or 64 bytes, respectively?
 
-  if(opnd_is_base_disp(op)) {
-    // Because x86-64 is so darn flexible, the compiler can encode
-    // displacements with varying sizes depending on the range
-    disp = opnd_get_disp(op);
-    base = arch::getRegTypeDR(opnd_get_base(op));
-    switch(base) {
-    case RegType::FramePointer: case RegType::StackPointer:
-      if(INT8_MIN <= disp && disp <= INT8_MAX &&
-         !opnd_is_disp_force_full(op)) {
-        res.flags = x86Restriction::F_RangeLimited;
-        res.size = res.alignment = 0; // Determine when randomizing
-        res.base = base;
-        res.range.first = INT8_MIN;
-        res.range.second = INT8_MAX;
-        restricted = true;
-      }
-      break;
-    default: break;
+  // Because x86-64 is so darn flexible, the compiler can encode
+  // displacements with varying sizes depending on the range
+  disp = opnd_get_disp(op);
+  base = arch::getRegTypeDR(opnd_get_base(op));
+  switch(base) {
+  case RegType::FramePointer: case RegType::StackPointer:
+    if(INT8_MIN <= disp && disp <= INT8_MAX &&
+       !opnd_is_disp_force_full(op)) {
+      res.flags = x86Restriction::F_RangeLimited;
+      res.size = res.alignment = 0; // Determine when randomizing
+      res.base = base;
+      res.range.first = res.range.second = INT8_MIN;
+      restricted = true;
     }
+    break;
+  default: break;
   }
+
   return restricted;
 }
 
-bool arch::getRestriction(instr_t *instr, RandRestriction &res) {
-  int update;
+bool arch::getStackUpdateRestriction(instr_t *instr,
+                                     int32_t update,
+                                     RandRestriction &res) {
+  assert(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
+                             DR_QUERY_DEFAULT) &&
+         "Invalid stack update instruction");
 
   switch(instr_get_opcode(instr)) {
   case OP_push: case OP_pushf: case OP_pop: case OP_popf:
@@ -970,14 +983,9 @@ bool arch::getRestriction(instr_t *instr, RandRestriction &res) {
     // Although the frame size may be larger than a byte's range, if the update
     // to the stack pointer itself is within the byte range then we must limit
     // the randomized frame size
-    // Note: assumes we've already determined we're updating the stack pointer
-    if(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
-                           DR_QUERY_DEFAULT)) {
-      update = getFrameUpdateSize(instr);
-      if((INT8_MIN + 1) <= update && update <= INT8_MAX) {
-        res.flags = x86Restriction::F_FrameSizeLimited;
-        return true;
-      }
+    if((INT8_MIN + 1) <= update && update <= INT8_MAX) {
+      res.flags = x86Restriction::F_FrameSizeLimited;
+      return true;
     }
     /* fall through */
   default: return false;

@@ -15,8 +15,8 @@ using namespace chameleon;
 static std::vector<unsigned char> intPage(PAGESZ);
 
 /**
- * Handle a fault, including mapping in the correct data and randomizing any
- * code pieces.
+ * Handle a fault by passing a previously-randomized code page pointer to the
+ * kernel.
  *
  * @param CT code transformer
  * @param uffd userfaultfd file descriptor for user-space fault handling
@@ -39,8 +39,8 @@ static inline ret_t handleFault(CodeTransformer *CT,
 
   DEBUG_VERBOSE(
     // Print the PC causing the fault.  We can't directly interrupt/read child
-    // state (handler isn't the tracer), so poke the child with a signal to get
-    // the tracer to print information (SIGTRAP will get masked by chameleon).
+    // state (we're not the tracer), so poke the child with a signal to get the
+    // tracer to print information (SIGTRAP will get masked by chameleon).
     Process &theProc = CT->getProcess();
     if(theProc.signalProcess(SIGTRAP) == ret_t::Success);
     // TODO ROB the main thread's printing races with the fault handler's
@@ -49,11 +49,14 @@ static inline ret_t handleFault(CodeTransformer *CT,
     nanosleep(&time, nullptr);
   )
 
-  if(CT->shouldServeIntPage()) data = (uintptr_t)&intPage[0];
-  else if(!(data = CT->zeroCopy(pageAddr))) {
-    if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success) return code;
-    data = (uintptr_t)&pageBuf[0];
+  if(!CT->shouldServeIntPage()) {
+    if(!(data = CT->zeroCopy(pageAddr))) {
+      if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success)
+        return code;
+      data = (uintptr_t)&pageBuf[0];
+    }
   }
+  else data = (uintptr_t)&intPage[0];
 
   if(!uffd::copy(uffd, data, pageAddr)) code = ret_t::UffdCopyFailed;
 
@@ -72,12 +75,16 @@ static void *handleFaultsAsync(void *arg) {
   ssize_t bytesRead;
   pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
-  Timer t;
   std::vector<char> pageBuf(PAGESZ);
+  Timer t;
 
   assert(CT && "Invalid CodeTransformer object");
   assert(uffd >= 0 && "Invalid userfaultfd file descriptor");
   assert(msg && "Page fault message buffer allocation failed");
+
+  // TODO race condition - if child handler calls cleanup() before we can set
+  // our PID, we may be orphaned.  Need to signal child handler we've finished
+  // initialization
   CT->setFaultHandlerPid(me);
 
   DEBUGMSG("chameleon thread " << me << " is handling faults for " << cpid
@@ -122,15 +129,18 @@ static void *handleFaultsAsync(void *arg) {
 void *randomizeCodeAsync(void *arg) {
   size_t scrambles = 0;
   CodeTransformer *CT = (CodeTransformer *)arg;
-  sem_t *randomize = CT->getScrambleSem(),
+  sem_t *scramble = CT->getScrambleSem(),
         *finished = CT->getFinishedScrambleSem();
   pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
   MemoryWindow &nextCode = CT->getNextCodeWindow();
   Timer t;
   ret_t code;
 
+  // TODO race condition - if child handler calls cleanup() before we can set
+  // our PID, we may be orphaned.  Need to signal child handler we've finished
+  // initialization
   CT->setScramberPid(me);
-  sem_wait(randomize);
+  sem_wait(scramble);
 
   DEBUGMSG("chameleon thread " << me << " is scrambling code for " << cpid
            << std::endl);
@@ -140,8 +150,13 @@ void *randomizeCodeAsync(void *arg) {
 
     nextCode.copy(CT->getCodeWindow());
     code = CT->randomizeFunctions(nextCode);
-    // TODO need to signal handler something bad happened, this will deadlock
-    if(code != ret_t::Success) break;
+    if(code != ret_t::Success) {
+      // We need to signal to the child handler that the scrambler exited due
+      // to a failure.  Destroy the semaphore so at the next call to
+      // rerandomize(), the child handler's call to sem_wait() fails.
+      sem_destroy(finished);
+      break;
+    }
     scrambles++;
 
     t.end(true);
@@ -149,7 +164,7 @@ void *randomizeCodeAsync(void *arg) {
                      << " us" << std::endl);
 
     sem_post(finished);
-    sem_wait(randomize);
+    sem_wait(scramble);
   }
 
   DEBUGMSG("scrambler " << me << " exiting" << std::endl);
@@ -226,6 +241,8 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
 ret_t CodeTransformer::cleanup() {
   pid_t pid = proc.getPid();
 
+  if(rewriteMetadata) st_destroy(rewriteMetadata);
+
   faultHandlerExit = true;
   proc.detach(); // detaching closes the userfaultfd file descriptor
   if(faultHandlerPid > 0) {
@@ -239,10 +256,12 @@ ret_t CodeTransformer::cleanup() {
   if(scramblerPid > 0) {
     sem_post(&scramble);
     pthread_join(scrambler, nullptr);
+    sem_destroy(&scramble);
+    sem_destroy(&finishedScrambling);
   }
 
   INFO(pid << ": switching to new randomization: " << rerandomizeTime
-       << " us for " << numRandomizations << " randomizations" << std::endl);
+       << " us for " << numRandomizations << " switches" << std::endl);
 
   return ret_t::Success;
 }
@@ -290,8 +309,8 @@ ret_t CodeTransformer::rerandomize() {
   // halves and rewrite from one half to the other.
   if(!(sp = proc.getSP())) return ret_t::PtraceFailed;
   const urange_t &stackBounds = proc.getStackBounds();
-  assert(sp >= stackBounds.first && sp < stackBounds.second
-         && "Invalid stack pointer");
+  assert(sp >= stackBounds.first && sp < stackBounds.second &&
+         "Invalid stack pointer");
   stackSize = stackBounds.second - stackBounds.first;
   mid = (stackBounds.first + stackBounds.second) / 2;
   rawBuf = (uintptr_t)stackMem.get();
@@ -314,10 +333,8 @@ ret_t CodeTransformer::rerandomize() {
   code = proc.readRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
-  // Wait for code re-randomizer to finish and set the current code buffer to
-  // the newly randomized code
+  // Wait for code re-randomizer to finish
   if(MASK_INT(sem_wait(&finishedScrambling))) return ret_t::RandomizeFailed;
-  codeWindow = nextCodeWindow;
 
   // Transform the stack; transformStack() internally sets the register set
   // (including swinging the SP) to the transformed registers
@@ -326,10 +343,9 @@ ret_t CodeTransformer::rerandomize() {
                               childSrcBase, bufSrcBase,
                               childDstBase, bufDstBase, sp);
   if(code != ret_t::Success) {
-    // We didn't actually switch to the new randomization/stack because the
-    // transform failed.  Restore the memory window & previously-consumed
-    // semaphore to avoid deadlocking when trying to transform the stack again.
-    nextCodeWindow = codeWindow;
+    // We didn't switch the stack because the transform failed.  Restore
+    // previously-consumed semaphore to avoid deadlocking when trying to
+    // re-randomize again.
     sem_post(&finishedScrambling);
     return ret_t::TransformFailed;
   }
@@ -341,12 +357,18 @@ ret_t CodeTransformer::rerandomize() {
   code = proc.writeRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
+  // Switch the code window to the new randomized code, drop the exiting code
+  // pages (forcing fresh page faults) and kick off the next code randomization
+  codeWindow = nextCodeWindow;
   if((code = dropCode()) != ret_t::Success) return code;
   if(sem_post(&scramble)) return ret_t::RandomizeFailed;
 
   t.end(true);
   numRandomizations++;
   rerandomizeTime += t.totalElapsed(Timer::Micro);
+
+  DEBUGMSG_VERBOSE(proc.getPid() << ": switching to new randomization took "
+                   << t.elapsed(Timer::Micro) << " us" << std::endl);
 
   return ret_t::Success;
 }
@@ -444,7 +466,7 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
   origData.clear();
   interrupt = arch::getInterruptInst(interruptSize);
   for(auto addr = addrs.begin(); addr != addrs.end(); addr++) {
-    // Read & save original data, write in interrupt instruction bits, and
+    // Read & save original data, mask in interrupt instruction bits, and
     // write the instruction back to the child's address space.  Note that
     // ptrace requires reads/writes to be word aligned; make it so.
     // TODO overwriting return instructions can inadvertently overwrite the
@@ -453,8 +475,8 @@ CodeTransformer::sprayTransformBreakpoints(const RandomizedFunction *info,
     alignedAddr = ROUND_DOWN(addr->first, WORDSZ);
     code = proc.read(alignedAddr, origBits);
     if(code != ret_t::Success) {
-      // ptrace fails with EIO if the page data isn't already mapped; we'll
-      // just warn the user rather than dying
+      // ptrace fails with EIO if the page data isn't already mapped; just warn
+      // the user & skip this randomization period rather than dying
       if(errno == EIO) return ret_t::UnmappedMemory;
       else return code;
     }
@@ -475,7 +497,7 @@ CodeTransformer::restoreTransformBreakpoints(const RandomizedFunction *info,
   ret_t code = ret_t::Success;
   for(auto data = origData.begin(); data != origData.end(); data++) {
     assert(data->first == ROUND_DOWN(data->first, WORDSZ) &&
-           "Non-aligned transformation address");
+           "Unaligned transformation address");
     code = proc.write(data->first, data->second);
     if(code != ret_t::Success) break;
   }
@@ -519,6 +541,8 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
       }
 
       t.end(true);
+      // TODO child may stop due to other signal instead of our transformation
+      // breakpoints; need to keep continuing until we hit a breakpoint
       if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
       t.start();
 
@@ -538,7 +562,7 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
     if(Ty == TransformType::CallSite)
       if((code = proc.singleStep()) != ret_t::Success) return code;
   }
-  else Ty = TransformType::None;
+  else Ty = TransformType::CallSite;
 
   DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
                    << std::hex << pc << std::endl);
@@ -567,16 +591,13 @@ CodeTransformer::getInstruction(uintptr_t pc, RandomizedFunction *info) const {
   return instr;
 }
 
-ret_t CodeTransformer::writePage(uintptr_t start) {
+ret_t CodeTransformer::writeCodePage(uintptr_t start) const {
   byte *pageData;
   std::vector<char> pageBuf;
   ret_t code;
 #ifdef DEBUG_BUILD
-  struct parasite_ctl *parasite = proc.getParasiteCtl();
   uintptr_t origStart = PAGE_DOWN(start);
 #endif
-
-  assert(parasite && "Invalid parasite control handle");
 
   start = PAGE_DOWN(start);
   if(!(pageData = (byte *)zeroCopy(start))) {
@@ -594,7 +615,7 @@ ret_t CodeTransformer::writePage(uintptr_t start) {
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
+ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) const {
   uintptr_t pageStart;
   size_t roundedLen;
   int prot, flags;
@@ -631,9 +652,9 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) {
   DEBUGMSG(proc.getPid() << ": remapped 0x" << std::hex << pageStart << " - 0x"
            << (pageStart + roundedLen) << std::endl);
 
-  // compel touched a page by injecting instructions, so it won't get served
-  // by userfaultfd (the kernel served a zero page); manually rewrite it here.
-  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  // compel touched a page through syscall injection, so it won't get served by
+  // userfaultfd (the kernel served a zero page); manually rewrite it here.
+  code = writeCodePage(PAGE_DOWN(parasite::infectAddress(parasite)));
   if(code != ret_t::Success) return code;
 
   t.end();
@@ -659,19 +680,11 @@ ret_t CodeTransformer::dropCode() {
   struct user_regs_struct regs;
   if((code = proc.readRegs(regs)) != ret_t::Success) return code;
 
-  // The child executes madvise(), which drops the code pages.  When returning
-  // to userspace, the child causes a page fault.  Because the code section has
-  // been changed to use anonymous private pages, one of two things happens:
-  //
-  // 1. If we haven't yet attached a userfaultfd, the kernel serves a zero page
-  // 2. If we have attached a userfaultfd, we get to handle the fault
-  //
-  // Regardless, we want the child to stop directly after the call.  In the
-  // first case, the child will segfault, which we can mask.  In order to make
-  // the second case look like the first, set a flag informing the fault
-  // handling thread to serve a zero page similar to the first case.  Because
-  // the child immediately segfaults after the page fault handling,
-  // parasite::syscall() returns an error; just ignore it.
+  // The child executes madvise(), which causes the kernel to drop the code
+  // pages.  When returning to userspace, the child causes a page fault, giving
+  // the fault handling thread a chance to serve a page.  In order to correctly
+  // regain control, tell the fault handling thread to serve a page filled with
+  // interrupt instructions so that compel immediately regains control.
   __atomic_store_n(&serveInt, true, __ATOMIC_RELEASE);
   parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
                     PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
@@ -682,9 +695,8 @@ ret_t CodeTransformer::dropCode() {
   // initialized, not from when we do a syscall
   if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
 
-  // As previously mentioned, the kernel served a zero page; manually rewrite
-  // it with actual instructions.
-  code = writePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  // Manually rewrite the interrupt page with actual instructions.
+  code = writeCodePage(PAGE_DOWN(parasite::infectAddress(parasite)));
   if(code != ret_t::Success) return code;
 
   return ret_t::Success;
@@ -761,6 +773,19 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
 }
 
 /**
+ * Return whether an instruction is a transformation point, and if so, the type
+ * of the transformation point.
+ * @param instr an instruction
+ * @return the type of transformation point if any
+ */
+static inline
+RandomizedFunction::TransformType getTransformType(instr_t *instr) {
+  if(instr_is_call(instr)) return RandomizedFunction::CallSite;
+  else if(instr_is_return(instr)) return RandomizedFunction::Return;
+  else return RandomizedFunction::None;
+}
+
+/**
  * Return the canonicalized stack offset of an operand if it's a base +
  * displacement memory reference into the stack.  If it's not a memory
  * reference or not a reference to the stack, return 0.
@@ -771,7 +796,7 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
  * @return the canonicalized offset or 0 if not a stack slot reference
  */
 static inline int getStackOffset(uint32_t frameSize,
-                                 opnd_t op,
+                                 const opnd_t &op,
                                  arch::RegType &type) {
   // TODO Note: from dr_ir_opnd.h about opnd_get_disp():
   //   "On ARM, the displacement is always a non-negative value, and the
@@ -826,6 +851,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   instr_t *instr;
   reg_id_t drsp;
   RandRestriction res;
+  RandomizedFunction::TransformType TTy;
   ret_t code = ret_t::Success;
 
   if(funcData.getLength() < func->code_size) {
@@ -847,39 +873,33 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   instrs = instrlist_create(GLOBAL_DCONTEXT);
   drsp = arch::getDRRegType(arch::RegType::StackPointer);
   while(cur < end) {
-    prev = cur;
     instr = instr_create(GLOBAL_DCONTEXT);
     instr_init(GLOBAL_DCONTEXT, instr);
+    prev = cur;
     cur = decode_from_copy(GLOBAL_DCONTEXT, cur, real, instr);
     if(!cur) {
       code = ret_t::AnalysisFailed;
       goto out;
     }
     instrSize = cur - prev;
-    instr_set_raw_bits(instr, prev, instrSize);
+    instr_set_raw_bits(instr, prev, instrSize); // TODO figure out way to remove
     instrlist_append(instrs, instr);
 
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
 
-    // Record addresses of transformation points
-    if(instr_is_call(instr)) {
+    if((TTy = getTransformType(instr)) != RandomizedFunction::None) {
       DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
                        << (uintptr_t)real << ")" << std::endl);
-      info->addTransformAddr((uintptr_t)real, RandomizedFunction::CallSite);
-    }
-    else if(instr_is_return(instr)) {
-      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
-                       << (uintptr_t)real << ")" << std::endl);
-      info->addTransformAddr((uintptr_t)real, RandomizedFunction::Return);
+      info->addTransformAddr((uintptr_t)real, TTy);
     }
 
     real += instrSize;
 
-    // For functions with multiple return instructions, the frame size may drop
-    // to zero and screw up our analyses.  Restore to original size.  Note this
-    // *should* be okay, because if the compiler had to do any frame cleanup it
-    // would make the function single exit so that it didn't have to emit the
-    // epilogue multiple times.
+    // For functions whose epilogue is not at the end of the function's code or
+    // that have multiple return instructions, the frame size may drop to zero
+    // and screw up our analyses.  Restore to the observed maximum size.
+    // Note: we're assuming the compiler didn't do anything silly like
+    // partially clean up the frame mid-way through the function
     if(!frameSize) {
       assert(maxFrameSize && "Max frame size is unset");
       DEBUGMSG_VERBOSE("found epilogue inside function body, restoring frame "
@@ -894,10 +914,10 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                           (info, frameSize, instr);
     if(code != ret_t::Success) goto out;
 
-    // Check if possible to rewrite frame allocation instructions with a random
-    // size; if not, mark the associated stack slot as immovable.  To determine
-    // the associated slot, keep track of the frame's size as it's expanded
-    // (prologue) and shrunk (epilogue) to canonicalize stack slot references.
+    // Keep track of current frame size as it's expanded (prologue) and shrunk
+    // (epilogue) to determine offsets for operands in subsequent instructions.
+    // Additionally, check if possible to rewrite frame allocation instructions
+    // with a random size; if not, mark the frame size as fixed.
     // TODO this logic should be moved into arch.cpp and a function should only
     // return the frame update size
     if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
@@ -907,7 +927,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                          << " (current size = " << frameSize + update << ")"
                          << std::endl);
 
-        if(arch::getRestriction(instr, res)) {
+        if(arch::getStackUpdateRestriction(instr, update, res)) {
           // If growing the frame, the referenced slot includes the update
           // whereas if we're shrinking the frame it doesn't.
           offset = (update > 0) ? update : 0;
@@ -924,7 +944,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   }
 
   // Add the remaining slots, i.e., those that don't have any restrictions
-  code = info->populateSlots();
+  code = info->finalizeAnalysis();
 
   DEBUG_VERBOSE(
     if(frameSize)
@@ -1076,8 +1096,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
   bool changed;
   int32_t update, offset, instrSize;
   uint32_t frameSize = arch::initialFrameSize(), maxFrameSize = 0,
-           randFrameSize = arch::initialFrameSize(), maxRandFrameSize = 0,
-           count = 0;
+           randFrameSize = arch::initialFrameSize(), maxRandFrameSize = 0;
+  size_t count = 0;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = buffer.getData(func->addr);
   byte *real = (byte *)func->addr, *cur = funcData[0], *prev;
@@ -1103,8 +1123,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
     if(!frameSize) {
       assert(maxFrameSize && maxRandFrameSize && "Max frame size is unset");
       DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
-                       "to " << maxFrameSize << " (prev), " << maxRandFrameSize
-                       << " (cur)" << std::endl);
+                       "to " << maxFrameSize << " (previous), "
+                       << maxRandFrameSize << " (current)" << std::endl);
       frameSize = maxFrameSize;
       randFrameSize = maxRandFrameSize;
     }
@@ -1158,10 +1178,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
       //
       //   1. Point the instruction's raw bits to the current buffer and mark
       //      them as invalid so that DynamoRIO *actually* re-encodes them
-      //   2. Encode the changed instruction into the buffer
-      //   3. Reset the bits with the instruction's new length, because
-      //      apparently re-encoding does not do this (probably because we're
-      //      encoding to a copy).
+      //   2. Encode the changed instruction into the new buffer
+      //   3. Point the instruction's raw bits back to the new buffer (which
+      //      sets them as valid), because apparently re-encoding does not do
+      //      this (probably because we're encoding to a copy).
       //
       // The last task is required because at the next randomization when we
       // call instr_length() above, if the bits are not marked valid DynamoRIO

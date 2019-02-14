@@ -217,6 +217,7 @@ ret_t Process::initializeStack() {
                                       nullptr, 16);
       map.close();
 
+      // Touch the bottom to map the entire stack for re-randomization
       curPage = stackBounds.second - defaultStackSize;
       code = read(curPage, val);
       if(code != ret_t::Success) return code;

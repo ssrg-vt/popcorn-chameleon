@@ -247,28 +247,33 @@ reg_id_t getDRRegType(enum RegType reg);
 
 /**
  * Get the amount of space allocated/de-allocated on the stack by an
- * instruction.
+ * instruction that writes to the stack pointer.
  * @param instr the instruction
  * @return size, in bytes, of the frame allocation
  */
 int32_t getFrameUpdateSize(instr_t *instr);
 
 /**
- * Get offset restrictions, if any, for an operand.
- * @param instr the instruction
- * @param res output operand populated with any restrictions
- * @return true if there is a restriction for the instruction or false if not
- */
-bool getRestriction(instr_t *instr, RandRestriction &res);
-
-/**
- * Get offset restrictions, if any, for an operand.
+ * Get offset restrictions, if any, for a base + displacement operand.
  * @param instr the instruction
  * @param op the operand from the instruction
  * @param res output operand populated with any restrictions
  * @return true if there is a restriction for the operand or false if not
  */
-bool getRestriction(instr_t *instr, opnd_t op, RandRestriction &res);
+bool getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res);
+
+/**
+ * Get offset restrictions, if any, for an instruction which updates the stack
+ * frame size.
+ *
+ * @param instr the instruction
+ * @param update size & direction of the update
+ * @param res output operand populated with any restrictions
+ * @return true if there is a restriction for the instruction or false if not
+ */
+bool getStackUpdateRestriction(instr_t *instr,
+                               int32_t update,
+                               RandRestriction &res);
 
 /**
  * Rewrite a frame update instruction with a new size.

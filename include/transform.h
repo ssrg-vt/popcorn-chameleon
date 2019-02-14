@@ -46,9 +46,10 @@ public:
                   size_t batchedFaults = 1,
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
-      slotPadding(slotPadding), faultHandlerPid(-1), faultHandlerExit(false),
-      batchedFaults(batchedFaults), serveInt(false), scramblerPid(-1),
-      scramblerExit(false), numRandomizations(0), rerandomizeTime(0) {}
+      rewriteMetadata(nullptr), slotPadding(slotPadding), faultHandlerPid(-1),
+      faultHandlerExit(false), batchedFaults(batchedFaults), serveInt(false),
+      scramblerPid(-1), scramblerExit(false), numRandomizations(0),
+      rerandomizeTime(0) {}
   CodeTransformer() = delete;
 
   /**
@@ -99,12 +100,6 @@ public:
   pid_t getProcessPid() const { return proc.getPid(); }
 
   /**
-   * Return the transformer's code buffer.
-   * @return the memory window object representing the code segment
-   */
-  const MemoryWindow &getCodeWindow() const { return codeWindow; }
-
-  /**
    * Get the randomization information for the function enclosing a given
    * program counter value.
    *
@@ -146,16 +141,15 @@ public:
    * @param op an operand
    * @return the size of the operand in bytes, or UINT32_MAX if unknown
    */
-  static unsigned getOperandSize(opnd_t op)
+  static unsigned getOperandSize(const opnd_t &op)
   { return opnd_size_in_bytes(opnd_get_size(op)); }
 
   /**
    * Convert a stack slot (base register + offset) to an offset from the
    * canonical frame address (CFA), defined as the highest stack address of a
    * function activation for stacks that grow down or the lowest stack address
-   * of a function activation for stacks that grow up.  Note that as part of
-   * the canonicalization process, all offsets are converted to positive
-   * values.
+   * of a function activation for stacks that grow up.  As part of the
+   * canonicalization process, all offsets are converted to positive values.
    *
    * @param frameSize size of the frame in bytes
    * @param reg the base register
@@ -191,6 +185,13 @@ public:
   /* The following APIs should *only* be called by the fault-handling thread */
 
   /**
+   * Set the PID of the fault handling thread.  Should only be called from the
+   * fault handling thread.
+   * @param pid the fault handling thread's PID
+   */
+  void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
+
+  /**
    * Return the address of a buffer which can be directly passed to the kernel
    * to handle a fault for an address, or 0 if none can be used for zero-copy.
    *
@@ -211,13 +212,6 @@ public:
   { return codeWindow.project(address, buffer); }
 
   /**
-   * Set the PID of the fault handling thread.  Should only be called from the
-   * fault handling thread.
-   * @param pid the fault handling thread's PID
-   */
-  void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
-
-  /**
    * Return whether the fault handling thread should exit.
    * @return true if the fault handler should exit, false otherwise
    */
@@ -226,7 +220,6 @@ public:
   /**
    * Return whether the fault handling thread should serve a page filled with
    * interrupt instructions.
-   *
    * @return true if thread should serve a interrupt page or false otherwise
    */
   bool shouldServeIntPage() const
@@ -235,22 +228,10 @@ public:
   /* The following APIs should *only* be called by the scrambling thread */
 
   /**
-   * Return the transformer's code buffer for the next randomized version.
-   * @return the memory window object representing the code segment
-   */
-  MemoryWindow &getNextCodeWindow() { return nextCodeWindow; }
-
-  /**
    * Set the scrambler thread's PID.
    * @param pid the scrambler thread's PID
    */
   void setScramberPid(pid_t pid) { scramblerPid = pid; }
-
-  /**
-   * Return whether the scrambler thread should exit.
-   * @return true if the scrambler thread should exit or false otherwise
-   */
-  bool shouldScramblerExit() const { return scramblerExit; }
 
   /**
    * Get the semaphore signaling the scrambler thread should generate a new
@@ -265,6 +246,24 @@ public:
    * @return the semaphore signaling randomization has finished
    */
   sem_t *getFinishedScrambleSem() { return &finishedScrambling; }
+
+  /**
+   * Return the transformer's code buffer.
+   * @return the memory window object representing the code segment
+   */
+  const MemoryWindow &getCodeWindow() const { return codeWindow; }
+
+  /**
+   * Return the transformer's code buffer for the next randomized version.
+   * @return the memory window object representing the code segment
+   */
+  MemoryWindow &getNextCodeWindow() { return nextCodeWindow; }
+
+  /**
+   * Return whether the scrambler thread should exit.
+   * @return true if the scrambler thread should exit or false otherwise
+   */
+  bool shouldScramblerExit() const { return scramblerExit; }
 
 private:
   /* A previously instantiated process */
@@ -314,6 +313,7 @@ private:
 
   /**
    * Insert breakpoints where chameleon can perform a transformation.
+   *
    * @param info randomization information for a function
    * @param origData output argument populated with original data at the
    *                 inserted breakpoint locations
@@ -339,6 +339,7 @@ private:
 
   /**
    * Advance the child process to a transformation point.
+   *
    * @param ty output argument set to the type of transformation point at which
    *           the child was stopp
    * @param t a running timer which will be paused while advancing forward
@@ -360,7 +361,7 @@ private:
   instr_t *getInstruction(uintptr_t pc, RandomizedFunction *info) const;
 
   /**
-   * Write a page using the process interface rather than via userfaultfd.
+   * Write a code page using the process interface rather than via userfaultfd.
    * Needed as compel may touch pages during parasite operation; trying to
    * correctly synchronize compel and userfaultfd to serve what's needed
    * without causing further problems is not worth the effort.
@@ -368,7 +369,7 @@ private:
    * @param start address of page
    * @return a return code describing the outcome
    */
-  ret_t writePage(uintptr_t start);
+  ret_t writeCodePage(uintptr_t start) const;
 
   /**
    * Remap the code section of the binary to be an anonymous private region
@@ -381,7 +382,7 @@ private:
    * @param len length of code section
    * @return a return code describing the outcome
    */
-  ret_t remapCodeSegment(uintptr_t start, uint64_t len);
+  ret_t remapCodeSegment(uintptr_t start, uint64_t len) const;
 
   /**
    * Drop the child's code pages, forcing them to be brought back in by faults.
@@ -411,8 +412,7 @@ private:
    * @param instr an instruction
    * @return a return code describing the outcome
    */
-  template<int (*NumOp)(instr_t *),
-           opnd_t (*GetOp)(instr_t *, unsigned)>
+  template<int (*NumOp)(instr_t *), opnd_t (*GetOp)(instr_t *, unsigned)>
   ret_t analyzeOperands(RandomizedFunctionPtr &info,
                         uint32_t frameSize,
                         instr_t *instr);
