@@ -119,7 +119,7 @@ public:
 
   /**
    * Add a slot to the region.
-   * @param offset a canonicalized stack offset
+   * @param offset a canonicalized stack offset representing a slot
    * @param size size of the slot
    * @param alignment alignment of the slot
    */
@@ -198,6 +198,7 @@ public:
   void setMinRandOffset(int32_t offset) { this->minRandOffset = offset; }
   int32_t getMinRandOffset() const { return minRandOffset; }
   size_t numSlots() const { return slots.size(); }
+  std::vector<SlotMap> &getSlots() { return slots; }
   const std::vector<SlotMap> &getSlots() const { return slots; }
 
 protected:

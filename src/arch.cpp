@@ -570,6 +570,90 @@ public:
     }
   }
 
+  void fixupAlignmentRegion() {
+    bool movedSlot = false;
+    int curOffset, alignStart;
+    size_t i;
+    SlotMap tmp;
+
+    StackRegionPtr &alignRegion = regions.back();
+    if(REGION_TYPE(alignRegion->getFlags()) != x86Region::R_Alignment) return;
+
+    assert(regions.size() > 1 && "Invalid stack regions");
+    assert(regions.back()->getSlots().size() == 1 &&
+           "Invalid alignment region");
+
+    // TODO can the alignment overlap more than one region?
+    StackRegionPtr &prevRegion = regions[regions.size() - 2];
+    if(REGION_TYPE(prevRegion->getFlags()) == x86Region::R_CalleeSave) return;
+
+    // Any slots that overlap with the alignment region must actually be moved
+    // to the alignment region since the alignment was marked immovable (e.g.,
+    // allocated by a push instruction)
+    std::vector<SlotMap> &alignSlots = alignRegion->getSlots(),
+                         &prevSlots = prevRegion->getSlots();
+    const SlotMap &alignSlot = alignRegion->getSlots().front();
+    alignStart = alignSlot.original - alignSlot.size;
+    while(prevSlots.size() && prevSlots.back().original > alignStart) {
+      tmp = prevSlots.back();
+      prevSlots.pop_back();
+      alignSlots.push_back(tmp);
+      movedSlot = true;
+
+      DEBUGMSG(" -> moving slot @ " << tmp.original << " to alignment region"
+               << std::endl);
+    }
+    if(!movedSlot) return;
+    assert(alignSlots.size() > 1 && "Couldn't move slots");
+
+    // Sort the alignment region with the new slots and prune the padding slot
+    // to not overlap with any other slots
+    alignRegion->sortSlots();
+    SlotMap &align = alignSlots.back(),
+            &moved = alignSlots[alignSlots.size() - 2];
+    assert(align.original != moved.original && "Unhandled complete overlap");
+    if(moved.original > alignStart)
+      align.size = align.original - moved.original;
+
+    // Finally, re-calculate offsets of/prune any changed regions
+    curOffset = regions[regions.size() - 3]->getOriginalRegionOffset();
+    for(i = regions.size() - 2; i < regions.size(); i++) {
+      if(regions[i]->numSlots() > 0) {
+        StackRegionPtr &region = regions[i];
+        const SlotMap &bottom = region->getSlots().back();
+        region->setRegionOffset(bottom.original);
+        region->setRegionSize(bottom.original - curOffset);
+        curOffset = bottom.original;
+      }
+      else {
+        DEBUGMSG_VERBOSE("removing empty "
+                         << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
+                         << " region" << std::endl);
+        regions.erase(regions.begin() + i);
+        i--;
+      }
+    }
+  }
+
+  void fixupCallRegion() {
+    size_t i;
+
+    // The regions sizes for SP-based offsets may have been artificially
+    // inflated due to frame alignment restrictions
+    for(i = regions.size() - 1; i > 0; i--) {
+      StackRegionPtr &region = regions[i];
+      if(REGION_TYPE(region->getFlags()) != x86Region::R_SPLimited &&
+         REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
+      const SlotMap &first = region->getSlots().front();
+      region->setRegionSize(region->getOriginalRegionOffset() -
+                            (first.original - first.size));
+      DEBUGMSG_VERBOSE("updated region size for " <<
+                       x86RegionName[REGION_TYPE(region->getFlags())]
+                       << " region to " << region->getOriginalRegionSize()
+                       << std::endl);
+    }
+  }
+
   virtual ret_t finalizeAnalysis() override {
     int curOffset = 0;
     size_t i;
@@ -600,20 +684,8 @@ public:
       }
     }
 
-    // The regions sizes for SP-based offsets may have been artificially
-    // inflated due to frame alignment restrictions
-    for(i = regions.size() - 1; i > 0; i--) {
-      StackRegionPtr &region = regions[i];
-      if(REGION_TYPE(region->getFlags()) != x86Region::R_SPLimited &&
-         REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
-      const SlotMap &first = region->getSlots().front();
-      region->setRegionSize(region->getOriginalRegionOffset() -
-                            (first.original - first.size));
-      DEBUGMSG_VERBOSE("updated region size for " <<
-                       x86RegionName[REGION_TYPE(region->getFlags())]
-                       << " region to " << region->getOriginalRegionSize()
-                       << std::endl);
-    }
+    fixupAlignmentRegion();
+    fixupCallRegion();
 
     assert((uint32_t)regions.back()->getOriginalRegionOffset() <=
            maxFrameSize);
