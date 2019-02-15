@@ -385,6 +385,17 @@ private:
   ret_t remapCodeSegment(uintptr_t start, uint64_t len) const;
 
   /**
+   * Change memory protections for a region of memory in the child.  Note that
+   * start & len will be updated to be page-aligned if not already so.
+   *
+   * @param start the starting address
+   * @param len the length of the region
+   * @param prot type of protections to apply to the region
+   * @return a return code describing the outcome
+   */
+  ret_t changeProtection(uintptr_t start, size_t len, int prot) const;
+
+  /**
    * Drop the child's code pages, forcing them to be brought back in by faults.
    * @return a return code describing the outcome
    */

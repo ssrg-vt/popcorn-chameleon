@@ -161,4 +161,6 @@ with open(sys.argv[2], 'r') as log:
                 print("{} -> (n/a)".format(address))
         elif "Top of new stack" in line:
             printRetaddr = False
+        elif "WARN" in line:
+            print("-> warning in log <-")
 

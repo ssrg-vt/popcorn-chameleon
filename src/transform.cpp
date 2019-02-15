@@ -288,6 +288,34 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
   return cinfo;
 }
 
+ret_t CodeTransformer::changeProtection(uintptr_t start,
+                                        size_t len,
+                                        int prot) const {
+  long ret;
+  ret_t code;
+  struct parasite_ctl *parasite = proc.getParasiteCtl();
+
+  len = PAGE_UP(start + len) - PAGE_DOWN(start);
+  start = PAGE_DOWN(start);
+
+  DEBUGMSG_VERBOSE("changing protections from 0x" << std::hex << start
+                   << " -> " << start + len << " to " << prot << std::endl);
+
+  // TODO BANDAGE! compel's APIs restore the thread context from when it was
+  // initialized, not from when we do a syscall
+  struct user_regs_struct regs;
+  if((code = proc.readRegs(regs)) != ret_t::Success) return code;
+
+  code = parasite::syscall(parasite, SYS_mprotect, ret, start, len, prot);
+  if(code != ret_t::Success || ret) return ret_t::CompelSyscallFailed;
+
+  // TODO BANDAGE! compel's APIs restore the thread context from when it was
+  // initialized, not from when we do a syscall
+  if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
+
+  return ret_t::Success;
+}
+
 ret_t CodeTransformer::rerandomize() {
   typedef RandomizedFunction::TransformType TransformType;
   uintptr_t sp, rawBuf, mid, childSrcBase, bufSrcBase,
@@ -314,6 +342,9 @@ ret_t CodeTransformer::rerandomize() {
   stackSize = stackBounds.second - stackBounds.first;
   mid = (stackBounds.first + stackBounds.second) / 2;
   rawBuf = (uintptr_t)stackMem.get();
+
+  DEBUGMSG_VERBOSE("child stack pointer: 0x" << std::hex << sp << std::endl);
+
   if(sp >= mid) { // Currently using top half
     bufSrcBase = rawBuf + stackSize;
     childSrcBase = stackBounds.second;
@@ -328,6 +359,10 @@ ret_t CodeTransformer::rerandomize() {
     childDstBase = stackBounds.second;
     stackSize = mid - sp;
   }
+
+  DEBUGMSG_VERBOSE("switching stack base from 0x" << std::hex << childSrcBase
+                   << " -> 0x" << childDstBase << std::endl);
+
   byte_iterator stackBuf((unsigned char *)rawBuf + (sp - stackBounds.first),
                          stackSize);
   code = proc.readRegion(sp, stackBuf);
@@ -356,6 +391,17 @@ ret_t CodeTransformer::rerandomize() {
                            stackSize);
   code = proc.writeRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
+
+  DEBUG(
+    // Change stack protections to cause a segfault if we missed reifying a
+    // pointer to the previous stack region
+    stackSize = (stackBounds.second - stackBounds.first) / 2;
+    code = changeProtection(childDstBase - stackSize, stackSize,
+                            PROT_READ | PROT_WRITE);
+    if(code != ret_t::Success) return code;
+    code = changeProtection(childSrcBase - stackSize, stackSize, PROT_NONE);
+    if(code != ret_t::Success) return code;
+  )
 
   // Switch the code window to the new randomized code, drop the exiting code
   // pages (forcing fresh page faults) and kick off the next code randomization
@@ -903,7 +949,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     if(!frameSize) {
       assert(maxFrameSize && "Max frame size is unset");
       DEBUGMSG_VERBOSE("found epilogue inside function body, restoring frame "
-                       "size to" << maxFrameSize << std::endl);
+                       "size to " << maxFrameSize << std::endl);
       frameSize = maxFrameSize;
     }
 
