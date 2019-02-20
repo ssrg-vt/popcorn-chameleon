@@ -47,9 +47,13 @@ public:
                   size_t slotPadding = 128)
     : proc(proc), binary(binary), codeStart(0), codeEnd(0),
       rewriteMetadata(nullptr), slotPadding(slotPadding), faultHandlerPid(-1),
-      faultHandlerExit(false), batchedFaults(batchedFaults), serveInt(false),
+      faultHandlerExit(false), batchedFaults(batchedFaults), intPageAddr(0),
       scramblerPid(-1), scramblerExit(false), numRandomizations(0),
-      rerandomizeTime(0) {}
+      rerandomizeTime(0)
+#ifdef DEBUG_BUILD
+      , curStackBase(0x400000000000)
+#endif
+      {}
   CodeTransformer() = delete;
 
   /**
@@ -192,6 +196,27 @@ public:
   void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
 
   /**
+   * Lock the code window during page fault handling to avoid inconsistent code
+   * pages in the child application.
+   * @return a return code describing the outcome
+   */
+  ret_t lockCodeWindow();
+
+  /**
+   * Unlock the code window after finished handling a page fault.
+   * @return a return code describing the outcome
+   */
+  ret_t unlockCodeWindow();
+
+  /**
+   * Get the address of the page that should be filled with interrupt
+   * instructions by the fault handling thread.
+   *
+   * @return address of page to be filled with interrupt instructions
+   */
+  uintptr_t getIntPageAddr() const { return intPageAddr; }
+
+  /**
    * Return the address of a buffer which can be directly passed to the kernel
    * to handle a fault for an address, or 0 if none can be used for zero-copy.
    *
@@ -216,14 +241,6 @@ public:
    * @return true if the fault handler should exit, false otherwise
    */
   bool shouldFaultHandlerExit() const { return faultHandlerExit; }
-
-  /**
-   * Return whether the fault handling thread should serve a page filled with
-   * interrupt instructions.
-   * @return true if thread should serve a interrupt page or false otherwise
-   */
-  bool shouldServeIntPage() const
-  { return __atomic_load_n(&serveInt, __ATOMIC_ACQUIRE); }
 
   /* The following APIs should *only* be called by the scrambling thread */
 
@@ -300,7 +317,9 @@ private:
   pid_t faultHandlerPid;
   bool faultHandlerExit;
   size_t batchedFaults; /* Number of faults to handle at once */
-  bool serveInt; /* Whether to serve an interrupt page */
+  pthread_mutex_t windowLock;
+  uintptr_t intPageAddr; /* Address of page that should be filled with
+                            interrupt instructions by fault handler thread */
 
   /* Re-randomization */
   pthread_t scrambler;
@@ -310,6 +329,11 @@ private:
         finishedScrambling; /* Scrambler has finished randomizing */
   size_t numRandomizations;
   uint64_t rerandomizeTime;
+
+#ifdef DEBUG_BUILD
+  /* Current transformed stack base */
+  uintptr_t curStackBase;
+#endif
 
   /**
    * Insert breakpoints where chameleon can perform a transformation.
@@ -349,6 +373,43 @@ private:
                                      Timer &t) const;
 
   /**
+   * Calculate the stack bounds of both the stack in the child's memory and
+   * Chameleon's buffer used for transformation.
+   *
+   * @param sp the current stack pointer
+   * @param childSrcBase output argument set to the base of the current stack
+   *                     in the child
+   * @param bufSrcBase output argument set to the base of the current stack in
+   *                   the buffer
+   * @param childDstBase output argument set to the base of the transformed
+   *                     stack in the child
+   * @param bufDstBase output argument set to the base of the transformed stack
+   *                   in the child
+   * @param an iterator to space in Chameleon's buffer for reading in the
+   *        current stack
+   */
+  byte_iterator calcStackBounds(uintptr_t sp,
+                                uintptr_t &childSrcBase,
+                                uintptr_t &bufSrcBase,
+                                uintptr_t &childDstBase,
+                                uintptr_t &bufDstBase);
+
+#ifdef DEBUG_BUILD
+  /**
+   * Map in the new stack region and unmap the current stack region.
+   *
+   * @param childSrcBase base of current stack region in child
+   * @param childDstBase base of transformed stack region in child
+   * @param stackSize size of transformed stack
+   * @param an iterator to space in Chameleon's buffer used to set the
+   *        transformed stack region or an empty iterator if the mapping failed
+   */
+  byte_iterator mapInNewStackRegion(uintptr_t childSrcBase,
+                                    uintptr_t childDstBase,
+                                    size_t stackSize);
+#endif
+
+  /**
    * Get the IR-level instruction for a given program counter value, enclosed
    * in the function represented by the specified randomization information.
    * The instruction is part of an instrlist_t for the enclosing function.
@@ -382,7 +443,27 @@ private:
    * @param len length of code section
    * @return a return code describing the outcome
    */
-  ret_t remapCodeSegment(uintptr_t start, uint64_t len) const;
+  ret_t remapCodeSegment(uintptr_t start, size_t len) const;
+
+  /**
+   * Map a region of memory in the child with the given set of protections and
+   * flags.
+   *
+   * @param start starting address of the region
+   * @param len length of the region
+   * @param prot memory protection flags
+   * @param flags other memory mapping flags
+   * @return a return code describing the outcome
+   */
+  ret_t mapMemory(uintptr_t start, size_t len, int prot, int flags) const;
+
+  /**
+   * Unmap a region of memory in the child.
+   * @param start starting address of the region
+   * @param len length of the region
+   * @return a return code describing the outcome
+   */
+  ret_t unmapMemory(uintptr_t start, size_t len) const;
 
   /**
    * Change memory protections for a region of memory in the child.  Note that

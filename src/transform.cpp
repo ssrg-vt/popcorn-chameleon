@@ -27,7 +27,8 @@ static std::vector<unsigned char> intPage(PAGESZ);
 static inline ret_t handleFault(CodeTransformer *CT,
                                 int uffd,
                                 const struct uffd_msg &msg,
-                                std::vector<char> &pageBuf) {
+                                std::vector<char> &pageBuf,
+                                uintptr_t intPageAddr) {
   uintptr_t pageAddr = msg.arg.pagefault.address, data;
   ret_t code = ret_t::Success;
 
@@ -35,7 +36,9 @@ static inline ret_t handleFault(CodeTransformer *CT,
   assert(!(pageAddr & (PAGESZ - 1)) && "Fault address not page-aligned");
   DEBUGMSG(CT->getProcessPid() << ": handling fault @ 0x" << std::hex
            << pageAddr << ", flags=" << msg.arg.pagefault.flags << ", ptid="
-           << std::dec << msg.arg.pagefault.feat.ptid << std::endl);
+           << std::dec << msg.arg.pagefault.feat.ptid
+           << (pageAddr == intPageAddr ? " (interrupt page)" : "")
+           << std::endl);
 
   DEBUG_VERBOSE(
     // Print the PC causing the fault.  We can't directly interrupt/read child
@@ -49,7 +52,11 @@ static inline ret_t handleFault(CodeTransformer *CT,
     nanosleep(&time, nullptr);
   )
 
-  if(!CT->shouldServeIntPage()) {
+  // Lock the code window so that if a re-randomization occurs while we're
+  // handling the fault we don't accidentally serve stale code
+  if((code = CT->lockCodeWindow()) != ret_t::Success) return code;
+
+  if(pageAddr != intPageAddr) {
     if(!(data = CT->zeroCopy(pageAddr))) {
       if((code = CT->project(pageAddr, pageBuf)) != ret_t::Success)
         return code;
@@ -59,6 +66,7 @@ static inline ret_t handleFault(CodeTransformer *CT,
   else data = (uintptr_t)&intPage[0];
 
   if(!uffd::copy(uffd, data, pageAddr)) code = ret_t::UffdCopyFailed;
+  if((code = CT->unlockCodeWindow()) != ret_t::Success) return code;
 
   return code;
 }
@@ -73,6 +81,7 @@ static void *handleFaultsAsync(void *arg) {
   int uffd = CT->getUserfaultfd();
   size_t nfaults = CT->getNumFaultsBatched(), toHandle, i, handled = 0;
   ssize_t bytesRead;
+  uintptr_t intPage = CT->getIntPageAddr();
   pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
   struct uffd_msg *msg = new struct uffd_msg[nfaults];
   std::vector<char> pageBuf(PAGESZ);
@@ -100,7 +109,7 @@ static void *handleFaultsAsync(void *arg) {
         // TODO for Linux 4.11+, handle UFFD_EVENT_FORK, UFFD_EVENT_REMAP,
         // UFFD_EVENT_REMOVE, UFFD_EVENT_UNMAP
         if(msg[i].event != UFFD_EVENT_PAGEFAULT) continue;
-        if(handleFault(CT, uffd, msg[i], pageBuf) != ret_t::Success) {
+        if(handleFault(CT, uffd, msg[i], pageBuf, intPage) != ret_t::Success) {
           INFO("could not handle fault, limping ahead..." << std::endl);
           continue;
         }
@@ -196,6 +205,7 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   const Binary::Section &codeSec = binary.getCodeSection();
   const Binary::Segment &codeSeg = binary.getCodeSegment();
   retcode = populateCodeWindow(codeSec, codeSeg);
+  intPageAddr = PAGE_DOWN(parasite::infectAddress(proc.getParasiteCtl()));
   if(retcode != ret_t::Success) return retcode;
   if(randomize) {
     rewriteMetadata = st_init(binary.getFilename());
@@ -226,6 +236,7 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   stackMem.reset(new unsigned char[stackSize]);
 
   // Initialize thread for handling faults
+  if(pthread_mutex_init(&windowLock, nullptr)) return ret_t::LockFailed;
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
 
@@ -288,6 +299,36 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
   return cinfo;
 }
 
+// TODO BANDAGE! compel's APIs restore the thread context from when it was
+// initialized, not from when we do a syscall (applies to the following 2 APIs)
+
+ret_t CodeTransformer::mapMemory(uintptr_t start,
+                                 size_t len,
+                                 int prot,
+                                 int flags) const {
+  long ret;
+  ret_t code;
+  struct user_regs_struct regs;
+  if((code = proc.readRegs(regs)) != ret_t::Success) return code;
+  code = parasite::syscall(proc.getParasiteCtl(), SYS_mmap, ret, start, len,
+                           prot, flags, -1, 0);
+  if(code != ret_t::Success || (uintptr_t)ret != start)
+    return ret_t::CompelSyscallFailed;
+  if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::unmapMemory(uintptr_t start, size_t len) const {
+  long ret;
+  ret_t code;
+  struct user_regs_struct regs;
+  if((code = proc.readRegs(regs)) != ret_t::Success) return code;
+  code = parasite::syscall(proc.getParasiteCtl(), SYS_munmap, ret, start, len);
+  if(code != ret_t::Success) return ret_t::CompelSyscallFailed;
+  if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
+  return ret_t::Success;
+}
+
 ret_t CodeTransformer::changeProtection(uintptr_t start,
                                         size_t len,
                                         int prot) const {
@@ -316,10 +357,88 @@ ret_t CodeTransformer::changeProtection(uintptr_t start,
   return ret_t::Success;
 }
 
+#ifdef DEBUG_BUILD
+
+#define FOURMB (4 * 1024 * 1024)
+
+byte_iterator CodeTransformer::calcStackBounds(uintptr_t sp,
+                                               uintptr_t &childSrcBase,
+                                               uintptr_t &bufSrcBase,
+                                               uintptr_t &childDstBase,
+                                               uintptr_t &bufDstBase) {
+  uintptr_t rawBuf;
+  size_t stackSize;
+
+  // TODO maybe roll this back to the beginning after 1000 switches or so
+  if(sp > 0x5fffff000000) { // First re-randomization
+    const urange_t &stackBounds = proc.getStackBounds();
+    childSrcBase = stackBounds.second;
+  }
+  else childSrcBase = curStackBase;
+  childDstBase = curStackBase + FOURMB;
+  stackSize = childSrcBase - sp;
+  rawBuf = (uintptr_t)stackMem.get();
+  bufSrcBase = rawBuf + FOURMB;
+  bufDstBase = rawBuf + (2 * FOURMB);
+  return byte_iterator((unsigned char *)rawBuf + FOURMB - stackSize,
+                       stackSize);
+}
+
+byte_iterator CodeTransformer::mapInNewStackRegion(uintptr_t childSrcBase,
+                                                   uintptr_t childDstBase,
+                                                   size_t stackSize) {
+  ret_t code;
+  unsigned char *rawBuf = stackMem.get();
+
+  // Map in the new stack space and unmap the old
+  code = mapMemory(childDstBase - FOURMB, FOURMB, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
+  if(code != ret_t::Success) return byte_iterator::empty();
+  code = unmapMemory(childSrcBase - FOURMB, FOURMB);
+  if(code != ret_t::Success) return byte_iterator::empty();
+  return byte_iterator(rawBuf + (2 * FOURMB) - stackSize, stackSize);
+}
+
+#else
+
+byte_iterator CodeTransformer::calcStackBounds(uintptr_t sp,
+                                               uintptr_t &childSrcBase,
+                                               uintptr_t &bufSrcBase,
+                                               uintptr_t &childDstBase,
+                                               uintptr_t &bufDstBase) {
+  uintptr_t mid, rawBuf;
+  size_t stackSize;
+  const urange_t &stackBounds = proc.getStackBounds();
+
+  assert(sp >= stackBounds.first && sp < stackBounds.second &&
+         "Invalid stack pointer");
+
+  stackSize = stackBounds.second - stackBounds.first;
+  mid = (stackBounds.first + stackBounds.second) / 2;
+  rawBuf = (uintptr_t)stackMem.get();
+  if(sp >= mid) { // Currently using top half
+    bufSrcBase = rawBuf + stackSize;
+    childSrcBase = stackBounds.second;
+    bufDstBase = rawBuf + (stackSize / 2);
+    childDstBase = mid;
+    stackSize = stackBounds.second - sp;
+  }
+  else { // Currently using bottom half
+    bufSrcBase = rawBuf + (stackSize / 2);
+    childSrcBase = mid;
+    bufDstBase = rawBuf + stackSize;
+    childDstBase = stackBounds.second;
+    stackSize = mid - sp;
+  }
+  return byte_iterator((unsigned char *)rawBuf + (sp - stackBounds.first),
+                       stackSize);
+}
+
+#endif
+
 ret_t CodeTransformer::rerandomize() {
   typedef RandomizedFunction::TransformType TransformType;
-  uintptr_t sp, rawBuf, mid, childSrcBase, bufSrcBase,
-            childDstBase, bufDstBase;
+  uintptr_t sp, childSrcBase, bufSrcBase, childDstBase, bufDstBase;
   size_t stackSize;
   TransformType StopTy;
   ret_t code;
@@ -336,40 +455,18 @@ ret_t CodeTransformer::rerandomize() {
   // Read in the child's current stack.  We currently divide the stack into 2
   // halves and rewrite from one half to the other.
   if(!(sp = proc.getSP())) return ret_t::PtraceFailed;
-  const urange_t &stackBounds = proc.getStackBounds();
-  assert(sp >= stackBounds.first && sp < stackBounds.second &&
-         "Invalid stack pointer");
-  stackSize = stackBounds.second - stackBounds.first;
-  mid = (stackBounds.first + stackBounds.second) / 2;
-  rawBuf = (uintptr_t)stackMem.get();
-
-  DEBUGMSG_VERBOSE("child stack pointer: 0x" << std::hex << sp << std::endl);
-
-  if(sp >= mid) { // Currently using top half
-    bufSrcBase = rawBuf + stackSize;
-    childSrcBase = stackBounds.second;
-    bufDstBase = rawBuf + (stackSize / 2);
-    childDstBase = mid;
-    stackSize = stackBounds.second - sp;
-  }
-  else { // Currently using bottom half
-    bufSrcBase = rawBuf + (stackSize / 2);
-    childSrcBase = mid;
-    bufDstBase = rawBuf + stackSize;
-    childDstBase = stackBounds.second;
-    stackSize = mid - sp;
-  }
-
-  DEBUGMSG_VERBOSE("switching stack base from 0x" << std::hex << childSrcBase
-                   << " -> 0x" << childDstBase << std::endl);
-
-  byte_iterator stackBuf((unsigned char *)rawBuf + (sp - stackBounds.first),
-                         stackSize);
+  byte_iterator stackBuf = calcStackBounds(sp, childSrcBase, bufSrcBase,
+                                           childDstBase, bufDstBase);
   code = proc.readRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
-  // Wait for code re-randomizer to finish
+  DEBUGMSG_VERBOSE("child stack pointer: 0x" << std::hex << sp << std::endl);
+
+  // Wait for code scrambler to finish next set of code
   if(MASK_INT(sem_wait(&finishedScrambling))) return ret_t::RandomizeFailed;
+
+  DEBUGMSG_VERBOSE("switching stack base from 0x" << std::hex << childSrcBase
+                   << " -> 0x" << childDstBase << std::endl);
 
   // Transform the stack; transformStack() internally sets the register set
   // (including swinging the SP) to the transformed registers
@@ -385,27 +482,25 @@ ret_t CodeTransformer::rerandomize() {
     return ret_t::TransformFailed;
   }
 
-  // Write the transformed stack into the child's memory
   stackSize = childDstBase - sp;
+#ifdef DEBUG_BUILD
+  stackBuf = mapInNewStackRegion(childSrcBase, childDstBase, stackSize);
+  if(!stackBuf.getLength()) return ret_t::RandomizeFailed;
+  curStackBase += FOURMB;
+#else
   stackBuf = byte_iterator((unsigned char *)rawBuf + (sp - stackBounds.first),
                            stackSize);
+#endif
+
+  // Write the transformed stack into the child's memory
   code = proc.writeRegion(sp, stackBuf);
   if(code != ret_t::Success) return code;
 
-  DEBUG(
-    // Change stack protections to cause a segfault if we missed reifying a
-    // pointer to the previous stack region
-    stackSize = (stackBounds.second - stackBounds.first) / 2;
-    code = changeProtection(childDstBase - stackSize, stackSize,
-                            PROT_READ | PROT_WRITE);
-    if(code != ret_t::Success) return code;
-    code = changeProtection(childSrcBase - stackSize, stackSize, PROT_NONE);
-    if(code != ret_t::Success) return code;
-  )
-
-  // Switch the code window to the new randomized code, drop the exiting code
+  // Switch the code window to the new randomized code, drop the existing code
   // pages (forcing fresh page faults) and kick off the next code randomization
+  if((code = lockCodeWindow()) != ret_t::Success) return code;
   codeWindow = nextCodeWindow;
+  if((code = unlockCodeWindow()) != ret_t::Success) return code;
   if((code = dropCode()) != ret_t::Success) return code;
   if(sem_post(&scramble)) return ret_t::RandomizeFailed;
 
@@ -611,7 +706,7 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
   else Ty = TransformType::CallSite;
 
   DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
-                   << std::hex << pc << std::endl);
+                   << std::hex << proc.getPC() << std::endl);
 
   return ret_t::Success;
 }
@@ -646,9 +741,10 @@ ret_t CodeTransformer::writeCodePage(uintptr_t start) const {
 #endif
 
   start = PAGE_DOWN(start);
-  if(!(pageData = (byte *)zeroCopy(start))) {
+  if(!(pageData = (byte *)codeWindow.zeroCopy(start))) {
     pageBuf.resize(PAGESZ);
-    if((code = project(start, pageBuf)) != ret_t::Success) return code;
+    code = codeWindow.project(start, pageBuf);
+    if(code != ret_t::Success) return code;
     pageData = (byte *)&pageBuf[0];
   }
 
@@ -661,7 +757,7 @@ ret_t CodeTransformer::writeCodePage(uintptr_t start) const {
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) const {
+ret_t CodeTransformer::remapCodeSegment(uintptr_t start, size_t len) const {
   uintptr_t pageStart;
   size_t roundedLen;
   int prot, flags;
@@ -700,7 +796,7 @@ ret_t CodeTransformer::remapCodeSegment(uintptr_t start, uint64_t len) const {
 
   // compel touched a page through syscall injection, so it won't get served by
   // userfaultfd (the kernel served a zero page); manually rewrite it here.
-  code = writeCodePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  code = writeCodePage(intPageAddr);
   if(code != ret_t::Success) return code;
 
   t.end();
@@ -728,21 +824,19 @@ ret_t CodeTransformer::dropCode() {
 
   // The child executes madvise(), which causes the kernel to drop the code
   // pages.  When returning to userspace, the child causes a page fault, giving
-  // the fault handling thread a chance to serve a page.  In order to correctly
-  // regain control, tell the fault handling thread to serve a page filled with
-  // interrupt instructions so that compel immediately regains control.
-  __atomic_store_n(&serveInt, true, __ATOMIC_RELEASE);
+  // the fault handling thread a chance to serve a page.  We've already told
+  // the fault handling thread to serve an interrupt page, allowing us to
+  // regain control.
   parasite::syscall(parasite, SYS_madvise, ret, PAGE_DOWN(codeStart),
                     PAGE_UP(codeEnd - codeStart), MADV_DONTNEED);
   if(ret) return ret_t::DropCodeFailed;
-  __atomic_store_n(&serveInt, false, __ATOMIC_RELEASE);
 
   // TODO BANDAGE! compel's APIs restore the thread context from when it was
   // initialized, not from when we do a syscall
   if((code = proc.writeRegs(regs)) != ret_t::Success) return code;
 
   // Manually rewrite the interrupt page with actual instructions.
-  code = writeCodePage(PAGE_DOWN(parasite::infectAddress(parasite)));
+  code = writeCodePage(intPageAddr);
   if(code != ret_t::Success) return code;
 
   return ret_t::Success;
@@ -1300,5 +1394,15 @@ ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
   }
 
   return ret_t::Success;
+}
+
+ret_t CodeTransformer::lockCodeWindow() {
+  if(pthread_mutex_lock(&windowLock)) return ret_t::LockFailed;
+  else return ret_t::Success;
+}
+
+ret_t CodeTransformer::unlockCodeWindow() {
+  if(pthread_mutex_unlock(&windowLock)) return ret_t::LockFailed;
+  else return ret_t::Success;
 }
 
