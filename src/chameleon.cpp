@@ -29,6 +29,7 @@ static const char *traceFilename = nullptr;
 static ofstream traceFile;
 bool verboseDebug = false;
 static size_t alarmsRung = 0;
+bool doRerandomize = false;
 #endif
 
 // Some helpful typedefs to safely wrap pointers & make ADTs bearable
@@ -149,6 +150,9 @@ static void alarmCallback(void *data) {
     if(ret == EBUSY) return; // Somebody else has the lock
     else ERROR("could not try to acquire child lock" << endl);
   }
+
+  DEBUG(if(traceFilename) __atomic_store_n(&doRerandomize, true,
+                                           __ATOMIC_RELEASE);)
 
   // Kick off an action; send a signal to handler threads that are blocked in
   // waitpid(), which will perform an action on the child inside handleEvent().
@@ -302,7 +306,15 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
 #ifdef DEBUG_BUILD
   long syscall;
 
-  if(traceFilename) code = child.singleStep();
+  if(traceFilename) {
+    code = child.singleStep();
+
+    // Triggering a re-randomization only occurs when interrupting a wait, but
+    // when single-stepping through the child there's basically no window to be
+    // interrupted.  Instead, force a re-randomization if the flag is set.
+    if(__atomic_exchange_n(&doRerandomize, false, __ATOMIC_ACQUIRE))
+      child.setStatus(Process::Interrupted);
+  }
   else if(verboseDebug) code = child.continueToNextSignalOrSyscall();
   else
 #endif
@@ -321,22 +333,28 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
   switch(child.getStatus()) {
   default: INFO(pid << ": unknown status"); return Process::Unknown;
   case Process::Stopped:
-#ifdef DEBUG_BUILD
-    if(traceFilename && child.getSignal() == SIGTRAP)
-      traceFile << dec << pid << " " << hex << child.getPC() << endl;
-    else
-#endif
-    DEBUGMSG(pid << ": stopped with signal " << child.getSignal() << " @ 0x"
-             << hex << child.getPC() << endl);
-    DEBUG_VERBOSE(
-      if(child.getSignal() == SIGTRAP &&
-         child.getSyscallNumber(syscall) == ret_t::Success)
-        DEBUGMSG_VERBOSE(pid << ": system call number " << syscall << endl);
+    DEBUG(
+      if(traceFilename && child.getSignal() == SIGTRAP) {
+        traceFile << dec << pid << " " << hex << child.getPC() << endl;
+        child.dumpRegs(traceFile);
+      }
+      else {
+        DEBUGMSG(pid << ": stopped with signal " << child.getSignal()
+                 << " @ 0x" << hex << child.getPC() << endl);
+        DEBUG_VERBOSE(
+          if(child.getSignal() == SIGTRAP &&
+             child.getSyscallNumber(syscall) == ret_t::Success)
+            DEBUGMSG_VERBOSE(pid << ": system call number " << syscall << endl);
+        )
+      }
     )
 
     switch(child.getStopReason()) {
     default:
-      DEBUG_VERBOSE(if(child.getSignal() != SIGTRAP) child.dumpRegs();)
+      DEBUG_VERBOSE(
+        if(child.getSignal() != SIGTRAP) child.dumpRegs(std::cerr);
+      )
+
       code = ret_t::Success;
       break;
     case stop_t::Exec:
@@ -356,7 +374,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
 
     if(code != ret_t::Success) {
       DEBUG(DEBUGMSG(pid << ": problem handling stop event" << endl);
-            child.dumpRegs());
+            child.dumpRegs(std::cerr));
       ERROR(pid << ": handling stop event failed: " << retText(code) << endl);
     }
 
@@ -387,6 +405,18 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
         ERROR(pid << ": could not re-randomize child: " << retText(code)
               << std::endl);
       }
+
+      // Delete trace from previous epoch & re-open file to avoid ballooning
+      // trace sizes
+      DEBUG(
+        if(traceFilename) {
+          traceFile.close();
+          traceFile.open(traceFilename);
+          if(!traceFile.is_open())
+            ERROR("could not re-open trace file '" << traceFilename << "': "
+                  << strerror(errno) << endl);
+        }
+      )
     }
     return Process::Stopped;
   }
@@ -450,16 +480,17 @@ int main(int argc, char **argv) {
   parseArgs(argc, argv);
   if((code = setupSignalsAndAlarm(alarm)) != ret_t::Success)
     ERROR("could not initialize chameleon signaling: " << retText(code) << endl);
-#ifdef DEBUG_BUILD
-  if(traceFilename) {
-    DEBUGMSG("tracing output to '" << traceFilename << "'" << endl);
-    traceFile.open(traceFilename);
-    if(!traceFile.is_open())
-      ERROR("could not open trace file '" << traceFilename << "': "
-            << strerror(errno) << endl);
-  }
-#endif
-  DEBUG(printChameleonInfo())
+
+  DEBUG(
+    if(traceFilename) {
+      DEBUGMSG("tracing output to '" << traceFilename << "'" << endl);
+      traceFile.open(traceFilename);
+      if(!traceFile.is_open())
+        ERROR("could not open trace file '" << traceFilename << "': "
+              << strerror(errno) << endl);
+    }
+    printChameleonInfo();
+  )
 
   t.end();
   INFO("chameleon setup: " << t.elapsed(Timer::Micro) << " us" << endl);

@@ -212,6 +212,10 @@ public:
   pid_t getPid() const { return pid; }
   const urange_t &getStackBounds() const { return stackBounds; }
   status_t getStatus() const { return status; }
+#ifdef DEBUG_BUILD
+  // Allow setting the status for tracing runs to force re-randomization
+  void setStatus(status_t status) { this->status = status; }
+#endif
   int getUserfaultfd() const { return uffd; }
   size_t getNumThreads() const { return nthreads; }
   struct parasite_ctl *getParasiteCtl() { return parasite; }
@@ -366,8 +370,9 @@ public:
 
   /**
    * Dump register contents to an output stream.
+   * @param os an output stream
    */
-  void dumpRegs() const;
+  void dumpRegs(std::ostream &os) const;
 
   /**
    * Initialize the userfaultfd in the context of the child and send it to

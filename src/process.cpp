@@ -544,15 +544,15 @@ ret_t Process::getSyscallNumber(long &data) const {
   return ret_t::Success;
 }
 
-void Process::dumpRegs() const {
+void Process::dumpRegs(std::ostream &os) const {
   struct user_regs_struct regs;
   struct user_fpregs_struct fpregs;
   if(!traceable()) {
     WARN("cannot dump registers - invalid state" << std::endl);
     return;
   }
-  if(trace::getRegs(pid, regs)) arch::dumpRegs(regs);
-  if(trace::getFPRegs(pid, fpregs)) arch::dumpFPRegs(fpregs);
+  if(trace::getRegs(pid, regs)) arch::dumpRegs(os, regs);
+  if(trace::getFPRegs(pid, fpregs)) arch::dumpFPRegs(os, fpregs);
 }
 
 ret_t Process::stealUserfaultfd() {

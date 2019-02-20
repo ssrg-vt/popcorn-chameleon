@@ -145,15 +145,17 @@ void marshalFuncCall(struct user_regs_struct &regs,
 
 /**
  * Dump register contents.
+ * @param os an output stream
  * @param regs a pre-populated register set
  */
-void dumpRegs(struct user_regs_struct &regs);
+void dumpRegs(std::ostream &os, struct user_regs_struct &regs);
 
 /**
  * Dump floating-point register contents.
+ * @param os an output stream
  * @param regs a pre-populated floating-point register set
  */
-void dumpFPRegs(struct user_fpregs_struct &fpregs);
+void dumpFPRegs(std::ostream &os, struct user_fpregs_struct &fpregs);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Stack frame information & handling

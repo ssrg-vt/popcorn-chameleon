@@ -114,65 +114,59 @@ void arch::marshalFuncCall(struct user_regs_struct &regs,
 #define DUMP_REG( regset, name ) \
   #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
 
-void arch::dumpRegs(struct user_regs_struct &regs) {
-  INFO("General-purpose registers:" << std::endl);
-  INFO(DUMP_REG(regs, rax) << std::endl);
-  INFO(DUMP_REG(regs, rbx) << std::endl);
-  INFO(DUMP_REG(regs, rcx) << std::endl);
-  INFO(DUMP_REG(regs, rdx) << std::endl);
-  INFO(DUMP_REG(regs, rsi) << std::endl);
-  INFO(DUMP_REG(regs, rdi) << std::endl);
-  INFO(DUMP_REG(regs, rbp) << std::endl);
-  INFO(DUMP_REG(regs, rsp) << std::endl);
-  INFO(DUMP_REG(regs, r8) << std::endl);
-  INFO(DUMP_REG(regs, r9) << std::endl);
-  INFO(DUMP_REG(regs, r10) << std::endl);
-  INFO(DUMP_REG(regs, r11) << std::endl);
-  INFO(DUMP_REG(regs, r12) << std::endl);
-  INFO(DUMP_REG(regs, r13) << std::endl);
-  INFO(DUMP_REG(regs, r14) << std::endl);
-  INFO(DUMP_REG(regs, r15) << std::endl);
-  INFO(DUMP_REG(regs, rip) << std::endl);
-  INFO(DUMP_REG(regs, cs) << std::endl);
-  INFO(DUMP_REG(regs, ds) << std::endl);
-  INFO(DUMP_REG(regs, es) << std::endl);
-  INFO(DUMP_REG(regs, fs) << std::endl);
-  INFO(DUMP_REG(regs, fs_base) << std::endl);
-  INFO(DUMP_REG(regs, gs) << std::endl);
-  INFO(DUMP_REG(regs, gs_base) << std::endl);
-  INFO(DUMP_REG(regs, ss) << std::endl);
+void arch::dumpRegs(std::ostream &os, struct user_regs_struct &regs) {
+  os << "General-purpose registers:" << std::endl;
+  os << DUMP_REG(regs, rax) << std::endl;
+  os << DUMP_REG(regs, rbx) << std::endl;
+  os << DUMP_REG(regs, rcx) << std::endl;
+  os << DUMP_REG(regs, rdx) << std::endl;
+  os << DUMP_REG(regs, rsi) << std::endl;
+  os << DUMP_REG(regs, rdi) << std::endl;
+  os << DUMP_REG(regs, rbp) << std::endl;
+  os << DUMP_REG(regs, rsp) << std::endl;
+  os << DUMP_REG(regs, r8) << std::endl;
+  os << DUMP_REG(regs, r9) << std::endl;
+  os << DUMP_REG(regs, r10) << std::endl;
+  os << DUMP_REG(regs, r11) << std::endl;
+  os << DUMP_REG(regs, r12) << std::endl;
+  os << DUMP_REG(regs, r13) << std::endl;
+  os << DUMP_REG(regs, r14) << std::endl;
+  os << DUMP_REG(regs, r15) << std::endl;
+  os << DUMP_REG(regs, rip) << std::endl;
+  os << DUMP_REG(regs, cs) << std::endl;
+  os << DUMP_REG(regs, ds) << std::endl;
+  os << DUMP_REG(regs, es) << std::endl;
+  os << DUMP_REG(regs, fs) << std::endl;
+  os << DUMP_REG(regs, fs_base) << std::endl;
+  os << DUMP_REG(regs, gs) << std::endl;
+  os << DUMP_REG(regs, gs_base) << std::endl;
+  os << DUMP_REG(regs, ss) << std::endl;
 }
 
-void arch::dumpFPRegs(struct user_fpregs_struct &regs) {
+void arch::dumpFPRegs(std::ostream &os, struct user_fpregs_struct &regs) {
   size_t num;
-  INFO("Floating-point registers:" << std::endl);
-  INFO(DUMP_REG(regs, cwd) << std::endl);
-  INFO(DUMP_REG(regs, swd) << std::endl);
-  INFO(DUMP_REG(regs, ftw) << std::endl);
-  INFO(DUMP_REG(regs, fop) << std::endl);
-  INFO(DUMP_REG(regs, rip) << std::endl);
-  INFO(DUMP_REG(regs, rdp) << std::endl);
-  INFO(DUMP_REG(regs, mxcsr) << std::endl);
-  INFO(DUMP_REG(regs, mxcr_mask));
+  os << "Floating-point registers:" << std::endl;
+  os << DUMP_REG(regs, cwd) << std::endl;
+  os << DUMP_REG(regs, swd) << std::endl;
+  os << DUMP_REG(regs, ftw) << std::endl;
+  os << DUMP_REG(regs, fop) << std::endl;
+  os << DUMP_REG(regs, rip) << std::endl;
+  os << DUMP_REG(regs, rdp) << std::endl;
+  os << DUMP_REG(regs, mxcsr) << std::endl;
+  os << DUMP_REG(regs, mxcr_mask);
   num = sizeof(regs.st_space) / sizeof(regs.st_space[0]);
   for(size_t i = 0; i < num; i++) {
-    if(i % 4 == 0) {
-      INFO_RAW(std::endl);
-      INFO("st" << (i / 4) << ": 0x");
-    }
-    INFO_RAW(std::hex << std::setfill('0') << std::setw(8)
-             << regs.st_space[i]);
+    if(i % 4 == 0) os << std::endl << "st" << (i / 4) << ": 0x";
+    os << std::hex << std::setfill('0') << std::setw(8) << regs.st_space[i];
   }
   num = sizeof(regs.xmm_space) / sizeof(regs.xmm_space[0]);
   for(size_t i = 0; i < num; i++) {
     if(i % 4 == 0) {
-      INFO_RAW(std::endl);
-      INFO("xmm" << (i / 4) << ": 0x");
+      os << std::endl << "xmm" << (i / 4) << ": 0x";
     }
-    INFO_RAW(std::hex << std::setfill('0') << std::setw(8)
-             << regs.xmm_space[i]);
+    os << std::hex << std::setfill('0') << std::setw(8) << regs.xmm_space[i];
   }
-  INFO_RAW(std::endl);
+  os << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
