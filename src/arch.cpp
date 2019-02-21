@@ -185,10 +185,11 @@ int32_t arch::framePointerOffset() { return -16; }
 
 /* Restriction flags used to indicate the type of restriction */
 enum x86Restriction {
-  F_None = 0x0,
-  F_Immovable = 0x1,
-  F_RangeLimited = 0x2,
-  F_FrameSizeLimited = 0x3
+  F_None = 0,
+  F_Immovable,
+  F_RangeLimited,
+  F_CheckCallSlot,
+  F_FrameSizeLimited
 };
 
 /*
@@ -468,12 +469,9 @@ public:
                     << size << ")" << std::endl);
       break;
     case x86Restriction::F_RangeLimited:
-      // Set the size & alignment if we couldn't determine during analysis
-      // TODO can we assume 8 byte size/alignment?
-      if(!size) size = alignment = 8;
-
       switch(res.base) {
       case arch::RegType::FramePointer:
+        assert(foundSlot && "Invalid frame pointer restriction");
         regions[x86Region::R_FPLimited]->addSlot(offset, size, alignment);
         DEBUGMSG(" -> slot @ " << offset
                  << " limited to 1-byte displacements from FP" << std::endl);
@@ -486,13 +484,18 @@ public:
                    << " limited to 1-byte displacements from SP" << std::endl);
         }
         else {
-          regions[x86Region::R_Call]->addSlot(offset, size, alignment);
+          regions[x86Region::R_Call]->addSlot(offset, 0, 0);
           DEBUGMSG(" -> call-area slot @ " << offset << std::endl);
         }
         break;
       default: code = ret_t::AnalysisFailed; break;
       }
-
+      break;
+    case x86Restriction::F_CheckCallSlot:
+      if(!foundSlot) {
+        regions[x86Region::R_Call]->addSlot(offset, 0, 0);
+        DEBUGMSG(" -> call-area slot @ " << offset << std::endl);
+      }
       break;
     default:
       DEBUGMSG("invalid x86 restriction type: " << res.flags << std::endl);
@@ -630,7 +633,8 @@ public:
   }
 
   void fixupCallRegion() {
-    size_t i;
+    size_t i, j;
+    int curOffset;
 
     // The regions sizes for SP-based offsets may have been artificially
     // inflated due to frame alignment restrictions
@@ -638,9 +642,26 @@ public:
       StackRegionPtr &region = regions[i];
       if(REGION_TYPE(region->getFlags()) != x86Region::R_SPLimited &&
          REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
+
+      // We didn't know sizes of call region slots during analysis but now that
+      // we've seen all slots, fix those up here
+      if(REGION_TYPE(region->getFlags()) == x86Region::R_Call) {
+        assert(i > 0 && "Invalid stack frame regions");
+        std::vector<SlotMap> &crSlots = region->getSlots();
+        curOffset = regions[i - 1]->getOriginalRegionOffset();
+        for(j = 0; j < crSlots.size(); j++) {
+          crSlots[j].size = crSlots[j].original - curOffset;
+          crSlots[j].alignment = std::min<int>(crSlots[j].size, 8);
+          curOffset = crSlots[j].original;
+        }
+        assert(curOffset == region->getOriginalRegionOffset() &&
+               "Invalid slot sizes for call region");
+      }
+
       const SlotMap &first = region->getSlots().front();
       region->setRegionSize(region->getOriginalRegionOffset() -
                             (first.original - first.size));
+
       DEBUGMSG_VERBOSE("updated region size for " <<
                        x86RegionName[REGION_TYPE(region->getFlags())]
                        << " region to " << region->getOriginalRegionSize()
@@ -1018,7 +1039,7 @@ arch::getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res) {
   disp = opnd_get_disp(op);
   base = arch::getRegTypeDR(opnd_get_base(op));
   switch(base) {
-  case RegType::FramePointer: case RegType::StackPointer:
+  case RegType::FramePointer:
     if(INT8_MIN <= disp && disp <= INT8_MAX &&
        !opnd_is_disp_force_full(op)) {
       res.flags = x86Restriction::F_RangeLimited;
@@ -1028,7 +1049,21 @@ arch::getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res) {
       restricted = true;
     }
     break;
-  default: break;
+  case RegType::StackPointer:
+    if(INT8_MIN <= disp && disp <= INT8_MAX &&
+       !opnd_is_disp_force_full(op)) {
+      res.flags = x86Restriction::F_RangeLimited;
+      res.size = res.alignment = 0;
+      res.base = base;
+      res.range.first = res.range.second = INT8_MIN;
+    }
+    // Need to check if its a call-area slot in addRestriction()
+    else res.flags = x86Restriction::F_CheckCallSlot;
+    restricted = true;
+    break;
+  default:
+    assert(false && "Invalid base register for stack slot");
+    break;
   }
 
   return restricted;

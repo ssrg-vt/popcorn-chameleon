@@ -62,8 +62,6 @@ bool chameleon::regionCompare(const StackRegionPtr &a, const StackRegionPtr &b)
 
 void ImmutableRegion::randomize(int start, RandUtil &ru) {
   ZeroPad pad;
-
-  sortSlots();
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
   randomizedSize = origSize;
 
