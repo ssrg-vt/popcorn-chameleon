@@ -143,24 +143,36 @@ if len(sys.argv) < 3:
     print("Please supply a binary and stack transformation log")
     sys.exit(1)
 
+def printFrame(frameNum, address, symbols):
+    sym = symbols.getSymbol(int(address, 16))
+    if sym:
+        print("{} {} -> {} (0x{:x})".format(frameNum, address,
+                                            sym.name, sym.addr))
+    else:
+        print("{} {} -> (n/a)".format(frameNum, address))
+
 symbols = SymbolTable(sys.argv[1], False)
 printRetaddr = False
 with open(sys.argv[2], 'r') as log:
     for line in log:
         if "PID" in line:
             print("New run (PID: {})".format(line.strip().split()[2]))
-        elif "Initializing randomized rewrite" in line:
-            print("\nTransformation:")
+        elif "Destination stack size" in line:
+            stackSize = line.strip().split()[4]
+        elif "Rewriting destination as if" in line:
+            print("\nTransformation (stack size = {}):".format(stackSize))
             printRetaddr = True
+            curFrame = 0
+            address = line.strip().split()[8]
+            printFrame(curFrame, address, symbols)
+            curFrame += 1
         elif "Return address" in line and printRetaddr:
             address = line.strip().split()[3]
-            sym = symbols.getSymbol(int(address, 16))
-            if sym:
-                print("{} -> {} (0x{:x})".format(address, sym.name, sym.addr))
-            else:
-                print("{} -> (n/a)".format(address))
-        elif "Top of new stack" in line:
+            printFrame(curFrame, address, symbols)
+            curFrame += 1
+        elif "Finished rewrite" in line:
             printRetaddr = False
         elif "WARN" in line:
-            print("-> warning in log <-")
+            if "compiler indicated" not in line:
+                print("-> warning in log <-")
 

@@ -25,6 +25,7 @@ static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
+static bool tracing = false;
 static const char *traceFilename = nullptr;
 static ofstream traceFile;
 bool verboseDebug = false;
@@ -73,7 +74,8 @@ static void printHelp(const char *bin) {
        << "  -p MS   : re-randomization period in milliseconds" << endl
        << "  -n      : don't randomize the code section" << endl
 #ifdef DEBUG_BUILD
-       << "  -t FILE : trace execution by dumping PC values to FILE (warning: slow!)" << endl
+       << "  -t FILE : trace execution by dumping PC values to FILE (warning: "
+          "slow!)" << endl
        << "  -d      : print even more debugging information than normal" << endl
 #endif
        << "  -v      : print Popcorn Chameleon version and exit" << endl;
@@ -117,7 +119,7 @@ static void parseArgs(int argc, char **argv) {
       break;
     case 'n': randomize = false; break;
 #ifdef DEBUG_BUILD
-    case 't': traceFilename = optarg; break;
+    case 't': tracing = true; traceFilename = optarg; break;
     case 'd': verboseDebug = true; break;
 #endif
     case 'v': printChameleonInfo(); exit(0); break;
@@ -151,8 +153,7 @@ static void alarmCallback(void *data) {
     else ERROR("could not try to acquire child lock" << endl);
   }
 
-  DEBUG(if(traceFilename) __atomic_store_n(&doRerandomize, true,
-                                           __ATOMIC_RELEASE);)
+  DEBUG(if(tracing) __atomic_store_n(&doRerandomize, true, __ATOMIC_RELEASE);)
 
   // Kick off an action; send a signal to handler threads that are blocked in
   // waitpid(), which will perform an action on the child inside handleEvent().
@@ -306,7 +307,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
 #ifdef DEBUG_BUILD
   long syscall;
 
-  if(traceFilename) {
+  if(tracing) {
     code = child.singleStep();
 
     // Triggering a re-randomization only occurs when interrupting a wait, but
@@ -334,7 +335,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
   default: INFO(pid << ": unknown status"); return Process::Unknown;
   case Process::Stopped:
     DEBUG(
-      if(traceFilename && child.getSignal() == SIGTRAP) {
+      if(tracing && child.getSignal() == SIGTRAP) {
         traceFile << dec << pid << " " << hex << child.getPC() << endl;
         child.dumpRegs(traceFile);
       }
@@ -409,8 +410,8 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
       // Delete trace from previous epoch & re-open file to avoid ballooning
       // trace sizes
       DEBUG(
-        if(traceFilename) {
-          traceFile.close();
+        if(tracing) {
+          if(traceFile.is_open()) traceFile.close();
           traceFile.open(traceFilename);
           if(!traceFile.is_open())
             ERROR("could not re-open trace file '" << traceFilename << "': "
@@ -482,7 +483,7 @@ int main(int argc, char **argv) {
     ERROR("could not initialize chameleon signaling: " << retText(code) << endl);
 
   DEBUG(
-    if(traceFilename) {
+    if(tracing) {
       DEBUGMSG("tracing output to '" << traceFilename << "'" << endl);
       traceFile.open(traceFilename);
       if(!traceFile.is_open())
