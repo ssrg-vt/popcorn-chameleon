@@ -1099,6 +1099,7 @@ out:
 }
 
 ret_t CodeTransformer::analyzeFunctions() {
+  std::unordered_set<uintptr_t> funcs;
   Timer t;
   ret_t code;
 
@@ -1106,6 +1107,15 @@ ret_t CodeTransformer::analyzeFunctions() {
   Binary::func_iterator it = binary.getFunctions(codeStart, codeEnd);
   for(; !it.end(); ++it) {
     const function_record *func = *it;
+
+    // Due to static/templated functions in headers, we may get duplicate
+    // function records; de-duplicate here to avoid problems later on.
+    if(funcs.count(func->addr)) {
+      DEBUGMSG("skipping duplicate function record @ " << std::hex
+               << func->addr << std::endl);
+      continue;
+    }
+    else funcs.insert(func->addr);
 
     DEBUGMSG("analyzing function @ " << std::hex << func->addr << ", size = "
              << std::dec << func->code_size << std::endl);
