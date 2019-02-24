@@ -32,8 +32,15 @@ namespace chameleon {
 
 class CodeTransformer {
 public:
-  /* Initialize data required by all CodeTransformer objects */
-  static void initialize();
+  /**
+   * Initialize data required by all CodeTransformer objects.  If non-null,
+   * open the blacklist file and populate with addresses of functions that will
+   * not be randomized.
+   *
+   * @param blacklistFilename file containing addresses of functions which
+   *                          should not be randomized
+   */
+  static void initialize(const char *blacklistFilename);
 
   /**
    * Construct a code transformer for a given process.  Does not initialize the
@@ -185,6 +192,11 @@ public:
    * @return a return code describing the outcome
    */
   ret_t randomizeFunctions(MemoryWindow &buffer);
+
+  /**
+   * Dump the process' backtrace to the stack transformation log.
+   */
+  void dumpBacktrace();
 
   /* The following APIs should *only* be called by the fault-handling thread */
 

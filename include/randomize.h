@@ -113,9 +113,12 @@ struct RandUtil {
  */
 class StackRegion {
 public:
-  StackRegion(int32_t flags = 0)
-    : flags(flags), origOffset(INT32_MAX), randomizedOffset(INT32_MAX),
-      origSize(0), randomizedSize(0), minRandOffset(0) {}
+  StackRegion(int32_t flags = 0,
+              int32_t minStartOffset = 0,
+              int32_t maxOffset = INT32_MAX)
+    : flags(flags), minStartOffset(minStartOffset), maxOffset(maxOffset),
+      origOffset(INT32_MAX), randomizedOffset(INT32_MAX), origSize(0),
+      randomizedSize(0) {}
 
   /**
    * Add a slot to the region.
@@ -186,17 +189,19 @@ public:
    * apply to the original version of the frame (randomized offset & size are
    * calculated by randomize()).
    */
-  void addFlags(int32_t flags) { this->flags |= flags; }
   void setFlags(int32_t flags) { this->flags = flags; }
-  void setRegionOffset(int32_t offset) { origOffset = offset; }
-  void setRegionSize(size_t size) { origSize = size; }
+  void addFlags(int32_t flags) { this->flags |= flags; }
   int32_t getFlags() const { return flags; }
-  int32_t getOriginalRegionOffset() const { return origOffset; }
-  size_t getOriginalRegionSize() const { return origSize; }
-  int32_t getRandomizedRegionOffset() const { return randomizedOffset; }
-  size_t getRandomizedRegionSize() const { return randomizedSize; }
-  void setMinRandOffset(int32_t offset) { this->minRandOffset = offset; }
-  int32_t getMinRandOffset() const { return minRandOffset; }
+  void setMinStartingOffset(int32_t offset) { this->minStartOffset = offset; }
+  int32_t getMinStartingOffset() const { return minStartOffset; }
+  void setMaxOffset(int32_t maxOffset) { this->maxOffset = maxOffset; }
+  int32_t getMaxOffset() const { return maxOffset; }
+  void setOffset(int32_t offset) { origOffset = offset; }
+  void setSize(size_t size) { origSize = size; }
+  int32_t getOriginalOffset() const { return origOffset; }
+  size_t getOriginalSize() const { return origSize; }
+  int32_t getRandomizedOffset() const { return randomizedOffset; }
+  size_t getRandomizedSize() const { return randomizedSize; }
   size_t numSlots() const { return slots.size(); }
   std::vector<SlotMap> &getSlots() { return slots; }
   const std::vector<SlotMap> &getSlots() const { return slots; }
@@ -204,6 +209,10 @@ public:
 protected:
   /* Flags that targets can use to add information about the section */
   int32_t flags;
+
+  /* Region restrictions */
+  int32_t minStartOffset; /* Minimum starting offset of region */
+  int32_t maxOffset; /* Maximum offset of region */
 
   /*
    * Region information.  The region's offset is the furthest address away from
@@ -214,9 +223,6 @@ protected:
    */
   int32_t origOffset, randomizedOffset;
   uint32_t origSize, randomizedSize;
-
-  /* Restrictions on beginning and ending offsets of region */
-  int32_t minRandOffset;
 
   ///////////////////////////////////////////////////////////////////////////
   // Note: maintain information as vectors because we interface with C and //
@@ -230,7 +236,7 @@ protected:
 typedef std::unique_ptr<StackRegion> StackRegionPtr;
 
 /**
- * Calss which returns a zero for slot padding.
+ * Class which returns a zero for slot padding.
  */
 struct ZeroPad { int slotPadding() { return 0; } };
 
@@ -248,7 +254,7 @@ bool regionCompare(const StackRegionPtr &a, const StackRegionPtr &b);
  */
 class ImmutableRegion : public StackRegion {
 public:
-  ImmutableRegion(int32_t flags) : StackRegion(flags) {}
+  ImmutableRegion(int32_t flags = 0) : StackRegion(flags) {}
 
   /**
    * A no-op - the region is not randomizable.  The "randomized" offset and
@@ -271,12 +277,17 @@ public:
  */
 class PermutableRegion : public StackRegion {
 public:
-  PermutableRegion(int32_t flags) : StackRegion(flags) {}
+  PermutableRegion(int32_t flags = 0,
+                   int32_t minStartOffset = 0,
+                   int32_t maxOffset = INT32_MAX)
+    : StackRegion(flags, minStartOffset, maxOffset) {}
 
   /**
    * Randomize stack slot locations by permuting the ordering of stack slots.
    * Because the slots are only permuted, the randomized offset & size are
-   * equivalent to the original offset and size.
+   * equivalent to the original offset and size.  If the permutation's offset
+   * exceeds the original offset or the permutation's size exceeds any
+   * specified maximum size, the region is restored to its original layout.
    *
    * @param start the starting offset of the region
    * @param ru a random number generator
@@ -290,7 +301,10 @@ public:
  */
 class RandomizableRegion : public StackRegion {
 public:
-  RandomizableRegion(int32_t flags) : StackRegion(flags) {}
+  RandomizableRegion(int32_t flags = 0,
+                     int32_t minStartOffset = 0,
+                     int32_t maxOffset = INT32_MAX)
+    : StackRegion(flags, minStartOffset, maxOffset) {}
 
   /**
    * Randomize stack slot locations by both permuting the ordering of stack

@@ -1,3 +1,4 @@
+#include <fstream>
 #include <csignal>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -187,7 +188,38 @@ void *randomizeCodeAsync(void *arg) {
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
-void CodeTransformer::initialize() { arch::setInterruptInstructions(intPage); }
+static std::unordered_set<uintptr_t> blacklist;
+
+void CodeTransformer::initialize(const char *blacklistFilename) {
+  uintptr_t addr;
+
+  arch::setInterruptInstructions(intPage);
+
+  // Read in addresses of functions (in hex) which should *not* be randomized
+  if(blacklistFilename) {
+    std::ifstream fs(blacklistFilename);
+    if(fs.is_open()) {
+      std::string line;
+      while(std::getline(fs, line)) {
+        if(line.empty()) continue;
+        try {
+          addr = std::stoul(line, nullptr, 16);
+          blacklist.insert(addr);
+        } catch(std::invalid_argument& ia) {
+          DEBUG(WARN("Skipping invalid function address '" << line << "'"
+                     << std::endl));
+        } catch(std::out_of_range &oor) {
+          DEBUG(WARN("Function address " << line << " out of range"
+                     << std::endl));
+        }
+      }
+      DEBUGMSG("blacklisted " << blacklist.size() << " functions"
+               << std::endl);
+    }
+    else DEBUG(WARN("Could not open black list file '" << blacklistFilename
+                    << "'" << std::endl));
+  }
+}
 
 ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   ret_t retcode;
@@ -948,8 +980,11 @@ static inline int getStackOffset(uint32_t frameSize,
     offset = opnd_get_disp(op);
     offset = CodeTransformer::canonicalizeSlotOffset(frameSize, type, offset);
     DEBUG_VERBOSE(
-      if(offset != INT32_MAX)
+      if(offset != INT32_MAX) {
         DEBUGMSG_VERBOSE(" -> detected offset " << offset << std::endl);
+        if(offset > (int)(frameSize + 8))
+          DEBUG_VERBOSE(WARN("Offset outside stack bounds" << std::endl));
+      }
     )
     if(offset <= 0 || offset > (int)frameSize) offset = 0;
   }
@@ -1113,6 +1148,11 @@ ret_t CodeTransformer::analyzeFunctions() {
     if(funcs.count(func->addr)) {
       DEBUGMSG("skipping duplicate function record @ " << std::hex
                << func->addr << std::endl);
+      continue;
+    }
+    else if(blacklist.count(func->addr)) {
+      DEBUGMSG("skipping blacklisted function @ " << std::hex << func->addr
+               << std::endl);
       continue;
     }
     else funcs.insert(func->addr);
@@ -1404,6 +1444,23 @@ ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
   }
 
   return ret_t::Success;
+}
+
+void CodeTransformer::dumpBacktrace() {
+  uintptr_t sp, childSrc, bufSrc, childDst, bufDst;
+  ret_t code;
+
+  sp = proc.getSP();
+  if(!sp) return;
+  byte_iterator stackBuf = calcStackBounds(sp, childSrc, bufSrc,
+                                           childDst, bufDst);
+  code = proc.readRegion(sp, stackBuf);
+  if(code != ret_t::Success) return;
+  arch::dumpBacktrace(this,
+                      getFunctionInfoCallback,
+                      rewriteMetadata,
+                      childSrc,
+                      bufSrc);
 }
 
 ret_t CodeTransformer::lockCodeWindow() {

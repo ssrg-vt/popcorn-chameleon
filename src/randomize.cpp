@@ -58,7 +58,7 @@ int StackRegion::getRandomizedOffset(int orig) {
 }
 
 bool chameleon::regionCompare(const StackRegionPtr &a, const StackRegionPtr &b)
-{ return a->getOriginalRegionOffset() < b->getOriginalRegionOffset(); }
+{ return a->getOriginalOffset() < b->getOriginalOffset(); }
 
 void ImmutableRegion::randomize(int start, RandUtil &ru) {
   ZeroPad pad;
@@ -250,14 +250,15 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
       if(slot->original != 0) slots.emplace_back(*slot);
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
 
+  if(randomizedOffset < origOffset) {
+    // TODO extra space, disperse between slots
+  }
+
   // If permutation failed, resort to original ordering
   if(randomizedOffset > origOffset) {
-    DEBUG(WARN("Could not permute slots in " << origOffset << " -> "
-               << origOffset + origSize << " region" << std::endl));
+    DEBUG(WARN("Could not permute slots in " << origOffset - origSize << " -> "
+               << origOffset << " region" << std::endl));
     for(auto &sm : slots) sm.randomized = sm.original;
-  }
-  else if(randomizedOffset < origOffset) {
-    // TODO extra space, disperse between slots
   }
 
   // Sometimes we actually manage to create smaller regions than those laid out
@@ -355,7 +356,7 @@ ret_t RandomizedFunction::finalizeAnalysis() {
   // Start by sizing the slot remapping arrays.
   size_t count = 0;
   for(auto r = regions.begin(); r != regions.end(); r++)
-    count += (*r)->getSlots().size();
+    count += (*r)->numSlots();
   _a.resize(count);
   _b.resize(count);
   prevSortedByRand.resize(count);
@@ -424,16 +425,16 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
 
   i = 0;
   for(auto r = regions.begin(); r != regions.end(); r++) {
-    offset = std::max(offset, (*r)->getMinRandOffset());
+    offset = std::max(offset, (*r)->getMinStartingOffset());
     (*r)->randomize(offset, ru);
-    offset = (*r)->getRandomizedRegionOffset();
+    offset = (*r)->getRandomizedOffset();
 
     // Serialize the region's slots into the global vector to be passed to the
     // state transformation runtime
     i = serializeSlots(*r, *curRand, i);
   }
   prevRandFrameSize = randomizedFrameSize;
-  randomizedFrameSize = regions.back()->getRandomizedRegionOffset();
+  randomizedFrameSize = regions.back()->getRandomizedOffset();
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
@@ -535,7 +536,7 @@ static bool regionContains(const StackRegionPtr *region, int offset)
  * @return true if the offset would appear before the region or false otherwise
  */
 static bool lessThanRegion(const StackRegionPtr *region, int offset)
-{ return offset < (*region)->getOriginalRegionOffset(); }
+{ return offset < (*region)->getOriginalOffset(); }
 
 StackRegionPtr *RandomizedFunction::findRegion(int offset) {
   ssize_t idx = findRight<StackRegionPtr, int, regionContains, lessThanRegion>

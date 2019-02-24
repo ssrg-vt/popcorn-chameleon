@@ -37,6 +37,12 @@ extern pid_t masterPID;
 #define ROUND_DOWN( val, size ) ((val) & -(size))
 #define ROUND_UP( val, size ) ROUND_DOWN((val) + ((size)-1), size)
 
+/* Mask all but unaligned bits for a given alignment */
+#define MASK_ALIGNED( val, align ) (val & (align-1))
+
+/* Return true if a value is at a specified alignment or false otherwise */
+#define ALIGNED( val, align ) !MASK_ALIGNED(val, align)
+
 #define PAGESZ 4096UL
 
 /* Align symbol definition to page boundary */
@@ -50,7 +56,7 @@ extern pid_t masterPID;
 #define PAGE_ALIGN_LEN( addr, len ) (PAGE_UP(addr + len) - PAGE_DOWN(addr))
 
 /* Mask to only keep page offset bits (i.e., keep lower bits) */
-#define PAGE_OFFSET_BITS( addr ) (addr & (PAGESZ-1))
+#define PAGE_OFFSET_BITS( addr ) MASK_ALIGNED(addr, PAGESZ)
 
 /*
  * Perform an expression (probably a C library or system call), masking EINTR

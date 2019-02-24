@@ -23,9 +23,11 @@ static int childArgc;
 static char **childArgv;
 static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
+static const char *blacklistFilename = nullptr;
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static bool tracing = false;
+static bool traceRegs = false;
 static const char *traceFilename = nullptr;
 static ofstream traceFile;
 bool verboseDebug = false;
@@ -73,9 +75,12 @@ static void printHelp(const char *bin) {
        << "  -h      : print help and exit" << endl
        << "  -p MS   : re-randomization period in milliseconds" << endl
        << "  -n      : don't randomize the code section" << endl
+       << "  -b FILE : don't randomize functions whose addresses are listed "
+          "in the specified file" << endl
 #ifdef DEBUG_BUILD
        << "  -t FILE : trace execution by dumping PC values to FILE (warning: "
           "slow!)" << endl
+       << "  -r      : dump registers with trace" << endl
        << "  -d      : print even more debugging information than normal" << endl
 #endif
        << "  -v      : print Popcorn Chameleon version and exit" << endl;
@@ -108,7 +113,7 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hp:nt:dv")) != -1) {
+  while((c = getopt(argc, argv, "hp:nb:t:rdv")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
@@ -118,8 +123,10 @@ static void parseArgs(int argc, char **argv) {
         ERROR("invalid randomization period '" << optarg << "'" << endl);
       break;
     case 'n': randomize = false; break;
+    case 'b': blacklistFilename = optarg; break;
 #ifdef DEBUG_BUILD
     case 't': tracing = true; traceFilename = optarg; break;
+    case 'r': traceRegs = true; break;
     case 'd': verboseDebug = true; break;
 #endif
     case 'v': printChameleonInfo(); exit(0); break;
@@ -337,15 +344,17 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     DEBUG(
       if(tracing && child.getSignal() == SIGTRAP) {
         traceFile << dec << pid << " " << hex << child.getPC() << endl;
-        child.dumpRegs(traceFile);
+        if(traceRegs) child.dumpRegs(traceFile);
       }
       else {
         DEBUGMSG(pid << ": stopped with signal " << child.getSignal()
                  << " @ 0x" << hex << child.getPC() << endl);
         DEBUG_VERBOSE(
-          if(child.getSignal() == SIGTRAP &&
-             child.getSyscallNumber(syscall) == ret_t::Success)
-            DEBUGMSG_VERBOSE(pid << ": system call number " << syscall << endl);
+          if(child.getSignal() == SIGTRAP) {
+            if(child.getSyscallNumber(syscall) == ret_t::Success)
+              DEBUGMSG_VERBOSE(pid << ": system call number " << syscall << endl);
+          }
+          else CT.dumpBacktrace();
         )
       }
     )
@@ -353,7 +362,10 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     switch(child.getStopReason()) {
     default:
       DEBUG_VERBOSE(
-        if(child.getSignal() != SIGTRAP) child.dumpRegs(std::cerr);
+        if(child.getSignal() != SIGTRAP) {
+          child.dumpRegs(std::cerr);
+          child.dumpRegs(std::cout);
+        }
       )
 
       code = ret_t::Success;
@@ -517,7 +529,7 @@ int main(int argc, char **argv) {
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
-  CodeTransformer::initialize();
+  CodeTransformer::initialize(blacklistFilename);
   CodeTransformer transformer(child, *binary);
   code = transformer.initialize(randomize, true);
   if(code != ret_t::Success)

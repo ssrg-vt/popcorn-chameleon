@@ -222,6 +222,23 @@ ret_t transformStack(CodeTransformer *CT,
                      uintptr_t bufDstBase,
                      uintptr_t &newSp);
 
+/**
+ * Call the stack transformation runtime with the current stack in order to
+ * dump a backtrace.
+ *
+ * @param CT a CodeTransformer object containing randomization metadata
+ * @param callback function called by transformation runtime to read
+ *                 transformation metadata
+ * @param meta transformation metadata handle
+ * @param childBase address of source stack's base in child's address space
+ * @param bufBase address of source stack's base in chameleon's address space
+ */
+void dumpBacktrace(CodeTransformer *CT,
+                   get_rand_info callback,
+                   st_handle meta,
+                   uintptr_t childBase,
+                   uintptr_t bufBase);
+
 ///////////////////////////////////////////////////////////////////////////////
 // DynamoRIO interface
 ///////////////////////////////////////////////////////////////////////////////
