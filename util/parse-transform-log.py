@@ -175,4 +175,6 @@ with open(sys.argv[2], 'r') as log:
         elif "WARN" in line:
             if "compiler indicated" not in line:
                 print("-> warning in log <-")
+        elif "Dumping stack" in line:
+            break
 

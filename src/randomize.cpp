@@ -250,21 +250,23 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
       if(slot->original != 0) slots.emplace_back(*slot);
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
 
-  if(randomizedOffset < origOffset) {
-    // TODO extra space, disperse between slots
-  }
+  // TODO if randomizedOffset < origOffset there's leftover space which we
+  // should disperse between the slots
 
   // If permutation failed, resort to original ordering
   if(randomizedOffset > origOffset) {
     DEBUG(WARN("Could not permute slots in " << origOffset - origSize << " -> "
                << origOffset << " region" << std::endl));
     for(auto &sm : slots) sm.randomized = sm.original;
+    randomizedOffset = origOffset;
+    randomizedSize = origSize;
   }
-
-  // Sometimes we actually manage to create smaller regions than those laid out
-  // by the compiler.  Logically pad to fill the region.
-  randomizedOffset = start + origSize;
-  randomizedSize = origSize;
+  else {
+    // Sometimes we actually manage to create smaller regions than those laid
+    // out by the compiler.  Logically pad to fill the region.
+    randomizedOffset = start + origSize;
+    randomizedSize = origSize;
+  }
 
   // Sort by original offset for searching
   sortSlots();
@@ -436,6 +438,8 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   prevRandFrameSize = randomizedFrameSize;
   randomizedFrameSize = regions.back()->getRandomizedOffset();
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
+
+  assert(randomizedFrameSize <= maxFrameSize && "Invalid randomization");
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
 

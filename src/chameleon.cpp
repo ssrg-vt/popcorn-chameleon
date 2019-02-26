@@ -24,6 +24,7 @@ static char **childArgv;
 static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
 static const char *blacklistFilename = nullptr;
+static const char *badSitesFilename = nullptr; // TODO hack, should remove
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static bool tracing = false;
@@ -77,6 +78,8 @@ static void printHelp(const char *bin) {
        << "  -n      : don't randomize the code section" << endl
        << "  -b FILE : don't randomize functions whose addresses are listed "
           "in the specified file" << endl
+       << "  -s FILE : don't transform if thread's stack has frames from call "
+          " sites listed in the specified file" << endl
 #ifdef DEBUG_BUILD
        << "  -t FILE : trace execution by dumping PC values to FILE (warning: "
           "slow!)" << endl
@@ -113,7 +116,7 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hp:nb:t:rdv")) != -1) {
+  while((c = getopt(argc, argv, "hp:nb:s:t:rdv")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
@@ -124,6 +127,7 @@ static void parseArgs(int argc, char **argv) {
       break;
     case 'n': randomize = false; break;
     case 'b': blacklistFilename = optarg; break;
+    case 's': badSitesFilename = optarg; break;
 #ifdef DEBUG_BUILD
     case 't': tracing = true; traceFilename = optarg; break;
     case 'r': traceRegs = true; break;
@@ -396,9 +400,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     INFO(pid << ": exited with code " << child.getExitCode() << endl);
     return Process::Exited;
   case Process::SignalExit:
-    // TODO dump the instruction at which the child exited
-    INFO(pid << ": terminated with signal " << child.getSignal() << " at 0x"
-         << hex << child.getPC() << endl);
+    INFO(pid << ": terminated with signal " << child.getSignal() << endl);
     return Process::SignalExit;
   case Process::Interrupted:
     pc = child.getPC();
@@ -529,7 +531,7 @@ int main(int argc, char **argv) {
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
-  CodeTransformer::initialize(blacklistFilename);
+  CodeTransformer::initialize(blacklistFilename, badSitesFilename);
   CodeTransformer transformer(child, *binary);
   code = transformer.initialize(randomize, true);
   if(code != ret_t::Success)

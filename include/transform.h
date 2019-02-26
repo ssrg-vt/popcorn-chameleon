@@ -39,8 +39,11 @@ public:
    *
    * @param blacklistFilename file containing addresses of functions which
    *                          should not be randomized
+   * @param badSitesFilename file containing call site addresses known to cause
+   *                         problems and hence should be avoided
    */
-  static void initialize(const char *blacklistFilename);
+  static void initialize(const char *blacklistFilename,
+                         const char *badSitesFilename);
 
   /**
    * Construct a code transformer for a given process.  Does not initialize the

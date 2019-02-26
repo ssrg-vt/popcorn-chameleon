@@ -188,9 +188,10 @@ void *randomizeCodeAsync(void *arg) {
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
-static std::unordered_set<uintptr_t> blacklist;
+static std::unordered_set<uintptr_t> blacklist, badSites;
 
-void CodeTransformer::initialize(const char *blacklistFilename) {
+void CodeTransformer::initialize(const char *blacklistFilename,
+                                 const char *badSitesFilename) {
   uintptr_t addr;
 
   arch::setInterruptInstructions(intPage);
@@ -213,10 +214,35 @@ void CodeTransformer::initialize(const char *blacklistFilename) {
                      << std::endl));
         }
       }
-      DEBUGMSG("blacklisted " << blacklist.size() << " functions"
+      DEBUGMSG("blacklisted " << blacklist.size() << " function(s)"
                << std::endl);
     }
-    else DEBUG(WARN("Could not open black list file '" << blacklistFilename
+    else DEBUG(WARN("Could not open blacklist file '" << blacklistFilename
+                    << "'" << std::endl));
+  }
+
+  // Read in addresses of bad call sites
+  if(badSitesFilename) {
+    std::ifstream fs(badSitesFilename);
+    if(fs.is_open()) {
+      std::string line;
+      while(std::getline(fs, line)) {
+        if(line.empty()) continue;
+        try {
+          addr = std::stoul(line, nullptr, 16);
+          badSites.insert(addr);
+        } catch(std::invalid_argument& ia) {
+          DEBUG(WARN("Skipping invalid bad site address '" << line << "'"
+                     << std::endl));
+        } catch(std::out_of_range &oor) {
+          DEBUG(WARN("Bad site address " << line << " out of range"
+                     << std::endl));
+        }
+      }
+      DEBUGMSG("banishing " << badSites.size() << " bad site(s)"
+               << std::endl);
+    }
+    else DEBUG(WARN("Could not open bad site file '" << badSitesFilename
                     << "'" << std::endl));
   }
 }
@@ -315,8 +341,18 @@ static func_rand_info getFunctionInfoCallback(void *rawCT, uintptr_t addr) {
   func_rand_info cinfo;
   cinfo.old_frame_size = UINT64_MAX;
 
+  // Skip sites explicitly marked as evil
+  // TODO this is a hack that should be removed
+  if(badSites.count(addr)) {
+    DEBUGMSG_VERBOSE(" -> preventing transforming bad site at 0x" << std::hex
+                     << addr << std::endl);
+    memset(&cinfo, 0, sizeof(cinfo));
+    return cinfo;
+  }
+
   info = CT->getRandomizedFunctionInfo(addr);
   if(info) {
+    cinfo.found = true;
     auto &oldSlots = info->getPrevRandSlots();
     auto &newSlots = info->getRandomizedSlots();
     cinfo.old_frame_size = info->getPrevRandFrameSize();
@@ -1122,7 +1158,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   code = info->finalizeAnalysis();
 
   DEBUG_VERBOSE(
-    if(frameSize)
+    if(frameSize && frameSize != maxFrameSize)
       DEBUGMSG(" -> function does not clean up frame (not intended to return?)"
                << std::endl);
   )
