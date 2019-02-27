@@ -193,7 +193,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   // Due to starting offset, the first bucket may actually be smaller to round
   // the frame up to the nearest bucket size
   curSize = ROUND_UP(start, bucketSize) - start;
-  if(curSize < bucketSize) {
+  if(curSize && curSize < bucketSize) {
     buckets.emplace_back(Bucket(curSize));
     fillerBucket = true;
   }
@@ -264,7 +264,7 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   else {
     // Sometimes we actually manage to create smaller regions than those laid
     // out by the compiler.  Logically pad to fill the region.
-    randomizedOffset = start + origSize;
+    randomizedOffset = origOffset;
     randomizedSize = origSize;
   }
 
@@ -519,6 +519,28 @@ std::pair<int, const stack_slot *> RandomizedFunction::findSlot(int offset) {
                           slotContains, lessThanSlot>
                          (&slots[0], slots.size(), offset);
   if(idx >= 0 && slotContains(&slots[idx], offset)) return slots[idx];
+  else return std::pair<int, const stack_slot *>(INT32_MAX, nullptr);
+}
+
+/**
+ * Return whether the slot contains a given offset inclusive of the slot's
+ * ending offset.
+ *
+ * @param slot offset/stack slot record pair
+ * @param offset a canonicalized offset
+ * @return true if the slot contains the offset, false otherwise
+ */
+static bool
+slotContainsInclusive(const std::pair<int, const stack_slot *> *slot,
+                       int offset)
+{ return CONTAINS_BELOW_INCLUSIVE(offset, slot->first, slot->second->size); }
+
+std::pair<int, const stack_slot *>
+RandomizedFunction::findSlotEndInclusive(int offset) {
+  ssize_t idx = findRight<std::pair<int, const stack_slot *>, int,
+                          slotContainsInclusive, lessThanSlot>
+                         (&slots[0], slots.size(), offset);
+  if(idx >= 0 && slotContainsInclusive(&slots[idx], offset)) return slots[idx];
   else return std::pair<int, const stack_slot *>(INT32_MAX, nullptr);
 }
 

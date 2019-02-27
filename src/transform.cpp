@@ -30,11 +30,10 @@ static inline ret_t handleFault(CodeTransformer *CT,
                                 const struct uffd_msg &msg,
                                 std::vector<char> &pageBuf,
                                 uintptr_t intPageAddr) {
-  uintptr_t pageAddr = msg.arg.pagefault.address, data;
+  uintptr_t pageAddr = PAGE_DOWN(msg.arg.pagefault.address), data;
   ret_t code = ret_t::Success;
 
   assert(msg.event == UFFD_EVENT_PAGEFAULT && "Invalid message type");
-  assert(!(pageAddr & (PAGESZ - 1)) && "Fault address not page-aligned");
   DEBUGMSG(CT->getProcessPid() << ": handling fault @ 0x" << std::hex
            << pageAddr << ", flags=" << msg.arg.pagefault.flags << ", ptid="
            << std::dec << msg.arg.pagefault.feat.ptid
@@ -556,7 +555,8 @@ ret_t CodeTransformer::rerandomize() {
   if(!stackBuf.getLength()) return ret_t::RandomizeFailed;
   curStackBase += FOURMB;
 #else
-  stackBuf = byte_iterator((unsigned char *)rawBuf + (sp - stackBounds.first),
+  const urange_t &stackBounds = proc.getStackBounds();
+  stackBuf = byte_iterator(stackMem.get() + (sp - stackBounds.first),
                            stackSize);
 #endif
 
@@ -1052,7 +1052,8 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
 
 ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   int32_t update, offset;
-  uint32_t frameSize = arch::initialFrameSize(), maxFrameSize = 0;
+  uint32_t frameSize = arch::initialFrameSize(),
+           maxFrameSize = arch::initialFrameSize();
   size_t instrSize;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = codeWindow.getData(func->addr);
@@ -1112,7 +1113,6 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     // Note: we're assuming the compiler didn't do anything silly like
     // partially clean up the frame mid-way through the function
     if(!frameSize) {
-      assert(maxFrameSize && "Max frame size is unset");
       DEBUGMSG_VERBOSE("found epilogue inside function body, restoring frame "
                        "size to " << maxFrameSize << std::endl);
       frameSize = maxFrameSize;
@@ -1321,8 +1321,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
                                          MemoryWindow &buffer) {
   bool changed;
   int32_t update, offset, instrSize;
-  uint32_t frameSize = arch::initialFrameSize(), maxFrameSize = 0,
-           randFrameSize = arch::initialFrameSize(), maxRandFrameSize = 0;
+  uint32_t frameSize = arch::initialFrameSize(),
+           maxFrameSize = arch::initialFrameSize(),
+           randFrameSize = arch::initialFrameSize(),
+           maxRandFrameSize = arch::initialFrameSize();
   size_t count = 0;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = buffer.getData(func->addr);
@@ -1347,7 +1349,6 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 
     // See frame size cleanup comment in analyzeFunction()
     if(!frameSize) {
-      assert(maxFrameSize && maxRandFrameSize && "Max frame size is unset");
       DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
                        "to " << maxFrameSize << " (previous), "
                        << maxRandFrameSize << " (current)" << std::endl);

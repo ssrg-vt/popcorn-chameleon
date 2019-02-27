@@ -33,6 +33,11 @@ extern pid_t masterPID;
   ((int64_t)(val) <= (int64_t)(start) && \
    (int64_t)(val) > ((int64_t)(start) - (int64_t)(len)))
 
+/* Same as CONTAINS_BELOW but inclusive of the end of the range */
+#define CONTAINS_BELOW_INCLUSIVE( val, start, len ) \
+  ((int64_t)(val) <= (int64_t)(start) && \
+   (int64_t)(val) >= ((int64_t)(start) - (int64_t)(len)))
+
 /* Rounding for positive values and positive power-of-2 sizes */
 #define ROUND_DOWN( val, size ) ((val) & -(size))
 #define ROUND_UP( val, size ) ROUND_DOWN((val) + ((size)-1), size)

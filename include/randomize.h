@@ -568,6 +568,17 @@ protected:
   std::pair<int, const stack_slot *> findSlot(int offset);
 
   /**
+   * Same as findSlot() but include the end of the slot in checking.  Should
+   * *only* be called after findSlot() could not find a corresponding slot.
+   *
+   * @param a canonicalized offset
+   * @return a canonicalized offset/stack slot record pair corresponding to the
+   *         containing stack slot, or a <INT32_MAX, nullptr> pair if no slot
+   *         contains the offset
+   */
+  std::pair<int, const stack_slot *> findSlotEndInclusive(int offset);
+
+  /**
    * Find the region containing an offset or nullptr if none do.
    * @param offset a canonicalized offset
    * @return a pointer to the containing StackRegion object or nullptr if none
