@@ -1,8 +1,11 @@
 /**
  * class RandomizedFunction
  *
- * Metadata describing where function activation information (i.e., on the
- * stack and in registers) is placed in a randomized version of the function.
+ * Metadata describing information needed to randomize a function and transform
+ * threads executing the functions to adhere to the randomized layout.
+ * Includes where function activation information (i.e., on the stack and in
+ * registers) is placed in a randomized version of the function and instruction
+ * information (e.g., transformation points).
  *
  * Author: Rob Lyerly <rlyerly@vt.edu>
  * Date: 11/27/2018
@@ -119,6 +122,16 @@ public:
     : flags(flags), minStartOffset(minStartOffset), maxOffset(maxOffset),
       origOffset(INT32_MAX), randomizedOffset(INT32_MAX), origSize(0),
       randomizedSize(0) {}
+  StackRegion(const StackRegion &rhs)
+    : flags(rhs.flags), minStartOffset(rhs.minStartOffset),
+      maxOffset(rhs.maxOffset), origOffset(rhs.origOffset),
+      randomizedOffset(rhs.randomizedOffset), origSize(rhs.origSize),
+      randomizedSize(rhs.randomizedSize), slots(rhs.slots) {}
+
+  /**
+   * Return a copy of the stack region.
+   */
+  virtual StackRegion *copy() const = 0;
 
   /**
    * Add a slot to the region.
@@ -191,6 +204,7 @@ public:
    */
   void setFlags(int32_t flags) { this->flags = flags; }
   void addFlags(int32_t flags) { this->flags |= flags; }
+  void clearFlags(int32_t flags) { this->flags &= ~flags; }
   int32_t getFlags() const { return flags; }
   void setMinStartingOffset(int32_t offset) { this->minStartOffset = offset; }
   int32_t getMinStartingOffset() const { return minStartOffset; }
@@ -249,17 +263,22 @@ struct ZeroPad { int slotPadding() { return 0; } };
 bool regionCompare(const StackRegionPtr &a, const StackRegionPtr &b);
 
 /**
- * A region of the stack which cannot be randomized.  Provides an identity
- * mapping between original and "new" offsets.
+ * A region of the stack which cannot be randomized - slots maintain the same
+ * intra-region location.
+ *
+ * Note: randomized offsets may *not* be identical to original offsets due to
+ * this region's placement around other randomizable regions.  The ordering and
+ * relative offsets of slots within the region are preserved.
  */
 class ImmutableRegion : public StackRegion {
 public:
   ImmutableRegion(int32_t flags = 0) : StackRegion(flags) {}
+  ImmutableRegion(const ImmutableRegion &rhs) : StackRegion(rhs) {}
+  StackRegion *copy() const override { return new ImmutableRegion(*this); }
 
   /**
-   * A no-op - the region is not randomizable.  The "randomized" offset and
-   * size are equivalent to the original offset & size and all slots are set to
-   * their original offsets.
+   * Update the "randomized" offsets of slots in consideration of the starting
+   * offset.  Does not randomize ordering or intra-region locations of slots.
    *
    * @param start the starting offset of the region
    * @param ru a random number generator
@@ -281,6 +300,8 @@ public:
                    int32_t minStartOffset = 0,
                    int32_t maxOffset = INT32_MAX)
     : StackRegion(flags, minStartOffset, maxOffset) {}
+  PermutableRegion(const PermutableRegion &rhs) : StackRegion(rhs) {}
+  StackRegion *copy() const override { return new PermutableRegion(*this); }
 
   /**
    * Randomize stack slot locations by permuting the ordering of stack slots.
@@ -305,6 +326,8 @@ public:
                      int32_t minStartOffset = 0,
                      int32_t maxOffset = INT32_MAX)
     : StackRegion(flags, minStartOffset, maxOffset) {}
+  RandomizableRegion(const RandomizableRegion &rhs) : StackRegion(rhs) {}
+  StackRegion *copy() const override { return new RandomizableRegion(*this); }
 
   /**
    * Randomize stack slot locations by both permuting the ordering of stack
@@ -324,7 +347,7 @@ public:
  * Struct containing information about randomization restrictions for a slot.
  */
 struct RandRestriction {
-  int offset; /* canonicalized stack offset */
+  int offset; /* canonicalized stack offset identifying the slot */
   int32_t flags; /* ISA-specific flags - see details in arch.cpp */
   uint32_t size, alignment; /* size & alignment of slot */
   uint16_t base; /* base register or UINT16_MAX if no restriction */
@@ -335,7 +358,7 @@ struct RandRestriction {
  * This class is virtual and must be inherited by an ISA-specific child class
  * that implements the machinery necessary for laying out the stack.  The child
  * class should populated the regions vector with appropriate stack regions in
- * the constructor, ordered by lowest stack region first.
+ * the constructor, ordered by smallest region offset first.
  */
 class RandomizedFunction {
 public:
@@ -348,8 +371,14 @@ public:
 
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary, const function_record *func);
+  RandomizedFunction(const RandomizedFunction &rhs);
   ~RandomizedFunction()
   { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
+
+  /**
+   * Deep copy the randomized function.
+   */
+  virtual RandomizedFunction *copy() const = 0;
 
   /**
    * Get alignment requirements for the function's stack frame.
@@ -514,7 +543,7 @@ public:
   virtual ret_t transformInstr(uint32_t frameSize,
                                uint32_t randFrameSize,
                                instr_t *instr,
-                               bool &changed) const { return ret_t::Success; }
+                               bool &changed) const = 0;
 
 protected:
   /* Binary & function metadata */

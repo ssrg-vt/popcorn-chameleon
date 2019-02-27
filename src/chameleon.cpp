@@ -54,10 +54,10 @@ static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
 
 // Declare event & child handling APIs to satisfy compiler
 static void alarmCallback(void *data);
-static ret_t addChild(pid_t pid);
+static ret_t addChild(pid_t pid, const CodeTransformer &CT);
 static ret_t cleanupChild(const Process *proc);
 static Process::status_t handleEvent(CodeTransformer &CT);
-static void *forkedChildLoop(void *proc);
+static void *forkedChildLoop(void *p);
 
 static bool checkCompatibility() {
   // TODO other checks?
@@ -127,7 +127,7 @@ static void parseArgs(int argc, char **argv) {
       break;
     case 'n': randomize = false; break;
     case 'b': blacklistFilename = optarg; break;
-    case 's': badSitesFilename = optarg; break;
+    case 's': badSitesFilename = optarg; break; // TODO hack should be removed
 #ifdef DEBUG_BUILD
     case 't': tracing = true; traceFilename = optarg; break;
     case 'r': traceRegs = true; break;
@@ -219,20 +219,39 @@ static ret_t setupSignalsAndAlarm(Alarm &alarm) {
   return ret_t::Success;
 }
 
-static ret_t addChild(pid_t pid) {
+/* Arguments to child handlers */
+struct HandlerArgs {
+  Process *child;
+  const CodeTransformer *parentCT;
+  sem_t finishedInit;
+};
+
+static ret_t addChild(pid_t pid, const CodeTransformer &CT) {
   ret_t code = ret_t::Success;
+  HandlerArgs args;
 
   if(pthread_mutex_lock(&childLock)) return ret_t::LockFailed;
 
   children.emplace_back(Process(pid), pthread_t());
   ChildHandler &child = children.back();
   if((code = child.first.initForkedChild()) != ret_t::Success) goto cleanup;
-  if(pthread_create(&child.second, nullptr, forkedChildLoop, &child.first)) {
+
+  args.child = &child.first;
+  args.parentCT = &CT;
+  if(sem_init(&args.finishedInit, 0, 0)) {
+    code = ret_t::SemaphoreFailed;
+    goto cleanup;
+  }
+
+  if(pthread_create(&child.second, nullptr, forkedChildLoop, &args)) {
     code = ret_t::ChildHandlerSetupFailed;
     goto cleanup;
   }
+
   if((code = child.first.detachHandoff()) != ret_t::Success) goto cleanup;
+  if(MASK_INT(sem_wait(&args.finishedInit))) return ret_t::SemaphoreFailed;
   __atomic_add_fetch(&numChildren, 1, __ATOMIC_RELEASE);
+
 cleanup:
   if(pthread_mutex_unlock(&childLock)) return ret_t::LockFailed;
 
@@ -385,7 +404,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
       break;
     case stop_t::Fork:
       INFO(pid << ": forked process " << child.getNewTaskPid() << endl);
-      code = addChild(child.getNewTaskPid());
+      code = addChild(child.getNewTaskPid(), CT);
       break;
     }
 
@@ -437,8 +456,9 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
   }
 }
 
-static void *forkedChildLoop(void *proc) {
-  Process *child = (Process *)proc;
+static void *forkedChildLoop(void *p) {
+  HandlerArgs *args = (HandlerArgs *)p;
+  Process *child = args->child;
   pid_t cpid = child->getPid();
   Process::status_t status;
   ret_t code = ret_t::Success;
@@ -458,12 +478,19 @@ static void *forkedChildLoop(void *proc) {
   // Initialize transformation machinery.  Note that we don't have to re-map
   // child's code - the re-mapped VMA should be inherited from the parent.
   CodeTransformer transformer(*child, *binary);
-  code = transformer.initialize(randomize, false);
+  code = transformer.initializeFromExisting(*args->parentCT, randomize);
   if(code != ret_t::Success) {
     DEBUGMSG(cpid << ": could not set up code transformer" << endl);
     transformer.cleanup();
     cleanupChild(child);
     return (void *)code;
+  }
+
+  if(sem_post(&args->finishedInit)) {
+    DEBUGMSG(cpid << ": could not signal end of initialization" << endl);
+    transformer.cleanup();
+    cleanupChild(child);
+    return (void *)ret_t::SemaphoreFailed;
   }
 
   INFO(cpid << ": beginning forked child" << endl);
@@ -531,9 +558,9 @@ int main(int argc, char **argv) {
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
-  CodeTransformer::initialize(blacklistFilename, badSitesFilename);
+  CodeTransformer::globalInitialize(blacklistFilename, badSitesFilename);
   CodeTransformer transformer(child, *binary);
-  code = transformer.initialize(randomize, true);
+  code = transformer.initialize(randomize);
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);
 

@@ -187,10 +187,11 @@ void *randomizeCodeAsync(void *arg) {
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
+// TODO badSites should be removed
 static std::unordered_set<uintptr_t> blacklist, badSites;
 
-void CodeTransformer::initialize(const char *blacklistFilename,
-                                 const char *badSitesFilename) {
+void CodeTransformer::globalInitialize(const char *blacklistFilename,
+                                       const char *badSitesFilename) {
   uintptr_t addr;
 
   arch::setInterruptInstructions(intPage);
@@ -220,6 +221,7 @@ void CodeTransformer::initialize(const char *blacklistFilename,
                     << "'" << std::endl));
   }
 
+  // TODO this should be removed
   // Read in addresses of bad call sites
   if(badSitesFilename) {
     std::ifstream fs(badSitesFilename);
@@ -246,8 +248,9 @@ void CodeTransformer::initialize(const char *blacklistFilename,
   }
 }
 
-ret_t CodeTransformer::initialize(bool randomize, bool remap) {
+ret_t CodeTransformer::initialize(bool randomize) {
   ret_t retcode;
+  Timer t;
 
   if(batchedFaults != 1) {
     DEBUGMSG("currently can only handle 1 fault at a time" << std::endl);
@@ -262,21 +265,37 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
   const Binary::Section &codeSec = binary.getCodeSection();
   const Binary::Segment &codeSeg = binary.getCodeSegment();
   retcode = populateCodeWindow(codeSec, codeSeg);
-  intPageAddr = PAGE_DOWN(parasite::infectAddress(proc.getParasiteCtl()));
   if(retcode != ret_t::Success) return retcode;
   if(randomize) {
-    rewriteMetadata = st_init(binary.getFilename());
+    // Initialize transformation metadata, analyze code & do initial
+    // randomization
+    rewriteMetadata =
+        std::shared_ptr<struct _st_handle>(st_init(binary.getFilename()),
+                                           st_destroy);
     if(!rewriteMetadata) return ret_t::BadTransformMetadata;
     retcode = analyzeFunctions();
     if(retcode != ret_t::Success) return retcode;
+    t.start();
     retcode = randomizeFunctions(codeWindow);
     if(retcode != ret_t::Success) return retcode;
+    t.end();
+    INFO(proc.getPid() << ": initial randomization: "
+         << t.elapsed(Timer::Micro) << " us" << std::endl);
+
+    // Set up a buffer for transforming the child's stack & kick of the
+    // re-randomization thread
+    const urange_t &bounds = proc.getStackBounds();
+    stackMem.reset(new unsigned char[bounds.second - bounds.first]);
+    if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
+      return ret_t::ScramblerFailed;
+    if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
+      return ret_t::ScramblerFailed;
   }
 
   // Prepare the code region inside the child by setting up correct page
   // permissions and registering it with the userfaultfd file descriptor
-  if(remap) retcode = remapCodeSegment(codeSec.address(), codeSec.size());
-  else retcode = dropCode();
+  intPageAddr = PAGE_DOWN(parasite::infectAddress(proc.getParasiteCtl()));
+  retcode = remapCodeSegment(codeSec.address(), codeSec.size());
   if(retcode != ret_t::Success) return retcode;
   retcode = proc.stealUserfaultfd();
   if(retcode != ret_t::Success) return retcode;
@@ -287,29 +306,56 @@ ret_t CodeTransformer::initialize(bool randomize, bool remap) {
                            codeSec.size()))
     return ret_t::UffdRegisterFailed;
 
-  // Set up a buffer for transforming the child's stack
-  const urange_t &bounds = proc.getStackBounds();
-  size_t stackSize = bounds.second - bounds.first;
-  stackMem.reset(new unsigned char[stackSize]);
-
   // Initialize thread for handling faults
   if(pthread_mutex_init(&windowLock, nullptr)) return ret_t::LockFailed;
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
 
-  // Initialize thread re-randomizing code
-  if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
-    return ret_t::ScramblerFailed;
-  if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
-    return ret_t::ScramblerFailed;
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::initializeFromExisting(const CodeTransformer &rhs,
+                                              bool randomize) {
+  ret_t retcode;
+
+  // Copy existing code & randomization information (if requested)
+  codeWindow.copy(rhs.codeWindow);
+  if(randomize) {
+    rewriteMetadata = rhs.rewriteMetadata;
+    for(auto &RF : rhs.functions)
+      functions.emplace(RF.first, RF.second->copy());
+
+    const urange_t &bounds = proc.getStackBounds();
+    stackMem.reset(new unsigned char[bounds.second - bounds.first]);
+    if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
+      return ret_t::ScramblerFailed;
+    if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
+      return ret_t::ScramblerFailed;
+  }
+
+  // Drop the existing code pages to force the new child to bring in pages from
+  // the new buffer
+  intPageAddr = rhs.intPageAddr;
+  if((retcode = dropCode()) != ret_t::Success) return retcode;
+  retcode = proc.stealUserfaultfd();
+  if(retcode != ret_t::Success) return retcode;
+  if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
+    return ret_t::UffdHandshakeFailed;
+  const Binary::Section &codeSec = binary.getCodeSection();
+  if(!uffd::registerRegion(proc.getUserfaultfd(),
+                           codeSec.address(),
+                           codeSec.size()))
+    return ret_t::UffdRegisterFailed;
+
+  if(pthread_mutex_init(&windowLock, nullptr)) return ret_t::LockFailed;
+  if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
+    return ret_t::FaultHandlerFailed;
 
   return ret_t::Success;
 }
 
 ret_t CodeTransformer::cleanup() {
   pid_t pid = proc.getPid();
-
-  if(rewriteMetadata) st_destroy(rewriteMetadata);
 
   faultHandlerExit = true;
   proc.detach(); // detaching closes the userfaultfd file descriptor
@@ -319,17 +365,30 @@ ret_t CodeTransformer::cleanup() {
     pthread_kill(faultHandler, SIGINT);
     pthread_join(faultHandler, nullptr);
   }
+  pthread_mutex_destroy(&windowLock);
 
   scramblerExit = true;
   if(scramblerPid > 0) {
+    // Unblock if scrambler was blocked waiting for the re-randomization signal
     sem_post(&scramble);
     pthread_join(scrambler, nullptr);
     sem_destroy(&scramble);
     sem_destroy(&finishedScrambling);
   }
 
-  INFO(pid << ": switching to new randomization: " << rerandomizeTime
-       << " us for " << numRandomizations << " switches" << std::endl);
+  DEBUG(
+    codeStart = codeEnd = 0;
+    functions.clear();
+    slotPadding = 0;
+    faultHandlerPid = scramblerPid = 0;
+    batchedFaults = 0;
+    intPageAddr = 0;
+    curStackBase = 0;
+  )
+
+  if(numRandomizations)
+    INFO(pid << ": switching to new randomization: " << rerandomizeTime
+         << " us for " << numRandomizations << " switches" << std::endl);
 
   return ret_t::Success;
 }
@@ -537,7 +596,8 @@ ret_t CodeTransformer::rerandomize() {
 
   // Transform the stack; transformStack() internally sets the register set
   // (including swinging the SP) to the transformed registers
-  code = arch::transformStack(this, getFunctionInfoCallback, rewriteMetadata,
+  code = arch::transformStack(this, getFunctionInfoCallback,
+                              rewriteMetadata.get(),
                               StopTy == TransformType::Return,
                               childSrcBase, bufSrcBase,
                               childDstBase, bufDstBase, sp);
@@ -589,8 +649,8 @@ CodeTransformer::getRandomizedFunctionInfo(uintptr_t pc) const {
 
   fr = binary.getFunction(pc);
   if(fr) {
-    func = funcMaps.find(fr->addr);
-    if(func != funcMaps.end()) return func->second.get();
+    func = functions.find(fr->addr);
+    if(func != functions.end()) return func->second.get();
   }
   return nullptr;
 }
@@ -927,7 +987,7 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
   // Calculate the first address we care about. Note that we *only* care about
   // pages with code, i.e., the code segment may contain other sections that
   // are on different pages that don't concern us.
-  codeWindow.clear();
+  assert(codeWindow.numRegions() == 0 && "Invalid code window");
   segStart = codeSegment.address();
   codeStart = codeSection.address();
   curAddr = std::max<uintptr_t>(PAGE_DOWN(codeStart), segStart);
@@ -1199,7 +1259,7 @@ ret_t CodeTransformer::analyzeFunctions() {
 
     RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);
     RandomizedFunctionMap::iterator it =
-      funcMaps.emplace(func->addr, std::move(info)).first;
+      functions.emplace(func->addr, std::move(info)).first;
     code = analyzeFunction(it->second);
     if(code != ret_t::Success) return code;
 
@@ -1460,7 +1520,7 @@ ret_t CodeTransformer::randomizeFunctions(MemoryWindow &buffer) {
   Timer t;
 #endif
 
-  for(auto &it : funcMaps) {
+  for(auto &it : functions) {
     RandomizedFunctionPtr &info = it.second;
 
     DEBUG(
@@ -1495,7 +1555,7 @@ void CodeTransformer::dumpBacktrace() {
   if(code != ret_t::Success) return;
   arch::dumpBacktrace(this,
                       getFunctionInfoCallback,
-                      rewriteMetadata,
+                      rewriteMetadata.get(),
                       childSrc,
                       bufSrc);
 }

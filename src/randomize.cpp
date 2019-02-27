@@ -337,6 +337,35 @@ RandomizedFunction::RandomizedFunction(const Binary &binary,
   std::sort(slots.begin(), slots.end(), slotCmp);
 }
 
+RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs)
+  : binary(rhs.binary), func(rhs.func), maxFrameSize(rhs.maxFrameSize),
+    transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
+    _b(rhs._b), prevSortedByRand(rhs.prevSortedByRand),
+    prevRandFrameSize(rhs.prevRandFrameSize),
+    randomizedFrameSize(rhs.randomizedFrameSize) {
+  // Deep copy the instructions, including updating raw bits to point to the
+  // new code buffer
+  if(rhs.instrs) {
+    instrs = instrlist_clone(GLOBAL_DCONTEXT, rhs.instrs);
+    // TODO need to set instructions' raw bits
+  }
+  else instrs = nullptr;
+
+  // Set up the slot remapping vector pointers
+  if(rhs.prevRand == &rhs._a) {
+    prevRand = &_a;
+    curRand = &_b;
+  }
+  else {
+    prevRand = &_b;
+    curRand = &_a;
+  }
+
+  // Deep copy the regions
+  regions.reserve(rhs.regions.size());
+  for(auto &r : rhs.regions) regions.emplace_back(r->copy());
+}
+
 /**
  * Copy slot remapping information from a stack region into another vector.
  * @param r a stack region
@@ -351,6 +380,41 @@ static inline size_t serializeSlots(const StackRegionPtr &r,
   memcpy(&slots[curIdx], &curSlots[0], sizeof(SlotMap) * curSlots.size());
   return curIdx + curSlots.size();
 }
+
+/**
+ * Comparison function for sorting & searching a SlotMap.  Searches based on
+ * the randomized offset.
+ *
+ * @param first slot mapping
+ * @param second slot mapping
+ * @return true if a's first element is less than b's first element
+ */
+static bool slotMapCmpRand(const SlotMap &a, const SlotMap &b)
+{ return a.randomized < b.randomized; }
+
+#ifdef DEBUG_BUILD
+/**
+ * Verify that a randomized produced no overlapping slots.
+ * @param slots a vector of slot remappings
+ * @return true if the randomization is good or false if we detected
+ *         overlapping slots
+ */
+bool verifySlots(const std::vector<SlotMap> &slots) {
+  int curOffset = 0;
+  std::vector<SlotMap> copy(slots);
+
+  std::sort(copy.begin(), copy.end(), slotMapCmpRand);
+  for(auto &slot : copy) {
+    if((int)(slot.randomized - slot.size) < curOffset) {
+      DEBUG(WARN("Found overlapping slots: " << slot.randomized - slot.size
+                 << " < " << curOffset << std::endl));
+      return false;
+    }
+    else curOffset = slot.randomized;
+  }
+  return true;
+}
+#endif
 
 ret_t RandomizedFunction::finalizeAnalysis() {
   // We need to maintain a previous randomization mapping because as we
@@ -375,20 +439,10 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     ref.randomized = ref.original;
   }
   std::sort(curRand->begin(), curRand->end(), slotMapCmp);
+  DEBUG(if(!verifySlots(*curRand)) return ret_t::AnalysisFailed);
 
   return ret_t::Success;
 }
-
-/**
- * Comparison function for sorting & searching a SlotMap.  Searches based on
- * the randomized offset.
- *
- * @param first slot mapping
- * @param second slot mapping
- * @return true if a's first element is less than b's first element
- */
-static bool slotMapCmpRand(const SlotMap &a, const SlotMap &b)
-{ return a.randomized < b.randomized; }
 
 ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   size_t i;
@@ -440,6 +494,7 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
 
   assert(randomizedFrameSize <= maxFrameSize && "Invalid randomization");
+  DEBUG(if(!verifySlots(*curRand)) return ret_t::RandomizeFailed);
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
 

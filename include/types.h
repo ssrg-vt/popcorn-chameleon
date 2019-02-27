@@ -71,6 +71,7 @@ namespace chameleon {
   X(BadFormat, "bad input format") \
   X(LockFailed, "locking/unlocking mutex failed") \
   X(FutexFailed, "futex operation failed") \
+  X(SemaphoreFailed, "semaphore operation failed") \
   X(NotImplemented, "not implemented") \
   X(FileOpenFailed, "could not open file") \
   X(NoTimestamp, "could not get timestamp") \

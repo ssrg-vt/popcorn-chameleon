@@ -111,8 +111,8 @@ void arch::marshalFuncCall(struct user_regs_struct &regs,
   regs.r9 = a6;
 }
 
-#define DUMP_REG( regset, name ) \
-  #name": " << std::dec << regset.name << " / 0x" << std::hex << regset.name
+#define DUMP_REG( regset, reg ) \
+  #reg": " << std::dec << regset.reg << " / 0x" << std::hex << regset.reg
 
 void arch::dumpRegs(std::ostream &os, struct user_regs_struct &regs) {
   os << "General-purpose registers:" << std::endl;
@@ -156,17 +156,15 @@ void arch::dumpFPRegs(std::ostream &os, struct user_fpregs_struct &regs) {
   os << DUMP_REG(regs, mxcr_mask);
   num = sizeof(regs.st_space) / sizeof(regs.st_space[0]);
   for(size_t i = 0; i < num; i++) {
-    if(i % 4 == 0) os << std::endl << "st" << (i / 4) << ": 0x";
+    if(i % 4 == 0) os << std::endl << std::dec << "st" << (i / 4) << ": 0x";
     os << std::hex << std::setfill('0') << std::setw(8) << regs.st_space[i];
   }
   num = sizeof(regs.xmm_space) / sizeof(regs.xmm_space[0]);
   for(size_t i = 0; i < num; i++) {
-    if(i % 4 == 0) {
-      os << std::endl << "xmm" << (i / 4) << ": 0x";
-    }
+    if(i % 4 == 0) os << std::endl << std::dec << "xmm" << (i / 4) << ": 0x";
     os << std::hex << std::setfill('0') << std::setw(8) << regs.xmm_space[i];
   }
-  os << std::endl;
+  os << std::dec << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -232,6 +230,9 @@ public:
   typedef std::pair<int, uint16_t> RegOffset;
 
   x86CalleeSaveRegion(int32_t flags) : StackRegion(flags) {}
+  x86CalleeSaveRegion(const x86CalleeSaveRegion &rhs)
+    : StackRegion(rhs), registerLocs(rhs.registerLocs) {}
+  StackRegion *copy() const override { return new x86CalleeSaveRegion(*this); }
 
   /**
    * Add mapping between callee-saved register and its save location.
@@ -428,6 +429,12 @@ public:
     regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Alignment));
   }
+
+  x86RandomizedFunction(const x86RandomizedFunction &rhs)
+    : RandomizedFunction(rhs), alignment(rhs.alignment) {}
+
+  virtual RandomizedFunction *copy() const override
+  { return new x86RandomizedFunction(*this); }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
 
@@ -764,6 +771,7 @@ public:
     else populateWithRestrictions();
 
     // Calculate section offsets & prune empty sections.
+    regions[0]->sortSlots();
     curOffset = regions[0]->getOriginalOffset();
     for(i = 1; i < regions.size(); i++) {
       StackRegionPtr &region = regions[i];

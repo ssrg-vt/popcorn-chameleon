@@ -42,8 +42,8 @@ public:
    * @param badSitesFilename file containing call site addresses known to cause
    *                         problems and hence should be avoided
    */
-  static void initialize(const char *blacklistFilename,
-                         const char *badSitesFilename);
+  static void globalInitialize(const char *blacklistFilename,
+                               const char *badSitesFilename);
 
   /**
    * Construct a code transformer for a given process.  Does not initialize the
@@ -67,19 +67,27 @@ public:
   CodeTransformer() = delete;
 
   /**
-   * Initialize the code transformer object.  Callers can selectively
-   * enable/disable randomization (if disabled, act just like the OS mapping
-   * pages from disk).  If remap is true, remap the child's code section to be
-   * suitable for attaching userfaultfd file descriptors.  If false, it's
-   * assumed the child's code is already set up for attaching userfaultfd -
-   * just drop the existing pages to force new page faults.
+   * Initialize the code transformer object for a process that has not begun
+   * running.  If randomize is set, analyze the application's code and perform
+   * an initial code randomization (if disabled, act just like the OS mapping
+   * pages from disk).
    *
    * @param randomize if true, randomize the code
-   * @param remap if true, remap the process' code section for userfaultfd,
-   *              otherwise just drop the existing code pages
    * @return a return code describing the outcome
    */
-  ret_t initialize(bool randomize, bool remap);
+  ret_t initialize(bool randomize);
+
+  /**
+   * Initialize a code transformer object from an existing code transformer by
+   * copying it's analysis and randomization information.  Callers can
+   * selectively enable/disable randomization (if disabled, act just like the
+   * OS mapping pages from disk).  Usually used to initialize the transformer
+   * for a forked child that has execution state from a previous randomization.
+   *
+   * @param rhs another code transformer object
+   * @return a return code describing the outcome
+   */
+  ret_t initializeFromExisting(const CodeTransformer &rhs, bool randomize);
 
   /**
    * Clean up the state transformer, including stopping handling faults.  Users
@@ -211,6 +219,14 @@ public:
   void setFaultHandlerPid(pid_t pid) { faultHandlerPid = pid; }
 
   /**
+   * Get the address of the page that should be filled with interrupt
+   * instructions by the fault handling thread.
+   *
+   * @return address of page to be filled with interrupt instructions
+   */
+  uintptr_t getIntPageAddr() const { return intPageAddr; }
+
+  /**
    * Lock the code window during page fault handling to avoid inconsistent code
    * pages in the child application.
    * @return a return code describing the outcome
@@ -222,14 +238,6 @@ public:
    * @return a return code describing the outcome
    */
   ret_t unlockCodeWindow();
-
-  /**
-   * Get the address of the page that should be filled with interrupt
-   * instructions by the fault handling thread.
-   *
-   * @return address of page to be filled with interrupt instructions
-   */
-  uintptr_t getIntPageAddr() const { return intPageAddr; }
 
   /**
    * Return the address of a buffer which can be directly passed to the kernel
@@ -312,12 +320,12 @@ private:
 
   /* Child stack transformation buffer & metadata */
   std::unique_ptr<unsigned char> stackMem;
-  st_handle rewriteMetadata;
+  std::shared_ptr<struct _st_handle> rewriteMetadata;
 
   /* Randomization machinery */
   typedef std::unordered_map<uintptr_t, RandomizedFunctionPtr>
     RandomizedFunctionMap;
-  RandomizedFunctionMap funcMaps; /* Per-function randomization information */
+  RandomizedFunctionMap functions; /* Per-function randomization information */
   size_t slotPadding; /* Maximum padding between subsequent stack slots */
   // Note: from http://www.pcg-random.org/posts/cpps-random_device.html:
   //
