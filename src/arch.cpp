@@ -412,6 +412,13 @@ public:
       cs->addSlot(offset, size, size);
       cs->addRegisterSaveLoc(offset, loc->reg);
       regionSize += size;
+
+      DEBUG(
+        if(offset < 0)
+          DEBUG(WARN("Callee-save location for register " << loc->reg
+                     << " is outside frame - offset from the stack pointer?"
+                     << std::endl));
+      )
     }
     cs->setOffset(regionSize);
     cs->setSize(regionSize);
@@ -430,11 +437,12 @@ public:
     regions.emplace_back(new ImmutableRegion(x86Region::R_Alignment));
   }
 
-  x86RandomizedFunction(const x86RandomizedFunction &rhs)
-    : RandomizedFunction(rhs), alignment(rhs.alignment) {}
+  x86RandomizedFunction(const x86RandomizedFunction &rhs,
+                        MemoryWindow &mw)
+    : RandomizedFunction(rhs, mw), alignment(rhs.alignment) {}
 
-  virtual RandomizedFunction *copy() const override
-  { return new x86RandomizedFunction(*this); }
+  virtual RandomizedFunction *copy(MemoryWindow &mw) const override
+  { return new x86RandomizedFunction(*this, mw); }
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
 
@@ -546,14 +554,12 @@ public:
   }
 
   /**
-   * Put slots not found to have any restrictions into the movable region.
+   * Add stack slots to the movable region.  During analysis we should have
+   * added any restricted slots to their appropriate sections; the remaining
+   * slots are completely randomizable.
    */
   void populateMovable() {
     StackRegionPtr &r = regions[x86Region::R_Movable];
-
-    // Add stack slots to the movable region.  During analysis we should have
-    // added any restricted slots to their appropriate sections; the remaining
-    // slots are completely randomizable.
     for(auto &s : slots) {
       if(!seen.count(s.first)) {
         const stack_slot *slot = s.second;
@@ -574,26 +580,22 @@ public:
    * permutable regions to stay within the frame size limitation.
    */
   void populateWithRestrictions() {
-    // Swap the movable region with a permutable region
-    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable, 144);
+    // To avoid increasing the frame size past what's allocatable within a
+    // single byte, convert the movable region (which adds padding) into a
+    // permutable region.
+    int minStart = 144;
+    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable);
     regions[x86Region::R_Movable].reset(newMov);
-    StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
-                   &movable = regions[x86Region::R_Movable];
 
     DEBUGMSG("changed movable to permutable region to stay within maximum "
              "frame size" << std::endl);
 
     // To avoid accidentally forcing a larger encoding for the bulk frame
-    // update, put slots in the FP-limited region.
-    //
-    // Note: There's a corner case where stack slots listed in the metadata are
-    // beyond what is addressable from FBP + 128 although they may not actually
-    // manifest in the code.  For these slots, throw them in the movable region
-    // (which has been converted to a permutable region) - if we put them in
-    // the FP-limited region, it's possible some slot that *is* addressable
-    // from FBP + 128 would be placed out of range, forcing a larger encoding.
-    //
+    // update, put slots in the FP-limited region.  For slots outside of this
+    // region (see comment above), put into the newly-converted movable region.
     // TODO this doesn't handle SP-limited slots
+    StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
+                   &movable = regions[x86Region::R_Movable];
     for(auto &s : slots) {
       if(!seen.count(s.first)) {
         const stack_slot *slot = s.second;
@@ -604,6 +606,7 @@ public:
                    << " region" << std::endl);
         }
         else {
+          minStart = std::min(minStart, (int)(s.first - slot->size));
           movable->addSlot(s.first, slot->size, slot->alignment);
           DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
                    << ") is in " << x86RegionName[x86Region::R_Movable]
@@ -611,43 +614,78 @@ public:
         }
       }
     }
+
+    // We can't necessarily start the movable region at offset 144 with the
+    // limited frame size, as there may be slots big enough to cause the
+    // frame's size to overflow 1 byte (e.g., slot with original offset 160 and
+    // size 100 starting at offset 144 would increase the frame size to 256,
+    // beyond 1 byte).  Instead use the earliest observed starting offset.
+    newMov->setMinStartingOffset(minStart);
+    DEBUG(
+      if(minStart != 144)
+        DEBUGMSG("changed movable region's starting offset to " << minStart
+                 << std::endl);
+    )
   }
 
-  /**
-   * Analyze the FP-limited region to see if we can expand the bounds to give
-   * the permutation algorithm some room to work.
-   */
-  void fixupFPLimitedRegion() {
-    int32_t diff, curOffset;
+  void calculateRegionOffsets(size_t start, bool sort = true) {
+    int curOffset, bubble;
+    size_t i;
 
-    if(regions.size() > 1 &&
-       REGION_TYPE(regions[1]->getFlags()) == x86Region::R_FPLimited) {
-      StackRegionPtr &fpLimited = regions[1];
-      if(regions.size() > 2) {
-        // See if there's space between us and the next region to grow
-        const SlotMap &bottom = regions[2]->getSlots().front();
-        diff = bottom.original - bottom.size - fpLimited->getOriginalOffset();
-        assert(diff >= 0 && "FP-limited region overlaps next region");
-        if(!diff) return;
+    assert(start > 0 && "Invalid starting index");
 
-        // Make sure we don't exceed our 1-byte limitation
-        curOffset = std::min(fpLimited->getOriginalOffset() + diff, 144);
-        diff = curOffset - fpLimited->getOriginalOffset();
-        assert(diff >= 0 && "Invalid FP-limited region bounds calculation");
-        if(!diff) return;
-
-        fpLimited->setSize(fpLimited->getOriginalSize() + diff);
-        fpLimited->setOffset(fpLimited->getOriginalOffset() + diff);
-        DEBUGMSG("expanded FP-limited region to offset "
-                 << fpLimited->getOriginalOffset() << std::endl);
+    // Start by pruning empty regions
+    for(i = start; i < regions.size(); i++) {
+      if(regions[i]->numSlots() == 0) {
+        DEBUGMSG_VERBOSE("removing empty "
+                         << x86RegionName[REGION_TYPE(regions[i]->getFlags())]
+                         << " region" << std::endl);
+        regions.erase(regions.begin() + i);
+        i--;
       }
-      else {
-        curOffset = std::min<int>(maxFrameSize, 144);
-        fpLimited->setOffset(curOffset);
-        fpLimited->setSize(curOffset - regions[0]->getOriginalOffset());
-        DEBUGMSG("expanded FP-limited region to offset " << curOffset
+    }
+
+    // Next, calculate offsets & sizes
+    curOffset = regions[start-1]->getOriginalOffset();
+    for(i = start; i < regions.size(); i++) {
+      StackRegionPtr &region = regions[i];
+      if(sort) region->sortSlots();
+      const std::vector<SlotMap> &slots = region->getSlots();
+      const SlotMap &top = slots.front(), bottom = slots.back();
+
+      // It's possible due to layout of slots with different sizes that
+      // there's a "bubble" of empty space in the frame
+      bubble = (int)(top.original - top.size) - curOffset;
+      DEBUG(
+        // Note: the alignment region is itself a bubble; we'll fix up any
+        // overlaps in fixupAlignmentRegion().  The call region's slot sizes
+        // aren't determined until fixupCallRegion() so skip here because the
+        // assert may detect overlapping slots in some cases (there aren't
+        // actually any bubbles because we conservatively assume the call
+        // slot extends until the preceding slot).
+        if(REGION_TYPE(region->getFlags()) != x86Region::R_Alignment) {
+          assert(bubble >= 0 && "Overlapping regions");
+          if(bubble && REGION_TYPE(region->getFlags()) != x86Region::R_Call)
+            DEBUGMSG(" -> bubble: " << curOffset << " - "
+                     << top.original - top.size << std::endl);
+        }
+      )
+
+      // Extend the preceding region to cover the bubble
+      if(bubble &&
+         REGION_TYPE(regions[i-1]->getFlags()) != x86Region::R_CalleeSave &&
+         REGION_TYPE(region->getFlags()) != x86Region::R_Call) {
+        regions[i-1]->setOffset(regions[i-1]->getOriginalOffset() + bubble);
+        regions[i-1]->setSize(regions[i-1]->getOriginalSize() + bubble);
+        DEBUGMSG("extended " << x86RegionName[regions[i-1]->getFlags()]
+                 << " region to " << regions[i-1]->getOriginalOffset()
                  << std::endl);
+        curOffset += bubble;
       }
+
+      region->setOffset(bottom.original);
+      region->setSize(bottom.original - curOffset);
+      curOffset = bottom.original;
     }
   }
 
@@ -656,8 +694,7 @@ public:
    */
   void fixupAlignmentRegion() {
     bool movedSlot = false;
-    int curOffset, alignStart;
-    size_t i;
+    int alignStart;
     SlotMap tmp;
 
     StackRegionPtr &alignRegion = regions.back();
@@ -690,7 +727,6 @@ public:
 
     // Sort the alignment region with the new slots and prune the padding slot
     // to not overlap with any other slots
-    // TODO can the alignment overlap more than one slot?
     alignRegion->sortSlots();
     SlotMap &align = alignSlots.back(),
             &moved = alignSlots[alignSlots.size() - 2];
@@ -700,23 +736,7 @@ public:
       align.size = align.original - moved.original;
 
     // Finally, re-calculate offsets of/prune any changed regions
-    curOffset = regions[regions.size() - 3]->getOriginalOffset();
-    for(i = regions.size() - 2; i < regions.size(); i++) {
-      StackRegionPtr &region = regions[i];
-      if(region->numSlots() > 0) {
-        const SlotMap &bottom = region->getSlots().back();
-        region->setOffset(bottom.original);
-        region->setSize(bottom.original - curOffset);
-        curOffset = bottom.original;
-      }
-      else {
-        DEBUGMSG_VERBOSE("removing empty "
-                         << x86RegionName[REGION_TYPE(region->getFlags())]
-                         << " region" << std::endl);
-        regions.erase(regions.begin() + i);
-        i--;
-      }
-    }
+    calculateRegionOffsets(regions.size() - 2, false);
   }
 
   /**
@@ -761,10 +781,46 @@ public:
     }
   }
 
+  /**
+   * Analyze the FP-limited region to see if we can expand the bounds to give
+   * the permutation algorithm some room to work.
+   */
+  void fixupFPLimitedRegion() {
+    int32_t diff, curOffset;
+
+    if(regions.size() > 1 &&
+       REGION_TYPE(regions[1]->getFlags()) == x86Region::R_FPLimited) {
+      StackRegionPtr &fpLimited = regions[1];
+      if(regions.size() > 2) {
+        // See if there's space between us and the next region to grow
+        const SlotMap &top = regions[2]->getSlots().front();
+        diff = top.original - top.size - fpLimited->getOriginalOffset();
+        assert(diff >= 0 && "FP-limited region overlaps next region");
+        if(!diff) return;
+
+        // Make sure we don't exceed our 1-byte limitation
+        curOffset = std::min(fpLimited->getOriginalOffset() + diff, 144);
+        diff = curOffset - fpLimited->getOriginalOffset();
+        assert(diff >= 0 && "Invalid FP-limited region bounds calculation");
+        if(!diff) return;
+
+        fpLimited->setSize(fpLimited->getOriginalSize() + diff);
+        fpLimited->setOffset(fpLimited->getOriginalOffset() + diff);
+        DEBUGMSG("expanded FP-limited region to offset "
+                 << fpLimited->getOriginalOffset() << std::endl);
+      }
+      else {
+        curOffset = std::min<int>(maxFrameSize, 144);
+        fpLimited->setOffset(curOffset);
+        fpLimited->setSize(curOffset - regions[0]->getOriginalOffset());
+        DEBUGMSG("expanded FP-limited region to offset " << curOffset
+                 << std::endl);
+      }
+    }
+  }
+
   virtual ret_t finalizeAnalysis() override {
-    int curOffset = 0;
     uint32_t frameSize;
-    size_t i;
 
     // Put the slots for which we did not detect a restriction into sections
     if(maxFrameSize == UINT32_MAX) populateMovable();
@@ -772,33 +828,10 @@ public:
 
     // Calculate section offsets & prune empty sections.
     regions[0]->sortSlots();
-    curOffset = regions[0]->getOriginalOffset();
-    for(i = 1; i < regions.size(); i++) {
-      StackRegionPtr &region = regions[i];
-      if(region->numSlots() > 0) {
-        // TODO is it faster to search through unsorted slots in each section
-        // to find the bottom offset?
-        region->sortSlots();
-        const SlotMap &bottom = region->getSlots().back();
-        region->setOffset(bottom.original);
-        region->setSize(bottom.original - curOffset);
-        curOffset = bottom.original;
-      }
-      else {
-        DEBUGMSG_VERBOSE("removing empty "
-                         << x86RegionName[REGION_TYPE(region->getFlags())]
-                         << " region" << std::endl);
-        regions.erase(regions.begin() + i);
-        i--;
-      }
-    }
-
+    calculateRegionOffsets(1);
     fixupAlignmentRegion();
     fixupCallRegion();
     fixupFPLimitedRegion(); // *Must* happen after fixupCallRegion()
-
-    assert((uint32_t)regions.back()->getOriginalOffset() <=
-           maxFrameSize && "Invalid calculated frame size");
 
     // Leaf functions don't necessarily need to abide by alignment restrictions
     if(!ALIGNED(func->frame_size, 16)) {

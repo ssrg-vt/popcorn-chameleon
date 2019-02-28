@@ -28,9 +28,6 @@ bool chameleon::lessThanSlotMap(const SlotMap *slot, int offset)
 // StackRegion implementation
 ///////////////////////////////////////////////////////////////////////////////
 
-// TODO this could be improved - keep slots in sorted ordering as we add them
-// for quicker existence checking.  We're currently assuming there's a small
-// number of slots per region and thus it's not worth keeping the slots sorted.
 void StackRegion::addSlot(int offset, uint32_t size, uint32_t alignment) {
   SlotMap newSlot = { offset, INT32_MAX, size, alignment };
 
@@ -249,27 +246,33 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
     for(auto slot = bucket.slots.begin(); slot != bucket.slots.end(); slot++)
       if(slot->original != 0) slots.emplace_back(*slot);
   randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
+  const SlotMap &top = slots.front();
+  randomizedSize = randomizedOffset - (int)(top.randomized - top.size);
+
+  // Sort by original offset for later searching
+  sortSlots();
 
   // TODO if randomizedOffset < origOffset there's leftover space which we
   // should disperse between the slots
 
   // If permutation failed, resort to original ordering
-  if(randomizedOffset > origOffset) {
+  if(randomizedSize > origSize) {
     DEBUG(WARN("Could not permute slots in " << origOffset - origSize << " -> "
                << origOffset << " region" << std::endl));
-    for(auto &sm : slots) sm.randomized = sm.original;
-    randomizedOffset = origOffset;
+    randomizedOffset = calculateOffsets<ZeroPad>(0, start, pad);
     randomizedSize = origSize;
   }
-  else {
+  else if(randomizedSize < origSize) {
     // Sometimes we actually manage to create smaller regions than those laid
     // out by the compiler.  Logically pad to fill the region.
-    randomizedOffset = origOffset;
+    //
+    // Note: we *must* calculate the new offset by adding the region's size to
+    // the start offset (not just assigning origOffset), as the start offset
+    // may be different from the original starting offset due to adjacent
+    // randomized regions
+    randomizedOffset = start + origSize;
     randomizedSize = origSize;
   }
-
-  // Sort by original offset for searching
-  sortSlots();
 
   DEBUG_VERBOSE(
     DEBUGMSG_VERBOSE("permuted slots:" << std::endl);
@@ -337,17 +340,30 @@ RandomizedFunction::RandomizedFunction(const Binary &binary,
   std::sort(slots.begin(), slots.end(), slotCmp);
 }
 
-RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs)
+RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
+                                       MemoryWindow &mw)
   : binary(rhs.binary), func(rhs.func), maxFrameSize(rhs.maxFrameSize),
     transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
     _b(rhs._b), prevSortedByRand(rhs.prevSortedByRand),
     prevRandFrameSize(rhs.prevRandFrameSize),
     randomizedFrameSize(rhs.randomizedFrameSize) {
-  // Deep copy the instructions, including updating raw bits to point to the
-  // new code buffer
+  // Deep copy the instructions and update raw bits to point to the new code
+  // buffer
+  size_t instrSize;
   if(rhs.instrs) {
+    byte_iterator funcData = mw.getData(func->addr);
+    byte *cur = funcData[0], *end = cur + func->code_size;
     instrs = instrlist_clone(GLOBAL_DCONTEXT, rhs.instrs);
-    // TODO need to set instructions' raw bits
+    instr_t *instr = instrlist_first(instrs),
+            *rhsInstr = instrlist_first(rhs.instrs);
+    while(cur < end) {
+      assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
+      instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
+      instr_set_raw_bits(instr, cur, instrSize);
+      cur += instrSize;
+      instr = instr_get_next(instr);
+      rhsInstr = instr_get_next(rhsInstr);
+    }
   }
   else instrs = nullptr;
 
@@ -406,8 +422,10 @@ bool verifySlots(const std::vector<SlotMap> &slots) {
   std::sort(copy.begin(), copy.end(), slotMapCmpRand);
   for(auto &slot : copy) {
     if((int)(slot.randomized - slot.size) < curOffset) {
-      DEBUG(WARN("Found overlapping slots: " << slot.randomized - slot.size
-                 << " < " << curOffset << std::endl));
+      DEBUG(WARN("Found overlapping slots: slot with range "
+                 << (int)(slot.randomized - slot.size) << " -> "
+                 << slot.randomized << " overlaps previous slot ending at "
+                 << curOffset << std::endl));
       return false;
     }
     else curOffset = slot.randomized;
@@ -439,6 +457,9 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     ref.randomized = ref.original;
   }
   std::sort(curRand->begin(), curRand->end(), slotMapCmp);
+
+  assert((uint32_t)regions.back()->getOriginalOffset() <=
+         maxFrameSize && "Invalid calculated frame size");
   DEBUG(if(!verifySlots(*curRand)) return ret_t::AnalysisFailed);
 
   return ret_t::Success;

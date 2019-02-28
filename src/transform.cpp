@@ -323,7 +323,7 @@ ret_t CodeTransformer::initializeFromExisting(const CodeTransformer &rhs,
   if(randomize) {
     rewriteMetadata = rhs.rewriteMetadata;
     for(auto &RF : rhs.functions)
-      functions.emplace(RF.first, RF.second->copy());
+      functions.emplace(RF.first, RF.second->copy(codeWindow));
 
     const urange_t &bounds = proc.getStackBounds();
     stackMem.reset(new unsigned char[bounds.second - bounds.first]);
@@ -782,7 +782,7 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
   const RandomizedFunction *info;
   const function_record *fr;
   std::unordered_map<uintptr_t, uint64_t> origData;
-  ret_t code;
+  ret_t code, restoreCode;
 #ifdef DEBUG_BUILD
   pid_t cpid = proc.getPid();
 #endif
@@ -800,30 +800,34 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
     Ty = info->getTransformationType(pc);
     if(Ty == TransformType::None) {
       DEBUGMSG_VERBOSE(cpid << ": inserting transformation breakpoints inside "
-                       "function at 0x" << std::hex << fr->addr << std::endl);
+                       "function at 0x" << std::hex << fr->addr <<
+                       " (current address: 0x" << pc << ")" << std::endl);
 
       // Insert traps at transformation breakpoints & kick child towards them
       code = sprayTransformBreakpoints(info, origData, interruptSize);
-      if(code != ret_t::Success) {
-        restoreTransformBreakpoints(info, origData);
-        return code;
-      }
+      if(code != ret_t::Success) goto restore;
 
       t.end(true);
       // TODO child may stop due to other signal instead of our transformation
       // breakpoints; need to keep continuing until we hit a breakpoint
-      if((code = proc.continueToNextSignal()) != ret_t::Success) return code;
+      if((code = proc.continueToNextSignal()) != ret_t::Success) goto restore;
       t.start();
 
-      // Figure out where child stopped and restore the original instructions
-      if(code != ret_t::Success) return code;
-      else if(!proc.traceable()) return ret_t::InvalidState;
-      pc = proc.getPC() - interruptSize;
-      Ty = info->getTransformationType(pc);
-      if(Ty == TransformType::None) return ret_t::TransformFailed;
-      if((code = proc.setPC(pc)) != ret_t::Success) return code;
-      code = restoreTransformBreakpoints(info, origData);
-      if(code != ret_t::Success) return code;
+      if(!proc.traceable() || !(pc = proc.getPC())) {
+        code = ret_t::InvalidState;
+        goto restore;
+      }
+
+      // Figure out where child stopped & reset instruction address
+      pc -= interruptSize;
+      if((code = proc.setPC(pc)) != ret_t::Success) goto restore;
+      if((Ty = info->getTransformationType(pc)) == TransformType::None)
+        code = ret_t::TransformFailed;
+
+restore:
+      restoreCode = restoreTransformBreakpoints(info, origData);
+      if(restoreCode != ret_t::Success) return restoreCode;
+      else if(code != ret_t::Success) return code;
     }
 
     // If we stopped at a call instruction, walk it into the called function in
@@ -1403,6 +1407,7 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
   drsp = arch::getDRRegType(arch::RegType::StackPointer);
   while(instr) {
     changed = false;
+    assert(instr_raw_bits_valid(instr) && "Bits not set");
     instrSize = instr_length(GLOBAL_DCONTEXT, instr);
 
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)

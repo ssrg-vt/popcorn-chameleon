@@ -431,6 +431,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
       case ret_t::Success: break;
       case ret_t::NoTransformMetadata: // fall through
       case ret_t::UnmappedMemory:
+      case ret_t::AdvancingFailed:
       case ret_t::TransformFailed:
         WARN(pid << ": skipping re-randomization at 0x" << hex << pc << ": "
              << retText(code) << endl);

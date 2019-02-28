@@ -55,6 +55,7 @@ namespace chameleon {
   X(AnalysisFailed, "could not analyze code to ensure correctness") \
   X(RandomizeFailed, "could not randomize code section") \
   X(UnmappedMemory, "could not read/write unmapped memory") \
+  X(AdvancingFailed, "could not advance to transformation point") \
   X(TransformFailed, "could not transform stack to match randomization") \
   X(ChildHandlerSetupFailed, "creating child handler thread failed") \
   X(ChildHandlerCleanupFailed, "cleaning up child handler thread failed") \

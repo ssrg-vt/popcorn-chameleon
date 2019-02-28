@@ -24,6 +24,7 @@
 #include <cstdint>
 
 #include "binary.h"
+#include "memoryview.h"
 #include "types.h"
 #include "utils.h"
 
@@ -371,14 +372,15 @@ public:
 
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary, const function_record *func);
-  RandomizedFunction(const RandomizedFunction &rhs);
+  RandomizedFunction(const RandomizedFunction &rhs, MemoryWindow &mw);
   ~RandomizedFunction()
   { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
    * Deep copy the randomized function.
+   * @param mw a memory window used to set the copied instruction's raw bits
    */
-  virtual RandomizedFunction *copy() const = 0;
+  virtual RandomizedFunction *copy(MemoryWindow &mw) const = 0;
 
   /**
    * Get alignment requirements for the function's stack frame.
