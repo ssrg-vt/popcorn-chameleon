@@ -107,6 +107,12 @@ public:
    * Wait for a child event and update the process' status, which can be
    * queried via getStatus() after returning.
    *
+   * Note: if wait() is interrupted (i.e., if calling getStatus() after wait()
+   * returns status_t::Interrupted), the process object will return from wait()
+   * with SIGINT masked in the calling thread so that the caller can perform
+   * processing without further interrupts.  The caller must subsequently call
+   * restoreInterrupt() to restore normal function.
+   *
    * Note: users should *not* attempt to interrupt child processes using libc
    * calls (i.e., kill()) on their own, but should *only* interact with the
    * child through the APIs exposed by Process; circumventing Process' APIs
@@ -115,6 +121,14 @@ public:
    * @return a return code describing the outcome
    */
   ret_t wait();
+
+  /**
+   * If wait() with the child's status as status_t::Interrupted, perform
+   * processing necessary to restore normal execution for the caller.
+   *
+   * @return a return code describing the outcome
+   */
+  ret_t restoreInterrupt();
 
   /**
    * Interrupt a child.  Users must call wait() in order to synchronize with
@@ -400,6 +414,7 @@ private:
   };
   stop_t stopReason; /* if status == Stopped, why we stopped */
   bool reinjectSignal; /* whether to re-inject signal into tracee */
+  sigset_t intSet; /* signal mask when chameleon's thread was interrupted */
   int uffd; /* userfaultfd file descriptor */
   size_t nthreads; /* number of threads in the process */
   struct parasite_ctl *parasite; /* libcompel handle for child parasite */

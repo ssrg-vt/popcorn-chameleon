@@ -19,6 +19,7 @@ using namespace std;
 using namespace chameleon;
 
 pid_t masterPID;
+static pthread_t masterThread;
 static int childArgc;
 static char **childArgv;
 static bool randomize = true;
@@ -172,7 +173,7 @@ static void alarmCallback(void *data) {
   // race condition between the signaled thread finishing this alarm's action
   // and the next alarm signal, as signals received when not blocking in
   // waitpid() are a no-op.
-  if(kill(masterPID, SIGINT))
+  if(pthread_kill(masterThread, SIGINT))
     ERROR("could not interrupt handler for main process" << endl);
   for(it = children.begin(); it != children.end(); it++)
     if(pthread_kill(it->second, SIGINT))
@@ -453,6 +454,12 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
         }
       )
     }
+
+    // Unblock interrupt signals for next alarm
+    child.setStatus(Process::Interrupted);
+    if((code = child.restoreInterrupt()) != ret_t::Success)
+      ERROR("could not restore signals: " << retText(code) << endl);
+
     return Process::Stopped;
   }
 }
@@ -520,6 +527,7 @@ int main(int argc, char **argv) {
   DEBUGMSG("initializing chameleon" << endl);
   if(!checkCompatibility()) ERROR("incompatible system" << endl);
   masterPID = getpid();
+  masterThread = pthread_self();
   parseArgs(argc, argv);
   if((code = setupSignalsAndAlarm(alarm)) != ret_t::Success)
     ERROR("could not initialize chameleon signaling: " << retText(code) << endl);

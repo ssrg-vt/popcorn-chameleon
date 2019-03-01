@@ -139,6 +139,7 @@ ret_t Process::traceThread(pid_t pid) {
 ret_t Process::waitInternal(bool reinject) {
   int wstatus;
   unsigned long childPid;
+  sigset_t block;
   ret_t retval = ret_t::Success;
 
   // Return immediately if the process is already stopped/exited
@@ -147,6 +148,13 @@ ret_t Process::waitInternal(bool reinject) {
   // Wait for the child and update the status based on returned values
   if(waitpid(pid, &wstatus, 0) == -1) {
     if(errno == EINTR) {
+      // Prevent whomever interrupted us from interrupting us again while
+      // trying to interrupt the child
+      sigemptyset(&block);
+      sigaddset(&block, SIGINT);
+      if(pthread_sigmask(SIG_BLOCK, &block, &intSet))
+        return ret_t::SignalMaskFailed;
+
       // Somebody interrupted us so that we can perform some action on the
       // child; interrupt the child as well.
       if((retval = interrupt()) != ret_t::Success) {
@@ -254,6 +262,13 @@ ret_t Process::cureAndInitParasite() {
 }
 
 ret_t Process::wait() { return waitInternal(true); }
+
+ret_t Process::restoreInterrupt() {
+  if(status != Interrupted) return ret_t::InvalidState;
+  else if(pthread_sigmask(SIG_SETMASK, &intSet, nullptr))
+    return ret_t::SignalMaskFailed;
+  else return ret_t::Success;
+}
 
 ret_t Process::interrupt() {
   ret_t code = ret_t::Success;

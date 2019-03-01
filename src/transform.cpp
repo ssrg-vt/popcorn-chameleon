@@ -139,7 +139,7 @@ void *randomizeCodeAsync(void *arg) {
   size_t scrambles = 0;
   CodeTransformer *CT = (CodeTransformer *)arg;
   sem_t *scramble = CT->getScrambleSem(),
-        *finished = CT->getFinishedScrambleSem();
+        *finishedScrambling = CT->getFinishedScrambleSem();
   pid_t me = syscall(SYS_gettid), cpid = CT->getProcessPid();
   MemoryWindow &nextCode = CT->getNextCodeWindow();
   Timer t;
@@ -149,7 +149,11 @@ void *randomizeCodeAsync(void *arg) {
   // our PID, we may be orphaned.  Need to signal child handler we've finished
   // initialization
   CT->setScramberPid(me);
-  sem_wait(scramble);
+  if(MASK_INT(sem_wait(scramble))) {
+    DEBUGMSG(cpid << ": scramber could not wait for re-randomization signal"
+             << std::endl);
+    return nullptr;
+  }
 
   DEBUGMSG("chameleon thread " << me << " is scrambling code for " << cpid
            << std::endl);
@@ -163,7 +167,7 @@ void *randomizeCodeAsync(void *arg) {
       // We need to signal to the child handler that the scrambler exited due
       // to a failure.  Destroy the semaphore so at the next call to
       // rerandomize(), the child handler's call to sem_wait() fails.
-      sem_destroy(finished);
+      sem_destroy(finishedScrambling);
       break;
     }
     scrambles++;
@@ -172,8 +176,17 @@ void *randomizeCodeAsync(void *arg) {
     DEBUGMSG_VERBOSE("code randomization time: " << t.elapsed(Timer::Micro)
                      << " us" << std::endl);
 
-    sem_post(finished);
-    sem_wait(scramble);
+    if(sem_post(finishedScrambling)) {
+      DEBUGMSG(cpid << ": scrambler could not signal finished randomizing"
+               << std::endl);
+      break;
+    }
+    if(MASK_INT(sem_wait(scramble))) {
+      DEBUGMSG(cpid << ": scrambler could not wait for re-randomization signal"
+               << std::endl);
+      sem_destroy(finishedScrambling);
+      break;
+    }
   }
 
   DEBUGMSG("scrambler " << me << " exiting" << std::endl);
@@ -609,6 +622,9 @@ ret_t CodeTransformer::rerandomize() {
     return ret_t::TransformFailed;
   }
 
+  // TODO if any of the following actions fail before switching to the new code
+  // window we need to sem_post(&finishedScrambling) so we don't deadlock
+
   stackSize = childDstBase - sp;
 #ifdef DEBUG_BUILD
   stackBuf = mapInNewStackRegion(childSrcBase, childDstBase, stackSize);
@@ -818,11 +834,15 @@ CodeTransformer::advanceToTransformationPoint(RandomizedFunction::TransformType 
         goto restore;
       }
 
-      // Figure out where child stopped & reset instruction address
+      // Figure out where child stopped & reset instruction address.  Note that
+      // if we did *not* stop at a transformation point, we do *not* want to
+      // reset the instruction address - check that first.
       pc -= interruptSize;
-      if((code = proc.setPC(pc)) != ret_t::Success) goto restore;
-      if((Ty = info->getTransformationType(pc)) == TransformType::None)
-        code = ret_t::TransformFailed;
+      if((Ty = info->getTransformationType(pc)) == TransformType::None) {
+        code = ret_t::AdvancingFailed;
+        goto restore;
+      }
+      code = proc.setPC(pc);
 
 restore:
       restoreCode = restoreTransformBreakpoints(info, origData);
@@ -1397,6 +1417,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
   instr_t *instr;
   reg_id_t drsp;
   ret_t code;
+
+  assert(cur && "Invalid code window");
 
   // Randomize the function's layout according to the metadata
   code = info->randomize(rng(), slotPadding);

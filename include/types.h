@@ -69,12 +69,13 @@ namespace chameleon {
 
 /* Other miscellaneous error codes */
 #define MISC_RETCODES \
+  X(NotImplemented, "not implemented") \
   X(BadFormat, "bad input format") \
+  X(FileOpenFailed, "could not open file") \
   X(LockFailed, "locking/unlocking mutex failed") \
   X(FutexFailed, "futex operation failed") \
   X(SemaphoreFailed, "semaphore operation failed") \
-  X(NotImplemented, "not implemented") \
-  X(FileOpenFailed, "could not open file") \
+  X(SignalMaskFailed, "setting signal mask failed") \
   X(NoTimestamp, "could not get timestamp") \
   X(InvalidAlarm, "invalid alarm configuration") \
   X(AlarmInitFailed, "alarm initialization failed") \
