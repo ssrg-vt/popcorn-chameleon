@@ -423,6 +423,27 @@ public:
     cs->setOffset(regionSize);
     cs->setSize(regionSize);
 
+    DEBUG(
+      Binary::slot_iterator si = binary.getStackSlots(func);
+      Binary::unwind_iterator ui = binary.getUnwindLocations(func);
+      DEBUGMSG("frame size = " << func->frame_size << " bytes, "
+               << si.getLength() << " stack slot(s), " << ui.getLength()
+               << " unwind location(s)" << std::endl);
+      for(; !si.end(); ++si) {
+        const stack_slot *slot = *si;
+        DEBUGMSG("  slot @ " << slot->base_reg << " + " << slot->offset
+                 << ", size = " << slot->size
+                 << ", alignment = " << slot->alignment << std::endl);
+      }
+      for(; !ui.end(); ++ui) {
+        const unwind_loc *unwind = *ui;
+        DEBUGMSG("  register " << unwind->reg << " at FBP + " << unwind->offset
+                 << std::endl);
+      }
+      si.reset();
+      ui.reset();
+    )
+
     // Add x86-specific regions ordered by highest stack address first.
     regions.push_back(StackRegionPtr(cs));
     // Offsets in FP-limited region limited to 1 byte, limit max region offset
@@ -629,7 +650,7 @@ public:
   }
 
   void calculateRegionOffsets(size_t start, bool sort = true) {
-    int curOffset, bubble;
+    int curOffset, origOffset, newOffset, bubble;
     size_t i;
 
     assert(start > 0 && "Invalid starting index");
@@ -671,21 +692,34 @@ public:
         }
       )
 
-      // Extend the preceding region to cover the bubble
-      if(bubble &&
+      // Extend the preceding region to cover the bubble.  Note that it's
+      // possible to have a negative bubble with the alignment region; just
+      // ignore for now.
+      if(bubble > 0 &&
          REGION_TYPE(regions[i-1]->getFlags()) != x86Region::R_CalleeSave &&
          REGION_TYPE(region->getFlags()) != x86Region::R_Call) {
-        regions[i-1]->setOffset(regions[i-1]->getOriginalOffset() + bubble);
-        regions[i-1]->setSize(regions[i-1]->getOriginalSize() + bubble);
-        DEBUGMSG("extended " << x86RegionName[regions[i-1]->getFlags()]
-                 << " region to " << regions[i-1]->getOriginalOffset()
-                 << std::endl);
+        StackRegionPtr &prev = regions[i-1];
+        origOffset = prev->getOriginalOffset();
+        newOffset = std::min(prev->getMaxOffset(), origOffset + bubble);
+        prev->setOffset(newOffset);
+        prev->setSize(prev->getOriginalSize() + newOffset - origOffset);
         curOffset += bubble;
+
+        DEBUG(
+          assert(newOffset >= origOffset && "Invalid offset extension");
+          if(newOffset > origOffset)
+            DEBUGMSG( "extended " << x86RegionName[prev->getFlags()]
+                     << " region to " << prev->getOriginalOffset()
+                     << std::endl);
+        )
       }
 
       region->setOffset(bottom.original);
       region->setSize(bottom.original - curOffset);
       curOffset = bottom.original;
+
+      DEBUGMSG_VERBOSE(x86RegionName[region->getFlags()] << " region size: "
+                       << region->getOriginalSize() << std::endl);
     }
   }
 

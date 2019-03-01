@@ -340,15 +340,15 @@ RandomizedFunction::RandomizedFunction(const Binary &binary,
   std::sort(slots.begin(), slots.end(), slotCmp);
 }
 
+// Note: we don't really care about previous randomization information as we're
+// setting up to immediately kick off another randomization; the current
+// randomization information will be set as the previous randomizaiton.
 RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
                                        MemoryWindow &mw)
   : binary(rhs.binary), func(rhs.func), maxFrameSize(rhs.maxFrameSize),
     transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
-    _b(rhs._b), prevSortedByRand(rhs.prevSortedByRand),
-    prevRandFrameSize(rhs.prevRandFrameSize),
-    randomizedFrameSize(rhs.randomizedFrameSize) {
-  // Deep copy the instructions and update raw bits to point to the new code
-  // buffer
+    _b(rhs._b), seen(rhs.seen), randomizedFrameSize(rhs.randomizedFrameSize) {
+  // Deep copy the instructions and point raw bits to the new code buffer
   size_t instrSize;
   if(rhs.instrs) {
     byte_iterator funcData = mw.getData(func->addr);
@@ -356,8 +356,13 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
     instrs = instrlist_clone(GLOBAL_DCONTEXT, rhs.instrs);
     instr_t *instr = instrlist_first(instrs),
             *rhsInstr = instrlist_first(rhs.instrs);
+
+    assert(cur && instr && rhsInstr && "Invalid deep copy of instructions");
+
     while(cur < end) {
+      assert(instr && rhsInstr && "Invalid function copy");
       assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
+
       instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
       instr_set_raw_bits(instr, cur, instrSize);
       cur += instrSize;
@@ -367,15 +372,15 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
   }
   else instrs = nullptr;
 
-  // Set up the slot remapping vector pointers
-  if(rhs.prevRand == &rhs._a) {
-    prevRand = &_a;
-    curRand = &_b;
+  if(rhs.curRand == &rhs._a) {
+    curRand = &_a;
+    prevRand = &_b;
   }
   else {
-    prevRand = &_b;
-    curRand = &_a;
+    curRand = &_b;
+    prevRand = &_a;
   }
+  prevSortedByRand.resize(_a.size());
 
   // Deep copy the regions
   regions.reserve(rhs.regions.size());
@@ -422,7 +427,7 @@ bool verifySlots(const std::vector<SlotMap> &slots) {
   std::sort(copy.begin(), copy.end(), slotMapCmpRand);
   for(auto &slot : copy) {
     if((int)(slot.randomized - slot.size) < curOffset) {
-      DEBUG(WARN("Found overlapping slots: slot with range "
+      DEBUG(WARN("Found unsorted/overlapping slots: slot with range "
                  << (int)(slot.randomized - slot.size) << " -> "
                  << slot.randomized << " overlaps previous slot ending at "
                  << curOffset << std::endl));
@@ -458,8 +463,8 @@ ret_t RandomizedFunction::finalizeAnalysis() {
   }
   std::sort(curRand->begin(), curRand->end(), slotMapCmp);
 
-  assert((uint32_t)regions.back()->getOriginalOffset() <=
-         maxFrameSize && "Invalid calculated frame size");
+  assert((uint32_t)regions.back()->getOriginalOffset() <= maxFrameSize &&
+         "Invalid calculated frame size");
   DEBUG(if(!verifySlots(*curRand)) return ret_t::AnalysisFailed);
 
   return ret_t::Success;
@@ -469,27 +474,6 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   size_t i;
   int offset = 0;
   RandUtil ru(seed, maxPadding);
-
-  DEBUG(
-    Binary::slot_iterator si = binary.getStackSlots(func);
-    Binary::unwind_iterator ui = binary.getUnwindLocations(func);
-    DEBUGMSG("frame size = " << func->frame_size << " bytes, "
-             << si.getLength() << " stack slot(s), " << ui.getLength()
-             << " unwind location(s)" << std::endl);
-    for(; !si.end(); ++si) {
-      const stack_slot *slot = *si;
-      DEBUGMSG("  slot @ " << slot->base_reg << " + " << slot->offset
-               << ", size = " << slot->size
-               << ", alignment = " << slot->alignment << std::endl);
-    }
-    for(; !ui.end(); ++ui) {
-      const unwind_loc *unwind = *ui;
-      DEBUGMSG("  register " << unwind->reg << " at FBP + " << unwind->offset
-               << std::endl);
-    }
-    si.reset();
-    ui.reset();
-  )
 
   // Move current mappings to previous so we can serialize the new mappings
   // into the current slot remapping vector.  Create a secondary vector of the
@@ -505,6 +489,7 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
     offset = std::max(offset, (*r)->getMinStartingOffset());
     (*r)->randomize(offset, ru);
     offset = (*r)->getRandomizedOffset();
+    assert(offset <= (*r)->getMaxOffset() && "Invalid randomized region");
 
     // Serialize the region's slots into the global vector to be passed to the
     // state transformation runtime
@@ -515,7 +500,12 @@ ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
   randomizedFrameSize = ROUND_UP(randomizedFrameSize, getFrameAlignment());
 
   assert(randomizedFrameSize <= maxFrameSize && "Invalid randomization");
-  DEBUG(if(!verifySlots(*curRand)) return ret_t::RandomizeFailed);
+  DEBUG(
+    if(!verifySlots(*curRand)) return ret_t::RandomizeFailed;
+    for(auto slot : *curRand)
+      DEBUGMSG("  slot mapping: " << slot.original << " - " << slot.randomized
+               << std::endl);
+  )
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
 

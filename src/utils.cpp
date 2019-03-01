@@ -10,7 +10,7 @@ using namespace chameleon;
 ret_t chameleon::syncWait(int *key, int val) {
   int ret = MASK_INT(syscall(SYS_futex, key, FUTEX_WAIT, val,
                              nullptr, nullptr, 0));
-  if(ret && ret != EAGAIN) return ret_t::FutexFailed;
+  if(ret && errno != EAGAIN) return ret_t::FutexFailed;
   else return ret_t::Success;
 }
 

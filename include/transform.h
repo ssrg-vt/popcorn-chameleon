@@ -87,7 +87,7 @@ public:
    * @param rhs another code transformer object
    * @return a return code describing the outcome
    */
-  ret_t initializeFromExisting(const CodeTransformer &rhs, bool randomize);
+  ret_t initializeFromExisting(CodeTransformer &rhs, bool randomize);
 
   /**
    * Clean up the state transformer, including stopping handling faults.  Users

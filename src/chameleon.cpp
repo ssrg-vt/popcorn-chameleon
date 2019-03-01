@@ -55,7 +55,7 @@ static pthread_mutex_t childLock = PTHREAD_MUTEX_INITIALIZER,
 
 // Declare event & child handling APIs to satisfy compiler
 static void alarmCallback(void *data);
-static ret_t addChild(pid_t pid, const CodeTransformer &CT);
+static ret_t addChild(pid_t pid, CodeTransformer &CT);
 static ret_t cleanupChild(const Process *proc);
 static Process::status_t handleEvent(CodeTransformer &CT);
 static void *forkedChildLoop(void *p);
@@ -223,11 +223,11 @@ static ret_t setupSignalsAndAlarm(Alarm &alarm) {
 /* Arguments to child handlers */
 struct HandlerArgs {
   Process *child;
-  const CodeTransformer *parentCT;
+  CodeTransformer *parentCT;
   sem_t finishedInit;
 };
 
-static ret_t addChild(pid_t pid, const CodeTransformer &CT) {
+static ret_t addChild(pid_t pid, CodeTransformer &CT) {
   ret_t code = ret_t::Success;
   HandlerArgs args;
 

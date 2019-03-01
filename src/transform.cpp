@@ -327,13 +327,19 @@ ret_t CodeTransformer::initialize(bool randomize) {
   return ret_t::Success;
 }
 
-ret_t CodeTransformer::initializeFromExisting(const CodeTransformer &rhs,
+ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
                                               bool randomize) {
   ret_t retcode;
 
   // Copy existing code & randomization information (if requested)
   codeWindow.copy(rhs.codeWindow);
   if(randomize) {
+    // We're going to copy the randomization information from the other
+    // CodeTransformer, but that transformer's scrambler could still be
+    // working.  Wait for it to finish before copying to avoid races.
+    if(MASK_INT(sem_wait(&rhs.finishedScrambling)))
+      return ret_t::SemaphoreFailed;
+
     rewriteMetadata = rhs.rewriteMetadata;
     for(auto &RF : rhs.functions)
       functions.emplace(RF.first, RF.second->copy(codeWindow));
@@ -344,6 +350,8 @@ ret_t CodeTransformer::initializeFromExisting(const CodeTransformer &rhs,
       return ret_t::ScramblerFailed;
     if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
       return ret_t::ScramblerFailed;
+
+    if(sem_post(&rhs.finishedScrambling)) return ret_t::SemaphoreFailed;
   }
 
   // Drop the existing code pages to force the new child to bring in pages from
