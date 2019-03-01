@@ -164,7 +164,7 @@ void arch::dumpFPRegs(std::ostream &os, struct user_fpregs_struct &regs) {
     if(i % 4 == 0) os << std::endl << std::dec << "xmm" << (i / 4) << ": 0x";
     os << std::hex << std::setfill('0') << std::setw(8) << regs.xmm_space[i];
   }
-  os << std::dec << std::endl;
+  os << std::dec << std::setfill(' ') << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -601,11 +601,14 @@ public:
    * permutable regions to stay within the frame size limitation.
    */
   void populateWithRestrictions() {
+#ifdef DEBUG_BUILD
+    int region;
+#endif
+
     // To avoid increasing the frame size past what's allocatable within a
     // single byte, convert the movable region (which adds padding) into a
     // permutable region.
-    int minStart = 144;
-    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable);
+    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable, 144);
     regions[x86Region::R_Movable].reset(newMov);
 
     DEBUGMSG("changed movable to permutable region to stay within maximum "
@@ -616,37 +619,29 @@ public:
     // region (see comment above), put into the newly-converted movable region.
     // TODO this doesn't handle SP-limited slots
     StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
+                   &crossing = regions[x86Region::R_FPMovableCrossing],
                    &movable = regions[x86Region::R_Movable];
     for(auto &s : slots) {
       if(!seen.count(s.first)) {
         const stack_slot *slot = s.second;
         if(s.first <= 144) {
           fpLimited->addSlot(s.first, slot->size, slot->alignment);
-          DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
-                   << ") is in " << x86RegionName[x86Region::R_FPLimited]
-                   << " region" << std::endl);
+          DEBUG(region = x86Region::R_FPLimited);
+        }
+        else if((int)(s.first - slot->size) < 144) {
+          crossing->addSlot(s.first, slot->size, slot->alignment);
+          DEBUG(region = x86Region::R_FPMovableCrossing);
         }
         else {
-          minStart = std::min(minStart, (int)(s.first - slot->size));
           movable->addSlot(s.first, slot->size, slot->alignment);
-          DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
-                   << ") is in " << x86RegionName[x86Region::R_Movable]
-                   << " region" << std::endl);
+          DEBUG(region = x86Region::R_Movable);
         }
+
+        DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
+                 << ") is in " << x86RegionName[region]
+                 << " region" << std::endl);
       }
     }
-
-    // We can't necessarily start the movable region at offset 144 with the
-    // limited frame size, as there may be slots big enough to cause the
-    // frame's size to overflow 1 byte (e.g., slot with original offset 160 and
-    // size 100 starting at offset 144 would increase the frame size to 256,
-    // beyond 1 byte).  Instead use the earliest observed starting offset.
-    newMov->setMinStartingOffset(minStart);
-    DEBUG(
-      if(minStart != 144)
-        DEBUGMSG("changed movable region's starting offset to " << minStart
-                 << std::endl);
-    )
   }
 
   void calculateRegionOffsets(size_t start, bool sort = true) {

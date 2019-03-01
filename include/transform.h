@@ -359,6 +359,12 @@ private:
 #endif
 
   /**
+   * Grab a userfaultfd from the child and start the fault handling thread.
+   * @return a return code describing the outcome
+   */
+  ret_t initializeFaultHandling();
+
+  /**
    * Insert breakpoints where chameleon can perform a transformation.
    *
    * @param info randomization information for a function

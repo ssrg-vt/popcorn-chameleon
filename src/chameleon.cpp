@@ -438,8 +438,12 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
              << retText(code) << endl);
         break;
       default:
-        ERROR(pid << ": could not re-randomize child: " << retText(code)
-              << std::endl);
+        if(code == ret_t::InvalidState) {
+          INFO(pid << ": child died/exited while processing alarm" << endl);
+          return child.getStatus();
+        }
+        else ERROR(pid << ": could not re-randomize child: " << retText(code)
+                   << std::endl);
       }
 
       // Delete trace from previous epoch & re-open file to avoid ballooning

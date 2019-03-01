@@ -306,25 +306,11 @@ ret_t CodeTransformer::initialize(bool randomize) {
   }
 
   // Prepare the code region inside the child by setting up correct page
-  // permissions and registering it with the userfaultfd file descriptor
+  // permissions
   intPageAddr = PAGE_DOWN(parasite::infectAddress(proc.getParasiteCtl()));
   retcode = remapCodeSegment(codeSec.address(), codeSec.size());
   if(retcode != ret_t::Success) return retcode;
-  retcode = proc.stealUserfaultfd();
-  if(retcode != ret_t::Success) return retcode;
-  if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
-    return ret_t::UffdHandshakeFailed;
-  if(!uffd::registerRegion(proc.getUserfaultfd(),
-                           codeSec.address(),
-                           codeSec.size()))
-    return ret_t::UffdRegisterFailed;
-
-  // Initialize thread for handling faults
-  if(pthread_mutex_init(&windowLock, nullptr)) return ret_t::LockFailed;
-  if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
-    return ret_t::FaultHandlerFailed;
-
-  return ret_t::Success;
+  return initializeFaultHandling();
 }
 
 ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
@@ -355,9 +341,17 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
   }
 
   // Drop the existing code pages to force the new child to bring in pages from
-  // the new buffer
+  // the new buffer; we should have inherited the correct page permissions for
+  // handling faults from the parent.
   intPageAddr = rhs.intPageAddr;
   if((retcode = dropCode()) != ret_t::Success) return retcode;
+  return initializeFaultHandling();
+}
+
+ret_t CodeTransformer::initializeFaultHandling() {
+  ret_t retcode;
+
+  // Grab a userfaultfd descriptor & register code pages
   retcode = proc.stealUserfaultfd();
   if(retcode != ret_t::Success) return retcode;
   if(!uffd::api(proc.getUserfaultfd(), nullptr, nullptr))
@@ -368,6 +362,7 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
                            codeSec.size()))
     return ret_t::UffdRegisterFailed;
 
+  // Initialize thread for handling faults
   if(pthread_mutex_init(&windowLock, nullptr)) return ret_t::LockFailed;
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
