@@ -61,7 +61,7 @@ $ ./install_compiler.py --install-path /usr/local/chameleon --install-all --cham
 
 ## Building Chameleon
 
-Chameleon uses CMake to build the executable and supports Debug and Release builds.  For the following we'll install using the Debug build which is slower at runtime but performs sanity checks and is capable of printing significant amounts of information to help developers Debug.  The build process for Release builds is almost identical; just substitute `Release` in place of `Debug` below.
+Chameleon uses CMake to build the executable and supports Debug and Release builds.  For the following we'll install using the Debug build which is slower at runtime but performs sanity checks and is capable of printing significant amounts of information to help developers debug.  The build process for Release builds is almost identical; just substitute `Release` in place of `Debug` below.
 
 **Note:** For the debug build, you should install `libcompel` by passing `-d / --debug` to `install-compel.sh` above
 
@@ -95,7 +95,7 @@ The extra arguments do the following:
 * `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer`: force the compiler to use a frame pointer to both avoid limitations in metadata generation and to generate cleaner code for Chameleon
 * `-mno-red-zone`: don't use the [red zone](https://en.wikipedia.org/wiki/Red_zone_%28computing%29) due to limitations in Chameleon
 
-After generating a target application executable, you'll need to run a post-processing tool to prepare the metadata contained in the binary for runtime stack transformation.  For an application named "foo":
+After generating a target application executable, you'll need to run a post-processing tool to prepare the metadata contained in the binary for runtime stack transformation.  For an executable named `foo`:
 
 ```
 $ /usr/local/chameleon/bin/gen-stackinfo -f foo
@@ -103,5 +103,50 @@ $ /usr/local/chameleon/bin/gen-stackinfo -f foo
 
 # Running applications under Chameleon
 
-TODO description
+Chameleon traces the targeted application using Linux's `ptrace` interface.  Thus, Chameleon acts as a "shell" around the application - users launch chameleon and specify the command line arguments for the target application.  Chameleon will `fork()` and `exec()` the application, forwarding the command line arguments.  For example, to run an application `foo` with arguments `arg1 arg2` under Chameleon:
+
+```
+$ cd ./popcorn-chameleon/build
+$ ./bin/chameleon -- foo arg1 arg2
+```
+
+The double dash `--` separates arguments to chameleon (all arguments before the dashes) from how Chameleon will launch the target application (all arguments after the dashes).  Run Chameleon with `-h` to see all supported command line options
+
+### No randomization
+
+To run an application with no runtime code randomization:
+
+```
+$ ./bin/chameleon -n -- foo arg1 arg2
+```
+
+This is useful when sanity-checking that either Chameleon or the application works without any modification.
+
+### Initial randomization
+
+To run an application with an initial randomization:
+
+```
+$ ./bin/chameleon -- foo arg1 arg2
+```
+
+In this configuration, Chameleon forks the target application and performs an initial randomization of the code section before starting the application.  The initial randomization is the only modification made to the target; Chameleon will not perform any re-randomization.
+
+### Continuous code re-randomization
+
+To run an application under continous code re-randomization:
+
+```
+$ ./bin/chameleon -p 1000 -- foo arg1 arg2
+```
+
+In this configuration, Chameleon will interrupt the target application every specified period (in milliseconds) and swap in newly randomized code.  Chameleon runs a background thread while waiting for the next interrupt which generates a new set of randomized code.  At the interrupt, Chameleon drops the application's code pages (forcing it to load in the newly randomized code on demand) and transforms the application threads' stacks to match the newly randomized code.  All of this process is completely transparent to the target application.
+
+### Other useful options
+
+* `-d`: print verbose debugging information to stderr - you'll probably want to redirect stderr to a file (only available in Debug builds)
+
+* `-t`: trace the execution path of the child by single-stepping and writing each executed instruction's address to the specified trace file (only available in Debug builds) - **Warning**: extremely slow!
+
+* `-r`: when used in conjuction with `-t`, print the register set used for each instruction to the trace log - **Warning**: even slower and can cause gigantic trace logs!
 
