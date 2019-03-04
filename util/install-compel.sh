@@ -3,7 +3,6 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 COMPEL_PATCH=$(readlink -f $DIR/../patches/compel.patch)
 INSTALL=/usr/local/chameleon
-LIBS=$INSTALL/lib64/release
 ARGS="-j$(nproc)"
 PATCH=1
 DEBUG=0
@@ -34,8 +33,7 @@ while [[ $1 != "" ]]; do
     -n | --no-patch) PATCH=0;;
     -d | --debug)
       DEBUG=1
-      ARGS="$ARGS DEBUG=1"
-      LIBS=$INSTALL/lib64/debug;;
+      ARGS="$ARGS DEBUG=1";;
   esac
   shift
 done
@@ -52,7 +50,12 @@ fi
 
 echo -e "Installing from source directory:\n  $(readlink -f $CRIU)\n" \
         "to installation directory:\n  $(readlink -f $INSTALL)"
-if [[ $DEBUG -eq 1 ]]; then echo " -> DEBUG build <-"; fi
+if [[ $DEBUG -eq 1 ]]; then
+  echo " -> DEBUG build <-"
+  LIBS=$INSTALL/lib64/debug
+else
+  LIBS=$INSTALL/lib64/release
+fi
 echo
 
 if [[ $PATCH -eq 1 ]]; then
