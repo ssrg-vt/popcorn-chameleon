@@ -295,14 +295,7 @@ ret_t CodeTransformer::initialize(bool randomize) {
     INFO(proc.getPid() << ": initial randomization: "
          << t.elapsed(Timer::Micro) << " us" << std::endl);
 
-    // Set up a buffer for transforming the child's stack & kick of the
-    // re-randomization thread
-    const urange_t &bounds = proc.getStackBounds();
-    stackMem.reset(new unsigned char[bounds.second - bounds.first]);
-    if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
-      return ret_t::ScramblerFailed;
-    if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
-      return ret_t::ScramblerFailed;
+    if((retcode = initializeScrambler()) != ret_t::Success) return retcode;
   }
 
   // Prepare the code region inside the child by setting up correct page
@@ -318,6 +311,8 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
   ret_t retcode;
 
   // Copy existing code & randomization information (if requested)
+  codeStart = rhs.codeStart;
+  codeEnd = rhs.codeEnd;
   codeWindow.copy(rhs.codeWindow);
   if(randomize) {
     // We're going to copy the randomization information from the other
@@ -327,16 +322,13 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
       return ret_t::SemaphoreFailed;
 
     rewriteMetadata = rhs.rewriteMetadata;
+    slotPadding = rhs.slotPadding;
     for(auto &RF : rhs.functions)
       functions.emplace(RF.first, RF.second->copy(codeWindow));
+    if((retcode = initializeScrambler()) != ret_t::Success) return retcode;
 
-    const urange_t &bounds = proc.getStackBounds();
-    stackMem.reset(new unsigned char[bounds.second - bounds.first]);
-    if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
-      return ret_t::ScramblerFailed;
-    if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
-      return ret_t::ScramblerFailed;
-
+    // We're not actually consuming the other CodeTransformer's randomization -
+    // at the next re-randomization, it'll have code ready to go
     if(sem_post(&rhs.finishedScrambling)) return ret_t::SemaphoreFailed;
   }
 
@@ -345,6 +337,7 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
   // handling faults from the parent.
   intPageAddr = rhs.intPageAddr;
   if((retcode = dropCode()) != ret_t::Success) return retcode;
+  batchedFaults = rhs.batchedFaults;
   return initializeFaultHandling();
 }
 
@@ -367,6 +360,18 @@ ret_t CodeTransformer::initializeFaultHandling() {
   if(pthread_create(&faultHandler, nullptr, handleFaultsAsync, this))
     return ret_t::FaultHandlerFailed;
 
+  return ret_t::Success;
+}
+
+ret_t CodeTransformer::initializeScrambler() {
+  // Set up a buffer for transforming the child's stack & kick of the
+  // re-randomization thread
+  const urange_t &bounds = proc.getStackBounds();
+  stackMem.reset(new unsigned char[bounds.second - bounds.first]);
+  if(sem_init(&scramble, 0, 1) || sem_init(&finishedScrambling, 0, 0))
+    return ret_t::ScramblerFailed;
+  if(pthread_create(&scrambler, nullptr, randomizeCodeAsync, this))
+    return ret_t::ScramblerFailed;
   return ret_t::Success;
 }
 
@@ -860,8 +865,8 @@ restore:
   }
   else Ty = TransformType::CallSite;
 
-  DEBUGMSG_VERBOSE(cpid << ": stopped at transformation point at 0x"
-                   << std::hex << proc.getPC() << std::endl);
+  DEBUGMSG(cpid << ": stopped at transformation point at 0x" << std::hex
+           << proc.getPC() << std::endl);
 
   return ret_t::Success;
 }
@@ -1074,9 +1079,23 @@ ret_t CodeTransformer::populateCodeWindow(const Binary::Section &codeSection,
  * @return the type of transformation point if any
  */
 static inline
-RandomizedFunction::TransformType getTransformType(instr_t *instr) {
+RandomizedFunction::TransformType getTransformType(uintptr_t start,
+                                                   uintptr_t end,
+                                                   instr_t *instr) {
+  opnd_t op;
+  uintptr_t pc;
+
   if(instr_is_call(instr)) return RandomizedFunction::CallSite;
   else if(instr_is_return(instr)) return RandomizedFunction::Return;
+  else if(instr_is_ubr(instr)) {
+    // TODO handle relative offsets for PIC
+    op = instr_get_src(instr, 0);
+    if(opnd_is_pc(op)) {
+      pc = (uintptr_t)opnd_get_pc(op);
+      if(pc < start || end <= pc) return RandomizedFunction::CallSite;
+    }
+    return RandomizedFunction::None;
+  }
   else return RandomizedFunction::None;
 }
 
@@ -1186,7 +1205,9 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
 
     DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
 
-    if((TTy = getTransformType(instr)) != RandomizedFunction::None) {
+    if((TTy = getTransformType(func->addr,
+                               func->addr + func->code_size,
+                               instr)) != RandomizedFunction::None) {
       DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
                        << (uintptr_t)real << ")" << std::endl);
       info->addTransformAddr((uintptr_t)real, TTy);

@@ -424,7 +424,7 @@ static Process::status_t handleEvent(CodeTransformer &CT) {
     return Process::SignalExit;
   case Process::Interrupted:
     pc = child.getPC();
-    DEBUGMSG_VERBOSE(pid << ": interrupted child at 0x" << hex << pc << endl);
+    DEBUGMSG(pid << ": interrupted child at 0x" << hex << pc << endl);
 
     if(randomize) {
       code = CT.rerandomize();

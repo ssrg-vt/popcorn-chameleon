@@ -365,6 +365,13 @@ private:
   ret_t initializeFaultHandling();
 
   /**
+   * Initialize the scrambler thread (including synchronization data) and
+   * buffers for re-randomization.
+   * @return a return code describing the outcome
+   */
+  ret_t initializeScrambler();
+
+  /**
    * Insert breakpoints where chameleon can perform a transformation.
    *
    * @param info randomization information for a function
