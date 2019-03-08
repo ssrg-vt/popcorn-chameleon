@@ -1203,7 +1203,10 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     instr_set_raw_bits(instr, prev, instrSize); // TODO figure out way to remove
     instrlist_append(instrs, instr);
 
-    DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
+    DEBUG_VERBOSE(
+      DEBUGMSG_INSTR(std::hex << (uintptr_t)real << " size = " << std::dec
+                     << std::setw(2) << instrSize << " ", instr);
+    )
 
     if((TTy = getTransformType(func->addr,
                                func->addr + func->code_size,
@@ -1305,7 +1308,8 @@ ret_t CodeTransformer::analyzeFunctions() {
              << std::dec << func->code_size << std::endl);
     t.start();
 
-    RandomizedFunctionPtr info = arch::getRandomizedFunction(binary, func);
+    RandomizedFunctionPtr info =
+      arch::getRandomizedFunction(binary, func, slotPadding);
     RandomizedFunctionMap::iterator it =
       functions.emplace(func->addr, std::move(info)).first;
     code = analyzeFunction(it->second);
@@ -1445,7 +1449,7 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
   assert(cur && "Invalid code window");
 
   // Randomize the function's layout according to the metadata
-  code = info->randomize(rng(), slotPadding);
+  code = info->randomize(rng());
   if(code != ret_t::Success) return code;
 
   // Apply the randomization by rewriting instructions
@@ -1456,7 +1460,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
     assert(instr_raw_bits_valid(instr) && "Bits not set");
     instrSize = instr_length(GLOBAL_DCONTEXT, instr);
 
-    DEBUG_VERBOSE(DEBUGMSG_INSTR("size = " << instrSize << ": ", instr);)
+    DEBUG_VERBOSE(
+      DEBUGMSG_INSTR(std::hex << (uintptr_t)real << " size = " << std::dec
+                     << std::setw(2) << instrSize << " ", instr);
+    )
 
     // See frame size cleanup comment in analyzeFunction()
     if(!frameSize) {

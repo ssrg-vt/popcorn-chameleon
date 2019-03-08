@@ -293,6 +293,18 @@ public:
     )
   }
 
+  virtual double entropy(int start, size_t maxPadding) const override {
+    size_t size;
+    double bits;
+
+    if(slots.size() <= 2) return 0.0;
+
+    // TODO return address & saved FBP are currently not randomizable
+    size = slots.size();
+    bits = entropyBits(size - 2);
+    return (bits * (double)(size - 2)) / (double)size;
+  }
+
   /**
    * Get the register to be saved at a particular slot after randomization.
    * @param offset a canonicalized stack offset
@@ -392,8 +404,10 @@ private:
  */
 class x86RandomizedFunction : public RandomizedFunction {
 public:
-  x86RandomizedFunction(const Binary &binary, const function_record *func)
-    : RandomizedFunction(binary, func), alignment(16) {
+  x86RandomizedFunction(const Binary &binary,
+                        const function_record *func,
+                        size_t maxPadding)
+    : RandomizedFunction(binary, func, maxPadding), alignment(16) {
     int offset;
     size_t size, regionSize = 0;
 
@@ -876,13 +890,13 @@ public:
     return RandomizedFunction::finalizeAnalysis();
   }
 
-  virtual ret_t randomize(int seed, size_t maxPadding) override {
+  virtual ret_t randomize(int seed) override {
     int start;
     size_t nslots;
     ssize_t i, slotIdx;
     ZeroPad zp;
 
-    ret_t code = RandomizedFunction::randomize(seed, maxPadding);
+    ret_t code = RandomizedFunction::randomize(seed);
     if(code != ret_t::Success) return code;
 
     // Due to alignment restrictions, we may have increased the frame size,
@@ -1025,8 +1039,11 @@ private:
 
 RandomizedFunctionPtr
 arch::getRandomizedFunction(const Binary &binary,
-                            const function_record *func)
-{ return RandomizedFunctionPtr(new x86RandomizedFunction(binary, func)); }
+                            const function_record *func,
+                            size_t maxPadding) {
+  return RandomizedFunctionPtr(
+    new x86RandomizedFunction(binary, func, maxPadding));
+}
 
 ret_t arch::transformStack(CodeTransformer *CT,
                            get_rand_info callback,

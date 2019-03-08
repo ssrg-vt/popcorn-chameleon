@@ -71,6 +71,9 @@ void ImmutableRegion::randomize(int start, RandUtil &ru) {
   )
 }
 
+double
+ImmutableRegion::entropy(int start, size_t maxPadding) const { return 0.0; }
+
 /**
  * Permutable regions need to be able to randomize slot ordering without
  * increasing the region's size (there may be ISA-specific size restrictions).
@@ -97,6 +100,10 @@ struct Bucket {
    * @param curOffset current offset in bucket
    * @param hole a hole
    * @param s a SlotMap
+   * @param beforePad output argument set to remaining padding before the slot
+   *                  if the hole can hold the slot
+   * @param afterPad output argument set to remaining padding after the slot if
+   *                 the hole can hold the slot
    * @return true if the hole can hold the slot or false otherwise
    */
   static bool canHoldSlot(uint32_t curOffset,
@@ -152,6 +159,20 @@ struct Bucket {
       }
     }
     return false;
+  }
+
+  /**
+   * Count the number of instances of a given slot size/alignment class in the
+   * bucket.
+   *
+   * @param cls slot size/alignment class
+   * @param number of instances of class in the bucket
+   */
+  size_t classCount(size_t cls) const {
+    size_t count = 0;
+    for(const auto &s : slots)
+      if(ROUND_UP(s.size, s.alignment) == cls) count++;
+    return count;
   }
 
   /**
@@ -283,6 +304,101 @@ void PermutableRegion::randomize(int start, RandUtil &ru) {
   )
 }
 
+double PermutableRegion::entropy(int start, size_t maxPadding) const {
+  bool added, fillerBucket = false;
+  uint32_t bucketSize = 0, curSize;
+  size_t i, j, locs, bucketLocs, totalLocs = 0;
+  int bucketOffset, curOffset, firstSlotStart;
+  std::vector<SlotMap> tmpSlots(slots);
+  std::vector<Bucket> buckets;
+  std::unordered_map<size_t, size_t> sizeClasses;
+  SlotMap toPlace;
+
+  // We don't know if we can permute the slots because we may overflow the
+  // allowable size.  Run the permutation algorithm to check.
+
+  const SlotMap &tmp = slots.front();
+  firstSlotStart = tmp.original - tmp.size;
+  std::sort(tmpSlots.begin(), tmpSlots.end(), slotSizeAlignCmp);
+  bucketSize = ROUND_UP(tmpSlots.back().size, tmpSlots.back().alignment);
+  curSize = ROUND_UP(start, bucketSize) - start;
+  if(curSize && curSize < bucketSize) {
+    buckets.emplace_back(Bucket(curSize));
+    bucketOffset = start + curSize;
+    fillerBucket = true;
+  }
+  else bucketOffset = start;
+
+  // Record all class sizes and the number of slots in each class - if we *can*
+  // permute, we'll use this information to calculate entropy.
+  for(i = 0; i < tmpSlots.size(); i++) {
+    curSize = ROUND_UP(tmpSlots[i].size, tmpSlots[i].alignment);
+    j = i;
+    while(j < tmpSlots.size() &&
+          ROUND_UP(tmpSlots[j].size, tmpSlots[j].alignment) == curSize) j++;
+    sizeClasses[curSize] = j - i;
+    i = j - 1;
+  }
+
+  while(tmpSlots.size()) {
+    toPlace = tmpSlots.back();
+    tmpSlots.pop_back();
+    added = false;
+    for(auto &bucket : buckets) {
+      added = bucket.addSlotMap(toPlace);
+      if(added) break;
+    }
+    if(!added) {
+      buckets.emplace_back(Bucket(bucketSize));
+      added = buckets.back().addSlotMap(toPlace);
+      assert(added && "Couldn't add slot to empty bucket");
+    }
+  }
+
+  for(j = i = (int)fillerBucket; i < buckets.size(); i++) {
+    if(buckets[i].filled()) {
+      std::swap(buckets[i], buckets[j]);
+      j++;
+    }
+  }
+
+  DEBUG(
+    if(i != j) WARN("Invalid entropy calculation for permutable region - "
+                    "unfilled buckets");
+  )
+
+  for(auto &bucket : buckets)
+    for(auto slot = bucket.slots.begin(); slot != bucket.slots.end(); slot++)
+      if(slot->original != 0) tmpSlots.emplace_back(*slot);
+  curOffset = start;
+  for(i = 0; i < tmpSlots.size(); i++)
+    curOffset = ROUND_UP(curOffset + tmpSlots[i].size, tmpSlots[i].alignment);
+  curSize = curOffset - firstSlotStart;
+
+  // We can't randomize the region without going over size limit, no entropy
+  if(curSize > origSize) return 0.0;
+
+  // Calculate entropy from the number of possible locations for each size
+  // class and the number of slots in each class
+  // TODO handle unfilled buckets
+  bucketLocs = (curOffset - bucketOffset) / bucketSize;
+  for(const auto sizeClass : sizeClasses) {
+    if(fillerBucket) {
+      for(locs = 0, i = 1; i < j; i++)
+        locs = std::max(locs, buckets[i].classCount(sizeClass.first));
+      locs *= bucketLocs;
+      locs += buckets[0].classCount(sizeClass.first);
+    }
+    else {
+      for(locs = 0, i = 0; i < j; i++)
+        locs = std::max(locs, buckets[i].classCount(sizeClass.first));
+      locs *= bucketLocs;
+    }
+    totalLocs += locs * sizeClass.second;
+  }
+  return entropyBits((double)totalLocs / (double)slots.size());
+}
+
 void RandomizableRegion::randomize(int start, RandUtil &ru) {
   int curOffset;
 
@@ -303,6 +419,16 @@ void RandomizableRegion::randomize(int start, RandUtil &ru) {
   )
 }
 
+double RandomizableRegion::entropy(int start, size_t maxPadding) const {
+  const size_t permuteLocs = slots.size();
+  double avg = 0.0;
+
+  for(auto &s : slots)
+    avg += entropyBits(permuteLocs +
+                       ROUND_UP(maxPadding, s.alignment) / s.alignment);
+  return avg / (double)slots.size();
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // RandomizedFunction implementation
 ///////////////////////////////////////////////////////////////////////////////
@@ -318,9 +444,11 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 { return a.first < b.first; }
 
 RandomizedFunction::RandomizedFunction(const Binary &binary,
-                                       const function_record *func)
+                                       const function_record *func,
+                                       size_t maxPadding)
   : binary(binary), func(func), instrs(nullptr), maxFrameSize(UINT32_MAX),
-    prevRandFrameSize(func->frame_size), randomizedFrameSize(func->frame_size) {
+    prevRandFrameSize(func->frame_size), randomizedFrameSize(func->frame_size),
+    maxPadding(maxPadding) {
   int offset;
   arch::RegType type;
   Binary::slot_iterator si = binary.getStackSlots(func);
@@ -347,7 +475,8 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
                                        MemoryWindow &mw)
   : binary(rhs.binary), func(rhs.func), maxFrameSize(rhs.maxFrameSize),
     transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
-    _b(rhs._b), seen(rhs.seen), randomizedFrameSize(rhs.randomizedFrameSize) {
+    _b(rhs._b), seen(rhs.seen), randomizedFrameSize(rhs.randomizedFrameSize),
+    maxPadding(rhs.maxPadding) {
   // Deep copy the instructions and point raw bits to the new code buffer
   size_t instrSize;
   if(rhs.instrs) {
@@ -465,12 +594,22 @@ ret_t RandomizedFunction::finalizeAnalysis() {
 
   assert((uint32_t)regions.back()->getOriginalOffset() <= maxFrameSize &&
          "Invalid calculated frame size");
-  DEBUG(if(!verifySlots(*curRand)) return ret_t::AnalysisFailed);
+  DEBUG(
+    if(!verifySlots(*curRand)) return ret_t::AnalysisFailed;
+
+    int offset = 0;
+    for(const auto &r : regions) {
+      offset = std::max(offset, r->getMinStartingOffset());
+      DEBUGMSG("bits of entropy: " << r->entropy(offset, maxPadding)
+               << std::endl);
+      offset = r->getOriginalOffset();
+    }
+  )
 
   return ret_t::Success;
 }
 
-ret_t RandomizedFunction::randomize(int seed, size_t maxPadding) {
+ret_t RandomizedFunction::randomize(int seed) {
   size_t i;
   int offset = 0;
   RandUtil ru(seed, maxPadding);

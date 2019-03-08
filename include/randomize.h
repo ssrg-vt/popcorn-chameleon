@@ -178,7 +178,16 @@ public:
    */
   virtual void randomize(int start, RandUtil &ru) = 0;
 
-  // TODO add entropy function
+  /**
+   * Get the average number of bits of entropy, i.e., number of bits required
+   * to encode possible locations for slots post-randomization, for slots in
+   * the region.
+   *
+   * @param start the starting offset of the region
+   * @param maximum amount of padding that can be added between slots
+   * @return the average number of bits of entropy for slots in the region
+   */
+  virtual double entropy(int start, size_t maxPadding) const = 0;
 
   /**
    * Return the randomized offset of slot.
@@ -246,6 +255,15 @@ protected:
 
   /* Stack slots in the region.  Stack slot offsets are canonicalized. */
   std::vector<SlotMap> slots;
+
+  /**
+   * Convert the number of possible locations into the number of bits of
+   * entropy.
+   *
+   * @param nlocs number of possible locations
+   * @return number of bits of entropy
+   */
+  static double entropyBits(size_t nlocs) { return log2((double)nlocs); }
 };
 
 typedef std::unique_ptr<StackRegion> StackRegionPtr;
@@ -285,6 +303,17 @@ public:
    * @param ru a random number generator
    */
   virtual void randomize(int start, RandUtil &ru) override;
+
+  /**
+   * Get the average number of bits of entropy, i.e., number of bits required
+   * to encode possible locations for slots post-randomization, for slots in
+   * the region.
+   *
+   * @param start the starting offset of the region
+   * @param maximum amount of padding that can be added between slots
+   * @return the average number of bits of entropy for slots in the region
+   */
+  virtual double entropy(int start, size_t maxPadding) const;
 };
 
 /**
@@ -315,6 +344,17 @@ public:
    * @param ru a random number generator
    */
   virtual void randomize(int start, RandUtil &ru) override;
+
+  /**
+   * Get the average number of bits of entropy, i.e., number of bits required
+   * to encode possible locations for slots post-randomization, for slots in
+   * the region.
+   *
+   * @param start the starting offset of the region
+   * @param maximum amount of padding that can be added between slots
+   * @return the average number of bits of entropy for slots in the region
+   */
+  virtual double entropy(int start, size_t maxPadding) const;
 };
 
 /**
@@ -338,6 +378,17 @@ public:
    * @param ru a random number generator
    */
   virtual void randomize(int start, RandUtil &ru) override;
+
+  /**
+   * Get the average number of bits of entropy, i.e., number of bits required
+   * to encode possible locations for slots post-randomization, for slots in
+   * the region.
+   *
+   * @param start the starting offset of the region
+   * @param maximum amount of padding that can be added between slots
+   * @return the average number of bits of entropy for slots in the region
+   */
+  virtual double entropy(int start, size_t maxPadding) const;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -371,7 +422,9 @@ public:
   };
 
   RandomizedFunction() = delete;
-  RandomizedFunction(const Binary &binary, const function_record *func);
+  RandomizedFunction(const Binary &binary,
+                     const function_record *func,
+                     size_t maxPadding);
   RandomizedFunction(const RandomizedFunction &rhs, MemoryWindow &mw);
   ~RandomizedFunction()
   { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
@@ -428,10 +481,9 @@ public:
    * translate from previous randomizations to the current randomization.
    *
    * @param seed random number generator seed
-   * @param maxPadding maximum randomized padding added between stack slots
    * @return a return code describing the outcome
    */
-  virtual ret_t randomize(int seed, size_t maxPadding);
+  virtual ret_t randomize(int seed);
 
   /**
    * Return the previously-randomized frame size.
@@ -588,6 +640,9 @@ protected:
 
   /* Frame size from previous and current randomization */
   uint32_t prevRandFrameSize, randomizedFrameSize;
+
+  /* Maximum padding that can be added between fully-randomizable slots */
+  size_t maxPadding;
 
   /**
    * Find the stack slot corresponding to a given offset.

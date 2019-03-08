@@ -189,10 +189,12 @@ int32_t framePointerOffset();
  * Return a RandomizedFunction object specialized for the current ISA.
  * @param binary a Binary object
  * @param func a function record object
+ * @param maxPadding maximum padding added between fully-randomizable slots
  * @return a RandomizedFunction object
  */
 RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
-                                            const function_record *func);
+                                            const function_record *func,
+                                            size_t maxPadding);
 
 /**
  * Rewrite the child's stack according to the newly-randomized code.
