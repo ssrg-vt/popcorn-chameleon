@@ -80,7 +80,7 @@ static void printHelp(const char *bin) {
        << "  -b FILE : don't randomize functions whose addresses are listed "
           "in the specified file" << endl
        << "  -s FILE : don't transform if thread's stack has frames from call "
-          " sites listed in the specified file" << endl
+          "sites listed in the specified file" << endl
 #ifdef DEBUG_BUILD
        << "  -t FILE : trace execution by dumping PC values to FILE (warning: "
           "slow!)" << endl

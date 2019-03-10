@@ -160,8 +160,13 @@ ret_t Process::waitInternal(bool reinject) {
       if((retval = interrupt()) != ret_t::Success) {
         DEBUGMSG(pid << "'s handler was interrupted, but the handler could "
                  "not interrupt the child" << std::endl);
-        status = Unknown;
-        return retval;
+
+        // Child may have exited/died while we were trying to interrupt it
+        if(status != Exited && status != SignalExit) {
+          status = Unknown;
+          return retval;
+        }
+        else return ret_t::Success;
       }
     }
     else {
