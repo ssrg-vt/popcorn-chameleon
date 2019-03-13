@@ -26,12 +26,12 @@ static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
 extern const char *blacklistFilename;
 extern const char *badSitesFilename; // TODO hack, should remove
+extern const char *identityRandFilename;
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static bool tracing = false;
 static bool traceRegs = false;
 static const char *traceFilename = nullptr;
-extern const char *identityRandFilename;
 static ofstream traceFile;
 bool verboseDebug = false;
 static size_t alarmsRung = 0;
@@ -78,24 +78,21 @@ static void printHelp(const char *bin) {
        << "  -h      : print help and exit" << endl
        << "  -p MS   : re-randomization period in milliseconds" << endl
        << "  -n      : don't randomize the code section" << endl
-       << "  -b FILE : don't randomize functions whose addresses are listed "
-          "in the specified file" << endl
+       << "  -b FILE : don't touch functions whose addresses are listed in "
+          "the specified file (i.e., no analysis or randomization)" << endl
        << "  -s FILE : don't transform if thread's stack has frames from call "
           "sites listed in the specified file" << endl
+       << "  -i FILE : do an identity \"randomization\" for functions whose "
+          "addresses are listed in the specified file *" << endl
 #ifdef DEBUG_BUILD
        << "  -t FILE : trace execution by dumping PC values to FILE (warning: "
           "slow!)" << endl
        << "  -r      : dump registers with trace" << endl
        << "  -d      : print even more debugging information than normal" << endl
-       << "  -i FILE : do an identity \"randomization\" for functions whose "
-          "addresses are listed in the specified file*" << endl
 #endif
-       << "  -v      : print Popcorn Chameleon version and exit" << endl;
-
-#ifdef DEBUG_BUILD
-  cout << endl << "* Users can specify \"all\" as the filename to apply an "
-                  "identity randomization to all functions" << endl;
-#endif
+       << "  -v      : print Popcorn Chameleon version and exit" << endl << endl
+       << "* Users can specify \"all\" as the filename to apply an identity "
+          "identity randomization to all functions" << endl;
 }
 
 static void printChameleonInfo() {
@@ -137,11 +134,11 @@ static void parseArgs(int argc, char **argv) {
     case 'n': randomize = false; break;
     case 'b': blacklistFilename = optarg; break;
     case 's': badSitesFilename = optarg; break; // TODO hack should be removed
+    case 'i': identityRandFilename = optarg; break;
 #ifdef DEBUG_BUILD
     case 't': tracing = true; traceFilename = optarg; break;
     case 'r': traceRegs = true; break;
     case 'd': verboseDebug = true; break;
-    case 'i': identityRandFilename = optarg; break;
 #endif
     case 'v': printChameleonInfo(); exit(0); break;
     }

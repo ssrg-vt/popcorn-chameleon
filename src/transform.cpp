@@ -539,7 +539,7 @@ byte_iterator CodeTransformer::mapInNewStackRegion(uintptr_t childSrcBase,
   code = mapMemory(childDstBase - FOURMB, FOURMB, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
   if(code != ret_t::Success) return byte_iterator::empty();
-  // Don't unmap the original stack region as it contains extra information,
+  // Don't unmap the very first stack region as it contains extra information,
   // e.g., environment variables, auxiliary vector
   if(numRandomizations) {
     code = unmapMemory(childSrcBase - FOURMB, FOURMB);
@@ -1305,9 +1305,7 @@ ret_t CodeTransformer::analyzeFunctions() {
     }
     else funcs.insert(func->addr);
 
-#ifdef DEBUG_BUILD
     if(allIdentityRand) identityRand.insert(func->addr);
-#endif
 
     DEBUGMSG("analyzing function @ " << std::hex << func->addr << ", size = "
              << std::dec << func->code_size << std::endl);
@@ -1336,9 +1334,6 @@ ret_t CodeTransformer::analyzeFunctions() {
 // values which are then used to generate references to 2 or more slots.  This
 // may not be true with increasing optimization levels, see X86OptimizeLEAs.cpp
 // in newer versions of LLVM.
-// TODO 2: references into arrays & structs also include an index and scale
-// operand.  But we're only changing the beginning offset of the slot, so those
-// operands should be okay as-is.  Verify this is true.
 template<int (*NumOp)(instr_t *),
          opnd_t (*GetOp)(instr_t *, unsigned),
          void (*SetOp)(instr_t *, unsigned, opnd_t)>
@@ -1387,7 +1382,8 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     changed = true;
 
     DEBUGMSG_VERBOSE(" -> remap stack offset " << prevOffset << " -> "
-                     << newOffset << std::endl);
+                     << newOffset << " (original: " << origOffset << ")"
+                     << std::endl);
   }
 
   return ret_t::Success;
@@ -1453,12 +1449,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 
   assert(cur && "Invalid code window");
 
-#ifdef DEBUG_BUILD
+  // Randomize the function's layout according to the metadata (or apply
+  // identity randomization for specified functions)
   if(identityRand.count(func->addr)) code = info->resetSlots();
-  else
-#endif
-  // Randomize the function's layout according to the metadata
-  code = info->randomize(rng());
+  else code = info->randomize(rng());
   if(code != ret_t::Success) return code;
 
   // Apply the randomization by rewriting instructions
