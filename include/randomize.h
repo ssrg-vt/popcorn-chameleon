@@ -179,6 +179,11 @@ public:
   virtual void randomize(int start, RandUtil &ru) = 0;
 
   /**
+   * Reset slots to their original locations.
+   */
+  virtual void resetSlots();
+
+  /**
    * Get the average number of bits of entropy, i.e., number of bits required
    * to encode possible locations for slots post-randomization, for slots in
    * the region.
@@ -484,6 +489,12 @@ public:
    * @return a return code describing the outcome
    */
   virtual ret_t randomize(int seed);
+
+  /**
+   * Set all stack elements to their original locations.
+   * @return a return code describing the outcome
+   */
+  virtual ret_t resetSlots();
 
   /**
    * Return the previously-randomized frame size.

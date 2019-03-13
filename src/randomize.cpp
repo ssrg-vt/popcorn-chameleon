@@ -45,6 +45,13 @@ void StackRegion::addSlot(int offset, uint32_t size, uint32_t alignment) {
   slots.emplace_back(std::move(newSlot));
 }
 
+void StackRegion::resetSlots() {
+  sortSlots();
+  for(auto &s : slots) s.randomized = s.original;
+  randomizedOffset = origOffset;
+  randomizedSize = origSize;
+}
+
 int StackRegion::getRandomizedOffset(int orig) {
   int offset = INT32_MAX;
   ssize_t idx = findRight<SlotMap, int, slotMapContains, lessThanSlotMap>
@@ -647,6 +654,35 @@ ret_t RandomizedFunction::randomize(int seed) {
   )
 
   DEBUGMSG("randomized frame size: " << randomizedFrameSize << std::endl);
+
+  return ret_t::Success;
+}
+
+ret_t RandomizedFunction::resetSlots() {
+  size_t i;
+
+  DEBUGMSG("setting slots to original offsets" << std::endl);
+
+  std::swap(prevRand, curRand);
+  memcpy(&prevSortedByRand[0], &prevRand->at(0),
+         sizeof(SlotMap) * prevSortedByRand.size());
+  std::sort(prevSortedByRand.begin(), prevSortedByRand.end(), slotMapCmpRand);
+
+  i = 0;
+  for(auto r = regions.begin(); r != regions.end(); r++) {
+    (*r)->resetSlots();
+    i = serializeSlots((*r), *curRand, i);
+  }
+  prevRandFrameSize = randomizedFrameSize;
+  randomizedFrameSize = func->frame_size;
+
+  DEBUG(
+    for(auto slot : *curRand)
+      DEBUGMSG("  slot mapping: " << slot.original << " - " << slot.randomized
+               << std::endl);
+  )
+
+  DEBUGMSG("frame size (original): " << randomizedFrameSize << std::endl);
 
   return ret_t::Success;
 }

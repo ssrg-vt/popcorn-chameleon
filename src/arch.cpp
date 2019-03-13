@@ -293,6 +293,14 @@ public:
     )
   }
 
+  /**
+   * Reset the callee-saved registers to their original locations.
+   */
+  virtual void resetSlots() override {
+    StackRegion::resetSlots();
+    sortRegisterSaveLocs();
+  }
+
   virtual double entropy(int start, size_t maxPadding) const override {
     size_t size;
     double bits;
@@ -919,14 +927,12 @@ public:
              &r->getSlots()[0],
              sizeof(SlotMap) * nslots);
 
-      DEBUG_VERBOSE(
-        DEBUGMSG_VERBOSE("updated "
-                         << x86RegionName[REGION_TYPE(r->getFlags())]
-                         << " region slots:" << std::endl);
-        for(auto &sm : r->getSlots()) {
-          DEBUGMSG_VERBOSE("  " << sm.original << " -> " << sm.randomized
-                           << std::endl);
-        }
+      DEBUG(
+        DEBUGMSG("updated " << x86RegionName[REGION_TYPE(r->getFlags())]
+                 << " region slots:" << std::endl);
+        for(auto &sm : r->getSlots())
+          DEBUGMSG("  " << sm.original << " -> " << sm.randomized
+                   << std::endl);
       )
     }
 

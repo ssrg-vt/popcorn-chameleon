@@ -33,17 +33,9 @@ namespace chameleon {
 class CodeTransformer {
 public:
   /**
-   * Initialize data required by all CodeTransformer objects.  If non-null,
-   * open the blacklist file and populate with addresses of functions that will
-   * not be randomized.
-   *
-   * @param blacklistFilename file containing addresses of functions which
-   *                          should not be randomized
-   * @param badSitesFilename file containing call site addresses known to cause
-   *                         problems and hence should be avoided
+   * Initialize data required by all CodeTransformer objects.
    */
-  static void globalInitialize(const char *blacklistFilename,
-                               const char *badSitesFilename);
+  static void globalInitialize();
 
   /**
    * Construct a code transformer for a given process.  Does not initialize the

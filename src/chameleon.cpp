@@ -24,17 +24,18 @@ static int childArgc;
 static char **childArgv;
 static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
-static const char *blacklistFilename = nullptr;
-static const char *badSitesFilename = nullptr; // TODO hack, should remove
+extern const char *blacklistFilename;
+extern const char *badSitesFilename; // TODO hack, should remove
 #ifdef DEBUG_BUILD
 pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
 static bool tracing = false;
 static bool traceRegs = false;
 static const char *traceFilename = nullptr;
+extern const char *identityRandFilename;
 static ofstream traceFile;
 bool verboseDebug = false;
 static size_t alarmsRung = 0;
-bool doRerandomize = false;
+static bool doRerandomize = false;
 #endif
 
 // Some helpful typedefs to safely wrap pointers & make ADTs bearable
@@ -86,8 +87,15 @@ static void printHelp(const char *bin) {
           "slow!)" << endl
        << "  -r      : dump registers with trace" << endl
        << "  -d      : print even more debugging information than normal" << endl
+       << "  -i FILE : do an identity \"randomization\" for functions whose "
+          "addresses are listed in the specified file*" << endl
 #endif
        << "  -v      : print Popcorn Chameleon version and exit" << endl;
+
+#ifdef DEBUG_BUILD
+  cout << endl << "* Users can specify \"all\" as the filename to apply an "
+                  "identity randomization to all functions" << endl;
+#endif
 }
 
 static void printChameleonInfo() {
@@ -117,7 +125,7 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hp:nb:s:t:rdv")) != -1) {
+  while((c = getopt(argc, argv, "hp:nb:s:t:rdi:v")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
@@ -133,6 +141,7 @@ static void parseArgs(int argc, char **argv) {
     case 't': tracing = true; traceFilename = optarg; break;
     case 'r': traceRegs = true; break;
     case 'd': verboseDebug = true; break;
+    case 'i': identityRandFilename = optarg; break;
 #endif
     case 'v': printChameleonInfo(); exit(0); break;
     }
@@ -571,7 +580,7 @@ int main(int argc, char **argv) {
   code = child.forkAndExec();
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
-  CodeTransformer::globalInitialize(blacklistFilename, badSitesFilename);
+  CodeTransformer::globalInitialize();
   CodeTransformer transformer(child, *binary);
   code = transformer.initialize(randomize);
   if(code != ret_t::Success)

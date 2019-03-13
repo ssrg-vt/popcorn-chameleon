@@ -200,65 +200,63 @@ void *randomizeCodeAsync(void *arg) {
 // CodeTransformer implementation
 ///////////////////////////////////////////////////////////////////////////////
 
-// TODO badSites should be removed
-static std::unordered_set<uintptr_t> blacklist, badSites;
+// Functions to be skipped during analysis & randomization
+const char *blacklistFilename = nullptr;
+static std::unordered_set<uintptr_t> blacklist;
 
-void CodeTransformer::globalInitialize(const char *blacklistFilename,
-                                       const char *badSitesFilename) {
+// Functions that shouldn't be randomized - perform a identity "randomization"
+bool allIdentityRand = false; // all functions use identity randomization
+const char *identityRandFilename = nullptr;
+static std::unordered_set<uintptr_t> identityRand;
+
+// TODO hack, badSitesFilename & badSites should be removed
+const char *badSitesFilename = nullptr;
+static std::unordered_set<uintptr_t> badSites;
+
+static void parseAddrsInFile(const char *filename,
+                             std::unordered_set<uintptr_t> &addrs,
+                             const char *msg) {
   uintptr_t addr;
+  std::ifstream fs(filename);
 
+  if(fs.is_open()) {
+    std::string line;
+    while(std::getline(fs, line)) {
+      if(line.empty()) continue;
+      try {
+        addr = std::stoul(line, nullptr, 16);
+        DEBUGMSG(msg << " 0x" << std::hex << addr << std::endl);
+        addrs.insert(addr);
+      } catch(std::invalid_argument& ia) {
+        DEBUG(WARN("Skipping invalid address '" << line << "'" << std::endl));
+      } catch(std::out_of_range &oor) {
+        DEBUG(WARN("Address " << line << " out of range" << std::endl));
+      }
+    }
+    DEBUGMSG(msg << " " << addrs.size() << " address(es)" << std::endl);
+  }
+  else DEBUG(WARN("Could not open file '" << filename << "'" << std::endl));
+}
+
+void CodeTransformer::globalInitialize() {
   arch::setInterruptInstructions(intPage);
 
-  // Read in addresses of functions (in hex) which should *not* be randomized
-  if(blacklistFilename) {
-    std::ifstream fs(blacklistFilename);
-    if(fs.is_open()) {
-      std::string line;
-      while(std::getline(fs, line)) {
-        if(line.empty()) continue;
-        try {
-          addr = std::stoul(line, nullptr, 16);
-          blacklist.insert(addr);
-        } catch(std::invalid_argument& ia) {
-          DEBUG(WARN("Skipping invalid function address '" << line << "'"
-                     << std::endl));
-        } catch(std::out_of_range &oor) {
-          DEBUG(WARN("Function address " << line << " out of range"
-                     << std::endl));
-        }
-      }
-      DEBUGMSG("blacklisted " << blacklist.size() << " function(s)"
-               << std::endl);
+  // Read in addresses that require special handling
+  if(blacklistFilename) parseAddrsInFile(blacklistFilename, blacklist, "blacklisting");
+  if(identityRandFilename) {
+    // Check if the user specified that all functions should use an identity
+    // randomization
+    std::string all("all");
+    if(all.compare(identityRandFilename))
+      parseAddrsInFile(identityRandFilename, identityRand,
+                       "using identity randomization for");
+    else {
+      DEBUGMSG("applying identity randomization to all functions" << std::endl);
+      allIdentityRand = true;
     }
-    else DEBUG(WARN("Could not open blacklist file '" << blacklistFilename
-                    << "'" << std::endl));
   }
-
-  // TODO this should be removed
-  // Read in addresses of bad call sites
-  if(badSitesFilename) {
-    std::ifstream fs(badSitesFilename);
-    if(fs.is_open()) {
-      std::string line;
-      while(std::getline(fs, line)) {
-        if(line.empty()) continue;
-        try {
-          addr = std::stoul(line, nullptr, 16);
-          badSites.insert(addr);
-        } catch(std::invalid_argument& ia) {
-          DEBUG(WARN("Skipping invalid bad site address '" << line << "'"
-                     << std::endl));
-        } catch(std::out_of_range &oor) {
-          DEBUG(WARN("Bad site address " << line << " out of range"
-                     << std::endl));
-        }
-      }
-      DEBUGMSG("banishing " << badSites.size() << " bad site(s)"
-               << std::endl);
-    }
-    else DEBUG(WARN("Could not open bad site file '" << badSitesFilename
-                    << "'" << std::endl));
-  }
+  // TODO hack, this should be removed
+  if(badSitesFilename) parseAddrsInFile(badSitesFilename, badSites, "banishing");
 }
 
 ret_t CodeTransformer::initialize(bool randomize) {
@@ -1211,8 +1209,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     if((TTy = getTransformType(func->addr,
                                func->addr + func->code_size,
                                instr)) != RandomizedFunction::None) {
-      DEBUGMSG_VERBOSE(" -> transformation point (0x" << std::hex
-                       << (uintptr_t)real << ")" << std::endl);
+      DEBUGMSG_VERBOSE(" -> transformation point" << std::endl);
       info->addTransformAddr((uintptr_t)real, TTy);
     }
 
@@ -1303,6 +1300,10 @@ ret_t CodeTransformer::analyzeFunctions() {
       continue;
     }
     else funcs.insert(func->addr);
+
+#ifdef DEBUG_BUILD
+    if(allIdentityRand) identityRand.insert(func->addr);
+#endif
 
     DEBUGMSG("analyzing function @ " << std::hex << func->addr << ", size = "
              << std::dec << func->code_size << std::endl);
@@ -1448,6 +1449,10 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 
   assert(cur && "Invalid code window");
 
+#ifdef DEBUG_BUILD
+  if(identityRand.count(func->addr)) code = info->resetSlots();
+  else
+#endif
   // Randomize the function's layout according to the metadata
   code = info->randomize(rng());
   if(code != ret_t::Success) return code;
