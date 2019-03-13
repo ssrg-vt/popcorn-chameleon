@@ -539,8 +539,12 @@ byte_iterator CodeTransformer::mapInNewStackRegion(uintptr_t childSrcBase,
   code = mapMemory(childDstBase - FOURMB, FOURMB, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
   if(code != ret_t::Success) return byte_iterator::empty();
-  code = unmapMemory(childSrcBase - FOURMB, FOURMB);
-  if(code != ret_t::Success) return byte_iterator::empty();
+  // Don't unmap the original stack region as it contains extra information,
+  // e.g., environment variables, auxiliary vector
+  if(numRandomizations) {
+    code = unmapMemory(childSrcBase - FOURMB, FOURMB);
+    if(code != ret_t::Success) return byte_iterator::empty();
+  }
   return byte_iterator(rawBuf + (2 * FOURMB) - stackSize, stackSize);
 }
 
