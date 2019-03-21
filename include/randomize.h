@@ -463,6 +463,13 @@ public:
   void setInstructions(instrlist_t *instrs) { this->instrs = instrs; }
 
   /**
+   * Return a stack region's name or none if it doesn't have one.
+   * @param a stack region
+   * @param the region's name or nullptr if it doesn't have one
+   */
+  virtual const char *getRegionName(const StackRegionPtr &r) const = 0;
+
+  /**
    * Add a randomization restriction for a slot.
    * @param res slot and restriction information
    * @return a return code describing the outcome

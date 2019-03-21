@@ -403,7 +403,8 @@ double PermutableRegion::entropy(int start, size_t maxPadding) const {
     }
     totalLocs += locs * sizeClass.second;
   }
-  return entropyBits((double)totalLocs / (double)slots.size());
+  if(totalLocs) return entropyBits((double)totalLocs / (double)slots.size());
+  else return 0;
 }
 
 void RandomizableRegion::randomize(int start, RandUtil &ru) {
@@ -431,7 +432,7 @@ double RandomizableRegion::entropy(int start, size_t maxPadding) const {
   double avg = 0.0;
 
   for(auto &s : slots)
-    avg += entropyBits(permuteLocs +
+    avg += entropyBits(permuteLocs *
                        ROUND_UP(maxPadding, s.alignment) / s.alignment);
   return avg / (double)slots.size();
 }
@@ -605,10 +606,16 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     if(!verifySlots(*curRand)) return ret_t::AnalysisFailed;
 
     int offset = 0;
+    double entBits;
     for(const auto &r : regions) {
       offset = std::max(offset, r->getMinStartingOffset());
-      DEBUGMSG("bits of entropy: " << r->entropy(offset, maxPadding)
-               << std::endl);
+      entBits = r->entropy(offset, maxPadding);
+      const char *regName = getRegionName(r);
+      if(regName) {
+        DEBUGMSG("bits of entropy (" << regName << "): " << entBits << " for "
+                 << r->numSlots() << " slot(s)" << std::endl);
+      }
+      else DEBUGMSG("bits of entropy: " << entBits << std::endl);
       offset = r->getOriginalOffset();
     }
   )

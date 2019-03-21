@@ -24,11 +24,12 @@ static int childArgc;
 static char **childArgv;
 static bool randomize = true;
 static uint64_t randomizePeriod = 0; /* in milliseconds */
+static size_t maxPadding = 128;
 extern const char *blacklistFilename;
 extern const char *badSitesFilename; // TODO hack, should remove
 extern const char *identityRandFilename;
 #ifdef DEBUG_BUILD
-pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t logLock;
 static bool tracing = false;
 static bool traceRegs = false;
 static const char *traceFilename = nullptr;
@@ -77,6 +78,7 @@ static void printHelp(const char *bin) {
        << "Options:" << endl
        << "  -h      : print help and exit" << endl
        << "  -p MS   : re-randomization period in milliseconds" << endl
+       << "  -m PAD  : maximum amount of padding to add between slots" << endl
        << "  -n      : don't randomize the code section" << endl
        << "  -b FILE : don't touch functions whose addresses are listed in "
           "the specified file (i.e., no analysis or randomization)" << endl
@@ -122,7 +124,7 @@ static void parseArgs(int argc, char **argv) {
   argv[i] = nullptr;
 
   // Parse arguments up until the delimiter
-  while((c = getopt(argc, argv, "hp:nb:s:t:rdi:v")) != -1) {
+  while((c = getopt(argc, argv, "hp:m:nb:s:t:rdi:v")) != -1) {
     switch(c) {
     default: break;
     case 'h': printHelp(argv[0]); exit(0); break;
@@ -130,6 +132,11 @@ static void parseArgs(int argc, char **argv) {
       randomizePeriod = strtoul(optarg, &end, 10);
       if(end == optarg)
         ERROR("invalid randomization period '" << optarg << "'" << endl);
+      break;
+    case 'm':
+      maxPadding = strtoul(optarg, &end, 10);
+      if(end == optarg)
+        ERROR("invalid maximum slot padding '" << optarg << "'" << endl);
       break;
     case 'n': randomize = false; break;
     case 'b': blacklistFilename = optarg; break;
@@ -495,7 +502,7 @@ static void *forkedChildLoop(void *p) {
 
   // Initialize transformation machinery.  Note that we don't have to re-map
   // child's code - the re-mapped VMA should be inherited from the parent.
-  CodeTransformer transformer(*child, *binary);
+  CodeTransformer transformer(*child, *binary, 1, maxPadding);
   code = transformer.initializeFromExisting(*args->parentCT, randomize);
   if(code != ret_t::Success) {
     DEBUGMSG(cpid << ": could not set up code transformer" << endl);
@@ -551,6 +558,11 @@ int main(int argc, char **argv) {
               << strerror(errno) << endl);
     }
     printChameleonInfo();
+
+    // Make the log lock recursive so that we can have nested DEBUG statements
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&logLock, &attr);
   )
 
   t.end();
@@ -578,7 +590,7 @@ int main(int argc, char **argv) {
   if(code != ret_t::Success)
     ERROR("could not set up child for tracing: " << retText(code) << endl);
   CodeTransformer::globalInitialize();
-  CodeTransformer transformer(child, *binary);
+  CodeTransformer transformer(child, *binary, 1, maxPadding);
   code = transformer.initialize(randomize);
   if(code != ret_t::Success)
     ERROR("could not set up state transformer: " << retText(code) << endl);

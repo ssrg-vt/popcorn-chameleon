@@ -302,15 +302,15 @@ public:
   }
 
   virtual double entropy(int start, size_t maxPadding) const override {
-    size_t size;
+    size_t size = slots.size();
     double bits;
 
-    if(slots.size() <= 2) return 0.0;
-
     // TODO return address & saved FBP are currently not randomizable
-    size = slots.size();
+    if(size <= 2) return 0.0;
     bits = entropyBits(size - 2);
-    return (bits * (double)(size - 2)) / (double)size;
+    DEBUGMSG("bits of entropy (callee-save without SP/FBP): " << bits
+             << " for " << size - 2 << " slot(s)" << std::endl);
+    return (double)(bits * (size - 2)) / (double)size;
   }
 
   /**
@@ -496,6 +496,9 @@ public:
 
     DEBUGMSG(" -> maximum frame size: " << maxFrameSize << std::endl);
   }
+
+  virtual const char *getRegionName(const StackRegionPtr &r) const override
+  { return x86RegionName[REGION_TYPE(r->getFlags())]; }
 
   virtual ret_t addRestriction(const RandRestriction &res) override {
     bool foundSlot = false;
