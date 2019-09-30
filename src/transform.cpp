@@ -1149,7 +1149,8 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
   for(i = 0; i < NumOp(instr); i++) {
     op = GetOp(instr, i);
     offset = getStackOffset(frameSize, op, type);
-    if(offset && arch::getRestriction(instr, op, res)) {
+    if(offset && arch::getRestriction(instr, op, offset, res)) {
+      res.base = arch::getRegTypeDR(opnd_get_base(op));
       res.offset = offset;
       if((code = info->addRestriction(res)) != ret_t::Success) return code;
     }
@@ -1250,7 +1251,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                          << " (current size = " << frameSize + update << ")"
                          << std::endl);
 
-        if(arch::getStackUpdateRestriction(instr, update, res)) {
+        if(arch::getFrameUpdateRestriction(instr, update, res)) {
           // If growing the frame, the referenced slot includes the update
           // whereas if we're shrinking the frame it doesn't.
           offset = (update > 0) ? update : 0;
@@ -1377,7 +1378,7 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     }
 
     regOffset = slotOffsetFromRegister(randFrameSize, type, newOffset);
-    opnd_set_disp_ex(&op, regOffset, false, false, false);
+    opnd_set_disp_ex(&op, regOffset, false, true, false);
     SetOp(instr, i, op);
     changed = true;
 
