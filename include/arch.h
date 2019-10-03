@@ -275,8 +275,8 @@ reg_id_t getDRRegType(enum RegType reg);
 int32_t getFrameUpdateSize(instr_t *instr);
 
 /**
- * Get slot restrictions, if any, for a base + displacement operand. Sets the
- * flag, base register & displacement in res if there are any restrictions.
+ * Get slot restrictions, if any, for a base + displacement operand.  Sets the
+ * necessary information in res if there are any restrictions.
  *
  * @param instr the instruction
  * @param op the operand from the instruction
@@ -291,14 +291,17 @@ bool getRestriction(instr_t *instr,
 
 /**
  * Get offset restrictions, if any, for an instruction which updates the stack
- * frame size.
+ * frame size.  Sets the necessary information in res if there are any
+ * restrictions.
  *
  * @param instr the instruction
+ * @param frameSize the current frame size before applying the frame update
  * @param update size & direction of the update
  * @param res output operand populated with any restrictions
  * @return true if there is a restriction for the instruction or false if not
  */
 bool getFrameUpdateRestriction(instr_t *instr,
+                               int32_t frameSize,
                                int32_t update,
                                RandRestriction &res);
 

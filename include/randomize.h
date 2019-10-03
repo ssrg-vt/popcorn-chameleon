@@ -404,12 +404,19 @@ public:
  * Struct containing information about randomization restrictions for a slot.
  */
 struct RandRestriction {
-  int offset; /* canonicalized stack offset identifying the slot */
   int32_t flags; /* ISA-specific flags - see details in arch.cpp */
+  int offset; /* canonicalized stack offset identifying the slot */
   uint32_t size, alignment; /* size & alignment of slot */
   uint16_t base; /* base register or UINT16_MAX if no restriction */
   range_t range; /* offset restriction */
 };
+
+struct DisasmInstr {
+  app_pc addr;
+  instr_t instr;
+};
+
+typedef std::vector<DisasmInstr> InstrList;
 
 /*
  * This class is virtual and must be inherited by an ISA-specific child class
@@ -431,8 +438,6 @@ public:
                      const function_record *func,
                      size_t maxPadding);
   RandomizedFunction(const RandomizedFunction &rhs, MemoryWindow &mw);
-  ~RandomizedFunction()
-  { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
    * Deep copy the randomized function.
@@ -458,9 +463,10 @@ public:
    * instructions.  Users can modify the instructions (including
    * adding/removing instructions) but *must not* delete the list itself.
    */
-  const instrlist_t *getInstructions() const { return instrs; }
-  instrlist_t *getInstructions() { return instrs; }
-  void setInstructions(instrlist_t *instrs) { this->instrs = instrs; }
+  const InstrList &getInstructions() const { return instrs; }
+  InstrList &getInstructions() { return instrs; }
+  void setInstructions(InstrList &&instrs)
+  { this->instrs = std::move(instrs); }
 
   /**
    * Return a stack region's name or none if it doesn't have one.
@@ -623,7 +629,7 @@ protected:
   const function_record *func;
 
   /* Disassembled instructions */
-  instrlist_t *instrs;
+  InstrList instrs;
 
   /* Maximum size of frame */
   uint32_t maxFrameSize;
