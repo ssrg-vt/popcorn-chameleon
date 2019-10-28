@@ -485,33 +485,41 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
     transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
     _b(rhs._b), seen(rhs.seen), randomizedFrameSize(rhs.randomizedFrameSize),
     maxPadding(rhs.maxPadding) {
-  // Deep copy the instructions and point raw bits to the new code buffer
-  if(rhs.instrs.size()) {
+  // Copy the instructions and point raw bits to the new code buffer
+  if(!rhs.instrs.empty()) {
     size_t instrSize;
     byte_iterator funcData = mw.getData(func->addr);
-    byte *cur = funcData[0], *end = cur + func->code_size;
+    byte *cur, *end;
     instrs = rhs.instrs;
 
-    assert(cur && "Copying from invalid RandomizedFunction");
+    assert(funcData[0] && "Copying from invalid RandomizedFunction");
 
-    auto rhsInstrIt = rhs.instrs.begin();
-    for(auto instrIt = instrs.begin(), e = instrs.end();
-        instrIt != e;
-        instrIt++, rhsInstrIt++) {
-      instr_t *instr = &instrIt->instr;
-      // TODO Technically instr_length() can modify the instruction, which
-      // means we shouldn't call it on rhs's instructions (since it's
-      // const-qualified).  However, we should *never* disassemble instructions
-      // here (hence the assertion that instr_raw_bits_valid() == true).
-      instr_t *rhsInstr = (instr_t*)&rhsInstrIt->instr;
-      assert(instr && rhsInstr && "Invalid function copy");
-      assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
+    auto rhsRunIt = rhs.instrs.begin();
+    for(auto runIt = instrs.begin(), re = instrs.end();
+        runIt != re;
+        runIt++, rhsRunIt++) {
+      cur = funcData[0] + (runIt->startAddr - (byte *)func->addr);
+      auto rhsInstrIt = rhsRunIt->instrs.begin();
+      for(auto instrIt = runIt->instrs.begin(), ie = runIt->instrs.end();
+          instrIt != ie;
+          instrIt++, rhsInstrIt++) {
+        instr_t *instr = &*instrIt;
+        // TODO Technically instr_length() can modify the instruction, which
+        // means we shouldn't call it on rhs's instructions (since it's
+        // const-qualified).  However, we should *never* disassemble
+        // instructions here (hence the assertion that instr_raw_bits_valid()
+        // == true).  This hack throws away the const to get the length.
+        instr_t *rhsInstr = (instr_t *)&*rhsInstrIt;
+        assert(instr && rhsInstr && "Invalid function copy");
+        assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
 
-      instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
-      instr_set_raw_bits(instr, cur, instrSize);
-      cur += instrSize;
+        instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
+        instr_set_raw_bits(instr, cur, instrSize);
+        cur += instrSize;
+      }
+      end = funcData[0] + (runIt->endAddr - (byte *)func->addr);
+      assert(cur == end && "Invalid deep instruction copy");
     }
-    assert(cur == end && "Invalid deep instruction copy");
   }
 
   if(rhs.curRand == &rhs._a) {

@@ -1017,6 +1017,15 @@ reg_id_t arch::getDRRegType(enum RegType reg) {
   }
 }
 
+bool arch::shouldKeepForRandomization(instr_t *instr) {
+  switch(instr_get_opcode(instr)) {
+  // Keep nops around because Popcorn's compiler may have inserted them for
+  // Chameleon to add new instructions
+  case OP_nop: return true;
+  default: return false;
+  }
+}
+
 /**
  * Return the immediate value used with the stack pointer in a math operation.
  * @param instr the instruction

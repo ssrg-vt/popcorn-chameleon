@@ -875,22 +875,29 @@ restore:
 
 instr_t *
 CodeTransformer::getInstruction(uintptr_t pc, RandomizedFunction *info) const {
-  uintptr_t start;
   const function_record *fr;
 
   assert(info && "Invalid randomization information object");
   fr = info->getFunctionRecord();
   if(!funcContains(fr, pc)) return nullptr;
 
-  start = fr->addr;
-  auto instr = info->getInstructions().begin();
-  while(instr != info->getInstructions().end() && start < pc) {
-    start += instr_length(GLOBAL_DCONTEXT, &instr->instr);
-    instr++;
+  auto run = info->getInstructions().begin(),
+       end = info->getInstructions().end();
+  for(; run != end; run++) {
+    if(run->startAddr <= (app_pc)pc && (app_pc)pc <= run->endAddr) {
+      break;
+    }
   }
-  if(start != pc) return nullptr;
+  if(run == end) return nullptr;
 
-  return &instr->instr;
+  // TODO verify the instruction has the app pc set
+  for(auto& instr : run->instrs) {
+    if((app_pc)pc == instr_get_app_pc(&instr)) {
+      return &instr;
+    }
+  }
+
+  return nullptr;
 }
 
 ret_t CodeTransformer::writeCodePage(uintptr_t start) const {
@@ -1138,7 +1145,8 @@ template<int (*NumOp)(instr_t *),
          opnd_t (*GetOp)(instr_t *, unsigned)>
 ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
                                        uint32_t frameSize,
-                                       instr_t *instr) {
+                                       instr_t *instr,
+                                       bool &wouldRandomize) {
   int i, offset;
   opnd_t op;
   arch::RegType type;
@@ -1148,8 +1156,11 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
   for(i = 0; i < NumOp(instr); i++) {
     op = GetOp(instr, i);
     offset = getStackOffset(frameSize, op, type);
-    if(offset && arch::getRestriction(instr, op, offset, res)) {
-      if((code = info->addRestriction(res)) != ret_t::Success) return code;
+    if(offset) {
+      wouldRandomize = true;
+      if(arch::getRestriction(instr, op, offset, res)) {
+        if((code = info->addRestriction(res)) != ret_t::Success) return code;
+      }
     }
   }
 
@@ -1157,6 +1168,7 @@ ret_t CodeTransformer::analyzeOperands(RandomizedFunctionPtr &info,
 }
 
 ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
+  bool wouldRandomize;
   int32_t update;
   uint32_t frameSize = arch::initialFrameSize(),
            maxFrameSize = arch::initialFrameSize();
@@ -1165,7 +1177,8 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   byte_iterator funcData = codeWindow.getData(func->addr);
   byte *real = (byte *)func->addr, *cur = funcData[0], *prev,
        *end = cur + func->code_size;
-  InstrList instrs;
+  SparseInstrList instrs;
+  InstructionRun curInstrRun;
   instr_t *instr;
   reg_id_t drsp;
   RandRestriction res;
@@ -1188,17 +1201,15 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   // instr_create() allocates the instruction on DynamoRIO's heap; the info
   // object will be given ownership of the instructions after analysis and will
   // free them as needed.
+  curInstrRun.startAddr = real;
   drsp = arch::getDRRegType(arch::RegType::StackPointer);
   while(cur < end) {
-    instrs.emplace_back();
-    instr = &instrs.back().instr;
+    curInstrRun.instrs.emplace_back();
+    instr = &curInstrRun.instrs.back();
     instr_init(GLOBAL_DCONTEXT, instr);
     prev = cur;
     cur = decode_from_copy(GLOBAL_DCONTEXT, cur, real, instr);
-    if(!cur) {
-      code = ret_t::AnalysisFailed;
-      goto out;
-    }
+    if(!cur) return ret_t::AnalysisFailed;
     instrSize = cur - prev;
     instr_set_raw_bits(instr, prev, instrSize); // TODO figure out way to remove
 
@@ -1227,12 +1238,15 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
       frameSize = maxFrameSize;
     }
 
+    wouldRandomize = false;
     code = analyzeOperands<instr_num_srcs, instr_get_src>
-                          (info, frameSize, instr);
-    if(code != ret_t::Success) goto out;
+                          (info, frameSize, instr, wouldRandomize);
+    if(code != ret_t::Success) return code;
     code = analyzeOperands<instr_num_dsts, instr_get_dst>
-                          (info, frameSize, instr);
-    if(code != ret_t::Success) goto out;
+                          (info, frameSize, instr, wouldRandomize);
+    if(code != ret_t::Success) return code;
+
+    wouldRandomize |= arch::shouldKeepForRandomization(instr);
 
     // Keep track of current frame size as it's expanded (prologue) and shrunk
     // (epilogue) to determine offsets for operands in subsequent instructions.
@@ -1246,11 +1260,35 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                          << std::endl);
 
         if(arch::getFrameUpdateRestriction(instr, frameSize, update, res)) {
-          if((code = info->addRestriction(res)) != ret_t::Success) goto out;
+          if((code = info->addRestriction(res)) != ret_t::Success) return code;
         }
+        wouldRandomize = true;
         frameSize += update;
         maxFrameSize = std::max(frameSize, maxFrameSize);
       }
+    }
+
+    // The current run (if non-empty) is finished since the current instruction
+    // won't be randomized.  Close this run and set up the next one.
+    if(!wouldRandomize) {
+      curInstrRun.instrs.pop_back();
+      if(!curInstrRun.empty()) {
+        curInstrRun.endAddr = real;
+        instrs.emplace_back(std::move(curInstrRun));
+      }
+      curInstrRun.startAddr = real;
+    }
+  }
+
+  // Add the last run if non-empty
+  if(wouldRandomize) {
+    curInstrRun.endAddr = real;
+    instrs.emplace_back(std::move(curInstrRun));
+  } else {
+    curInstrRun.instrs.pop_back();
+    if(!curInstrRun.empty()) {
+      curInstrRun.endAddr = real;
+      instrs.emplace_back(std::move(curInstrRun));
     }
   }
 
@@ -1263,8 +1301,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                << std::endl);
   )
 
-out:
-  if(code == ret_t::Success) info->setInstructions(std::move(instrs));
+  info->setInstructions(std::move(instrs));
   return code;
 }
 
@@ -1381,15 +1418,15 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
  * Compare original instructions to transformed version and print any size
  * differences.
  *
- * @param pointer to real address of original instructions
- * @param pointer to starting address of original instructions
- * @param pointer to ending address of original instructions
+ * @param real pointer to real address of original instructions
+ * @param start pointer to starting address of original instructions
+ * @param end pointer to ending address of original instructions
  * @param transformedInstrs transformed instructions
  */
 static void compareInstructions(byte *real,
                                 byte *start,
                                 byte *end,
-                                InstrList &transformedInstrs) {
+                                std::vector<instr_t> &transformedInstrs) {
   int origLen, transLen;
   instr_t orig;
   byte *prev;
@@ -1407,10 +1444,9 @@ static void compareInstructions(byte *real,
     origLen = start - prev;
     instr_set_raw_bits(&orig, prev, origLen);
     real += origLen;
-    transLen = instr_length(GLOBAL_DCONTEXT, &trans->instr);
+    transLen = instr_length(GLOBAL_DCONTEXT, &*trans);
     if(transLen != origLen) {
-      DEBUGMSG_INSTR("Changed size: " << transLen << " bytes, ",
-                     &trans->instr);
+      DEBUGMSG_INSTR("Changed size: " << transLen << " bytes, ", &*trans);
       DEBUGMSG_INSTR("              " << origLen << " bytes, ", &orig);
     }
     trans++;
@@ -1429,12 +1465,12 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
   size_t count = 0;
   const function_record *func = info->getFunctionRecord();
   byte_iterator funcData = buffer.getData(func->addr);
-  byte *real = (byte *)func->addr, *cur = funcData[0], *prev;
-  InstrList &instrs = info->getInstructions();
+  byte *real, *cur, *prev;
+  SparseInstrList &instrs = info->getInstructions();
   reg_id_t drsp;
   ret_t code;
 
-  assert(cur && "Invalid code window");
+  assert(funcData[0] && "Invalid code window");
 
   // Randomize the function's layout according to the metadata (or apply
   // identity randomization for specified functions)
@@ -1444,117 +1480,126 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
 
   // Apply the randomization by rewriting instructions
   drsp = arch::getDRRegType(arch::RegType::StackPointer);
-  for(auto instrIt = instrs.begin(), e = instrs.end();
-      instrIt != e;
-      instrIt++) {
-    changed = false;
-    instr_t *instr = &instrIt->instr;
-    assert(instr_raw_bits_valid(instr) && "Bits not set");
-    instrSize = instr_length(GLOBAL_DCONTEXT, instr);
+  for(auto instrRunIt = instrs.begin(), runEnd = instrs.end();
+      instrRunIt != runEnd;
+      instrRunIt++) {
+    real = instrRunIt->startAddr;
+    cur = funcData[0] + (instrRunIt->startAddr - (byte *)func->addr);
 
-    DEBUG_VERBOSE(
-      DEBUGMSG_INSTR(std::hex << (uintptr_t)real << " size = " << std::dec
-                     << std::setw(2) << instrSize << " ", instr);
-    )
-
-    // See frame size cleanup comment in analyzeFunction()
-    if(!frameSize) {
-      DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
-                       "to " << maxFrameSize << " (previous), "
-                       << maxRandFrameSize << " (current)" << std::endl);
-      frameSize = maxFrameSize;
-      randFrameSize = maxRandFrameSize;
-    }
-
-    // Rewrite stack slot reference operands to their randomized locations
-    code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
-                            (info, frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) return code;
-    code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
-                            (info, frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) return code;
-
-    // Allow each ISA-specific randomized function to have its way
-    code = info->transformInstr(frameSize, randFrameSize, instr, changed);
-    if(code != ret_t::Success) return code;
-
-    // Keep track of stack pointer updates & rewrite frame update instructions
-    // with randomized size
-    // TODO this logic should be moved into arch.cpp and a function should only
-    // return the frame update/randomized frame update size
-    if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
-      update = arch::getFrameUpdateSize(instr);
-      if(update) {
-        offset = (update > 0) ? update : 0;
-        offset = canonicalizeSlotOffset(frameSize + offset,
-                                        arch::RegType::StackPointer, 0);
-        if(info->isBulkFrameUpdate(instr, offset) &&
-           offset <= (int)info->getPrevRandFrameSize()) {
-          offset = info->getRandomizedBulkFrameUpdate();
-          offset = update > 0 ? offset : -offset;
-          code = arch::rewriteFrameUpdate(instr, offset, changed);
-          if(code != ret_t::Success) return code;
-          randFrameSize += offset;
-
-          DEBUGMSG_VERBOSE(" -> rewrite frame update: " << update << " -> "
-                           << offset << std::endl);
-        }
-        else randFrameSize += update;
-        frameSize += update;
-        maxFrameSize = std::max(frameSize, maxFrameSize);
-        maxRandFrameSize = std::max(randFrameSize, maxRandFrameSize);
-      }
-    }
-
-    // If we changed anything, re-encode the instruction.  Note that
-    // randomization *may* change the size of individual instructions; the net
-    // code size *must* be identical.
-    if(changed) {
-      // The instruction's raw bits are currently pointing to the last version
-      // of the buffer.  We need to do the following things:
-      //
-      //   1. Point the instruction's raw bits to the current buffer and mark
-      //      them as invalid so that DynamoRIO *actually* re-encodes them
-      //   2. Encode the changed instruction into the new buffer
-      //   3. Point the instruction's raw bits back to the new buffer (which
-      //      sets them as valid), because apparently re-encoding does not do
-      //      this (probably because we're encoding to a copy).
-      //
-      // The last task is required because at the next randomization when we
-      // call instr_length() above, if the bits are not marked valid DynamoRIO
-      // will re-encode the instruction (potentially in a different format) and
-      // may change the instruction's size.
-      prev = cur;
-      instr_set_raw_bits(instr, cur, instrSize);
-      instr_set_raw_bits_valid(instr, false);
-      cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
-      if(!cur) {
-        WARN("re-encoding changed instruction failed" << std::endl);
-        return ret_t::RandomizeFailed;
-      }
-      instr_set_raw_bits(instr, prev, cur - prev);
+    for(auto instrIt = instrRunIt->instrs.begin(), e = instrRunIt->instrs.end();
+        instrIt != e;
+        instrIt++) {
+      changed = false;
+      instr_t *instr = &*instrIt;
+      assert(instr_raw_bits_valid(instr) && "Bits not set");
+      instrSize = instr_length(GLOBAL_DCONTEXT, instr);
 
       DEBUG_VERBOSE(
-        if(instrSize != (cur - prev))
-          DEBUGMSG_VERBOSE(" -> changed size of instruction: " << instrSize
-                           << " vs. " << (cur - prev) << std::endl);
-        DEBUGMSG_INSTR(" -> rewrote: ", instr)
-      );
+        DEBUGMSG_INSTR(std::hex << (uintptr_t)real << " size = " << std::dec
+                       << std::setw(2) << instrSize << " ", instr);
+      )
 
-      count++;
-      instrSize = cur - prev;
+      // See frame size cleanup comment in analyzeFunction()
+      if(!frameSize) {
+        DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
+                         "to " << maxFrameSize << " (previous), "
+                         << maxRandFrameSize << " (current)" << std::endl);
+        frameSize = maxFrameSize;
+        randFrameSize = maxRandFrameSize;
+      }
+
+      // Rewrite stack slot reference operands to their randomized locations
+      code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
+                              (info, frameSize, randFrameSize, instr, changed);
+      if(code != ret_t::Success) return code;
+      code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
+                              (info, frameSize, randFrameSize, instr, changed);
+      if(code != ret_t::Success) return code;
+
+      // Allow each ISA-specific randomized function to have its way
+      code = info->transformInstr(frameSize, randFrameSize, instr, changed);
+      if(code != ret_t::Success) return code;
+
+      // Keep track of stack pointer updates & rewrite frame update instructions
+      // with randomized size
+      // TODO this logic should be moved into arch.cpp and a function should only
+      // return the frame update/randomized frame update size
+      if(instr_writes_to_reg(instr, drsp, DR_QUERY_DEFAULT)) {
+        update = arch::getFrameUpdateSize(instr);
+        if(update) {
+          offset = (update > 0) ? update : 0;
+          offset = canonicalizeSlotOffset(frameSize + offset,
+                                          arch::RegType::StackPointer, 0);
+          if(info->isBulkFrameUpdate(instr, offset) &&
+             offset <= (int)info->getPrevRandFrameSize()) {
+            offset = info->getRandomizedBulkFrameUpdate();
+            offset = update > 0 ? offset : -offset;
+            code = arch::rewriteFrameUpdate(instr, offset, changed);
+            if(code != ret_t::Success) return code;
+            randFrameSize += offset;
+
+            DEBUGMSG_VERBOSE(" -> rewrite frame update: " << update << " -> "
+                             << offset << std::endl);
+          }
+          else randFrameSize += update;
+          frameSize += update;
+          maxFrameSize = std::max(frameSize, maxFrameSize);
+          maxRandFrameSize = std::max(randFrameSize, maxRandFrameSize);
+        }
+      }
+
+      // If we changed anything, re-encode the instruction.  Note that
+      // randomization *may* change the size of individual instructions; the net
+      // code size *must* be identical.
+      if(changed) {
+        // The instruction's raw bits are currently pointing to the last version
+        // of the buffer.  We need to do the following things:
+        //
+        //   1. Point the instruction's raw bits to the current buffer and mark
+        //      them as invalid so that DynamoRIO *actually* re-encodes them
+        //   2. Encode the changed instruction into the new buffer
+        //   3. Point the instruction's raw bits back to the new buffer (which
+        //      sets them as valid), because apparently re-encoding does not do
+        //      this (probably because we're encoding to a copy).
+        //
+        // The last task is required because at the next randomization when we
+        // call instr_length() above, if the bits are not marked valid DynamoRIO
+        // will re-encode the instruction (potentially in a different format) and
+        // may change the instruction's size.
+        prev = cur;
+        instr_set_raw_bits(instr, cur, instrSize);
+        instr_set_raw_bits_valid(instr, false);
+        cur = instr_encode_to_copy(GLOBAL_DCONTEXT, instr, cur, real);
+        if(!cur) {
+          WARN("re-encoding changed instruction failed" << std::endl);
+          return ret_t::RandomizeFailed;
+        }
+        instr_set_raw_bits(instr, prev, cur - prev);
+
+        DEBUG_VERBOSE(
+          if(instrSize != (cur - prev))
+            DEBUGMSG_VERBOSE(" -> changed size of instruction: " << instrSize
+                             << " vs. " << (cur - prev) << std::endl);
+          DEBUGMSG_INSTR(" -> rewrote: ", instr)
+        );
+
+        count++;
+        instrSize = cur - prev;
+      }
+      else cur += instrSize;
+      real += instrSize;
     }
-    else cur += instrSize;
-    real += instrSize;
-  }
 
-  if((uintptr_t)real != (func->addr + func->code_size)) {
-    WARN("changed size of function's instructions, ended with 0x" << std::hex
-         << (uintptr_t)real << " but expected 0x"
-         << (uintptr_t)(func->addr + func->code_size) << std::endl);
-    DEBUG(compareInstructions((byte *)func->addr, funcData[0],
-                              funcData[0] + func->code_size, instrs));
-    return ret_t::RandomizeFailed;
+    if(real != instrRunIt->endAddr) {
+      WARN("changed size of run's instructions, ended with 0x" << std::hex
+           << (uintptr_t)real << " but expected 0x"
+           << (uintptr_t)instrRunIt->endAddr << std::endl);
+      DEBUG(compareInstructions(real,
+                funcData[0] + (instrRunIt->startAddr - (byte *)func->addr),
+                funcData[0] + (instrRunIt->endAddr - (byte *)func->addr),
+                instrRunIt->instrs));
+      return ret_t::RandomizeFailed;
+    }
   }
 
   DEBUGMSG("rewrote " << count << " instruction(s)" << std::endl);

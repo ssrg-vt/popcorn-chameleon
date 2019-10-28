@@ -530,12 +530,15 @@ private:
    * @param info randomization information for a function
    * @param frameSize currently calculated frame size
    * @param instr an instruction
+   * @param wouldRandomize output argument set to true if the instruction would
+   * be rewritten during randomization
    * @return a return code describing the outcome
    */
   template<int (*NumOp)(instr_t *), opnd_t (*GetOp)(instr_t *, unsigned)>
   ret_t analyzeOperands(RandomizedFunctionPtr &info,
                         uint32_t frameSize,
-                        instr_t *instr);
+                        instr_t *instr,
+                        bool &wouldRandomize);
 
   /**
    * Disassemble a function's code and analyze for randomization restrictions.

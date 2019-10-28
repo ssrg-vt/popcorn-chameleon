@@ -267,6 +267,16 @@ enum RegType getRegTypeDR(reg_id_t reg);
 reg_id_t getDRRegType(enum RegType reg);
 
 /**
+ * Return whether the analysis pass should keep an instruction even if it
+ * doesn't contain any stack references/updates.
+ *
+ * @param instr the instruction
+ * @return true if the analysis pass should keep the instruction, false
+ * otherwise
+ */
+bool shouldKeepForRandomization(instr_t *instr);
+
+/**
  * Get the amount of space allocated/de-allocated on the stack by an
  * instruction that writes to the stack pointer.
  * @param instr the instruction

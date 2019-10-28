@@ -411,12 +411,40 @@ struct RandRestriction {
   range_t range; /* offset restriction */
 };
 
-struct DisasmInstr {
-  app_pc addr;
-  instr_t instr;
+/**
+ * A list of consecutive disassembled instructions that are to be randomized.
+ * The instructions within the run can change size, but the run itself must
+ * remain the same size.
+ */
+struct InstructionRun {
+  app_pc startAddr, endAddr;
+  std::vector<instr_t> instrs;
+
+  InstructionRun() : startAddr(0), endAddr(0) {}
+  InstructionRun(InstructionRun &&other)
+    : startAddr(other.startAddr), endAddr(other.endAddr),
+      instrs(std::move(other.instrs)) {}
+  InstructionRun(const InstructionRun &other)
+    : startAddr(other.startAddr), endAddr(other.endAddr),
+      instrs(other.instrs) {}
+
+  InstructionRun &operator=(const InstructionRun &other) {
+    startAddr = other.startAddr;
+    endAddr = other.endAddr;
+    instrs = other.instrs;
+    return *this;
+  }
+
+  size_t size() const { return instrs.size(); }
+  bool empty() const { return instrs.empty(); }
 };
 
-typedef std::vector<DisasmInstr> InstrList;
+/**
+ * A sparse list of instructions, containing only those that would be
+ * randomized.  Instructions are organized into runs of consecutive
+ * instructions that would be randomized.
+ */
+typedef std::vector<InstructionRun> SparseInstrList;
 
 /*
  * This class is virtual and must be inherited by an ISA-specific child class
@@ -463,9 +491,9 @@ public:
    * instructions.  Users can modify the instructions (including
    * adding/removing instructions) but *must not* delete the list itself.
    */
-  const InstrList &getInstructions() const { return instrs; }
-  InstrList &getInstructions() { return instrs; }
-  void setInstructions(InstrList &&instrs)
+  const SparseInstrList &getInstructions() const { return instrs; }
+  SparseInstrList &getInstructions() { return instrs; }
+  void setInstructions(SparseInstrList &&instrs)
   { this->instrs = std::move(instrs); }
 
   /**
@@ -628,8 +656,8 @@ protected:
   const Binary &binary;
   const function_record *func;
 
-  /* Disassembled instructions */
-  InstrList instrs;
+  /* Disassembled instructions to be transformed */
+  SparseInstrList instrs;
 
   /* Maximum size of frame */
   uint32_t maxFrameSize;
