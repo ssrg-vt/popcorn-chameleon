@@ -1486,7 +1486,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
     real = instrRunIt->startAddr;
     cur = funcData[0] + (instrRunIt->startAddr - (byte *)func->addr);
 
-    for(auto instrIt = instrRunIt->instrs.begin(), e = instrRunIt->instrs.end();
+    for(auto instrIt = instrRunIt->instrs.begin(),
+             e = instrRunIt->instrs.end();
         instrIt != e;
         instrIt++) {
       changed = false;

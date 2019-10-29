@@ -418,19 +418,25 @@ struct RandRestriction {
  */
 struct InstructionRun {
   app_pc startAddr, endAddr;
+  bool isPrologue, isEpilogue;
   std::vector<instr_t> instrs;
 
-  InstructionRun() : startAddr(0), endAddr(0) {}
+  InstructionRun()
+    : startAddr(0), endAddr(0), isPrologue(false), isEpilogue(false) {}
   InstructionRun(InstructionRun &&other)
     : startAddr(other.startAddr), endAddr(other.endAddr),
+      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
       instrs(std::move(other.instrs)) {}
   InstructionRun(const InstructionRun &other)
     : startAddr(other.startAddr), endAddr(other.endAddr),
+      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
       instrs(other.instrs) {}
 
   InstructionRun &operator=(const InstructionRun &other) {
     startAddr = other.startAddr;
     endAddr = other.endAddr;
+    isPrologue = other.isPrologue;
+    isEpilogue = other.isEpilogue;
     instrs = other.instrs;
     return *this;
   }
@@ -509,6 +515,11 @@ public:
    * @return a return code describing the outcome
    */
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
+
+  /**
+   * Mark the instruction runs that contain the function prologue and epilogue.
+   */
+  virtual ret_t markPrologueAndEpilogue() = 0;
 
   /**
    * Finalize all analysis, including generating any extra information required

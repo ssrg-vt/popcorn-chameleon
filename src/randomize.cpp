@@ -633,7 +633,7 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     }
   )
 
-  return ret_t::Success;
+  return markPrologueAndEpilogue();
 }
 
 ret_t RandomizedFunction::randomize(int seed) {
