@@ -510,6 +510,12 @@ public:
   uint32_t getPrevRandFrameSize() const { return prevRandFrameSize; }
 
   /**
+   * Set the previously-randomized frame size.
+   * @param the previous randomized frame size
+   */
+  void setPrevRandFrameSize(uint32_t prev) { prevRandFrameSize = prev; }
+
+  /**
    * Return the randomized frame size.
    * @return the randomized frame size
    */
@@ -520,6 +526,12 @@ public:
    * @return slot remapping information for previous randomization
    */
   const std::vector<SlotMap> &getPrevRandSlots() const { return *prevRand; }
+
+  /**
+   * Set the slot remapping information from the previous randomization.
+   * @param slot remapping information for previous randomization
+   */
+  void setPrevRandSlots(const std::vector<SlotMap> &prev);
 
   /**
    * Get the the slot remapping information for the current randomization.

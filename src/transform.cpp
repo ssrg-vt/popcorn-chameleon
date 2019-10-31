@@ -307,6 +307,11 @@ ret_t CodeTransformer::initialize(bool randomize) {
 ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
                                               bool randomize) {
   ret_t retcode;
+  struct prevInfo {
+    std::vector<SlotMap> prevRand;
+    uint32_t prevRandFrameSize;
+  };
+  std::unordered_map<uintptr_t, prevInfo> prevRand;
 
   // Copy existing code & randomization information (if requested)
   codeStart = rhs.codeStart;
@@ -319,11 +324,41 @@ ret_t CodeTransformer::initializeFromExisting(CodeTransformer &rhs,
     if(MASK_INT(sem_wait(&rhs.finishedScrambling)))
       return ret_t::SemaphoreFailed;
 
+    // The handoff is a little janky.  We've got original code transformer
+    // "rhs" who's working for the parent and current code transformer "this"
+    // who's working for the child.  The parent is currently executing using
+    // randomization epoch "n" (meaning the child is as well since we've
+    // forked) and that's what we're copying into our code window.  However
+    // rhs's scrambler has generated epoch "n+1", setting the instructions in
+    // the randomized functions (which we're copying) to that epoch.  Thus,
+    // when we kick off this' scrambler, it will generate epoch "n+2"; however,
+    // the child is still executing using epoch "n" and thus has execution
+    // state in that format.  After kicking off our scrambler, manually reset
+    // the previous randomization back to epoch "n".
+
+#ifdef DEBUG_BUILD
+    curStackBase = rhs.curStackBase;
+#endif
     rewriteMetadata = rhs.rewriteMetadata;
     slotPadding = rhs.slotPadding;
-    for(auto &RF : rhs.functions)
+    for(auto &RF : rhs.functions) {
       functions.emplace(RF.first, RF.second->copy(codeWindow));
+      prevInfo &prev = prevRand[RF.first];
+      prev.prevRand = RF.second->getPrevRandSlots();
+      prev.prevRandFrameSize = RF.second->getPrevRandFrameSize();
+    }
     if((retcode = initializeScrambler()) != ret_t::Success) return retcode;
+
+    // TODO separate this out into a separate function that can be called after
+    // returning so that we don't block the parent waiting for the child to
+    // finish its first randomization
+    if(MASK_INT(sem_wait(&finishedScrambling))) return ret_t::SemaphoreFailed;
+    for(auto &F : functions) {
+      prevInfo &prev = prevRand[F.first];
+      F.second->setPrevRandSlots(prev.prevRand);
+      F.second->setPrevRandFrameSize(prev.prevRandFrameSize);
+    }
+    if(sem_post(&finishedScrambling)) return ret_t::SemaphoreFailed;
 
     // We're not actually consuming the other CodeTransformer's randomization -
     // at the next re-randomization, it'll have code ready to go

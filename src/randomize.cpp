@@ -694,6 +694,13 @@ ret_t RandomizedFunction::resetSlots() {
   return ret_t::Success;
 }
 
+void RandomizedFunction::setPrevRandSlots(const std::vector<SlotMap> &prev) {
+  assert(prev.size() == prevSortedByRand.size() && "Invalid remapping");
+  *prevRand = prev;
+  prevSortedByRand = prev;
+  std::sort(prevSortedByRand.begin(), prevSortedByRand.end(), slotMapCmpRand);
+}
+
 /**
  * Return whether the SlotMap contains a given offset.  Uses the slot's
  * randomized offset.
