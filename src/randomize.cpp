@@ -454,7 +454,7 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func,
                                        size_t maxPadding)
-  : binary(binary), func(func), instrs(nullptr), maxFrameSize(UINT32_MAX),
+  : binary(binary), func(func), maxFrameSize(UINT32_MAX),
     prevRandFrameSize(func->frame_size), randomizedFrameSize(func->frame_size),
     maxPadding(maxPadding) {
   int offset;
@@ -485,29 +485,42 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
     transformAddrs(rhs.transformAddrs), slots(rhs.slots), _a(rhs._a),
     _b(rhs._b), seen(rhs.seen), randomizedFrameSize(rhs.randomizedFrameSize),
     maxPadding(rhs.maxPadding) {
-  // Deep copy the instructions and point raw bits to the new code buffer
-  size_t instrSize;
-  if(rhs.instrs) {
+  // Copy the instructions and point raw bits to the new code buffer
+  if(!rhs.instrs.empty()) {
+    size_t instrSize;
     byte_iterator funcData = mw.getData(func->addr);
-    byte *cur = funcData[0], *end = cur + func->code_size;
-    instrs = instrlist_clone(GLOBAL_DCONTEXT, rhs.instrs);
-    instr_t *instr = instrlist_first(instrs),
-            *rhsInstr = instrlist_first(rhs.instrs);
+    byte *cur, *end;
+    instrs = rhs.instrs;
 
-    assert(cur && instr && rhsInstr && "Invalid deep copy of instructions");
+    assert(funcData[0] && "Copying from invalid RandomizedFunction");
 
-    while(cur < end) {
-      assert(instr && rhsInstr && "Invalid function copy");
-      assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
+    auto rhsRunIt = rhs.instrs.begin();
+    for(auto runIt = instrs.begin(), re = instrs.end();
+        runIt != re;
+        runIt++, rhsRunIt++) {
+      cur = funcData[0] + (runIt->startAddr - (byte *)func->addr);
+      auto rhsInstrIt = rhsRunIt->instrs.begin();
+      for(auto instrIt = runIt->instrs.begin(), ie = runIt->instrs.end();
+          instrIt != ie;
+          instrIt++, rhsInstrIt++) {
+        instr_t *instr = &*instrIt;
+        // TODO Technically instr_length() can modify the instruction, which
+        // means we shouldn't call it on rhs's instructions (since it's
+        // const-qualified).  However, we should *never* disassemble
+        // instructions here (hence the assertion that instr_raw_bits_valid()
+        // == true).  This hack throws away the const to get the length.
+        instr_t *rhsInstr = (instr_t *)&*rhsInstrIt;
+        assert(instr && rhsInstr && "Invalid function copy");
+        assert(instr_raw_bits_valid(rhsInstr) && "Bits not set");
 
-      instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
-      instr_set_raw_bits(instr, cur, instrSize);
-      cur += instrSize;
-      instr = instr_get_next(instr);
-      rhsInstr = instr_get_next(rhsInstr);
+        instrSize = instr_length(GLOBAL_DCONTEXT, rhsInstr);
+        instr_set_raw_bits(instr, cur, instrSize);
+        cur += instrSize;
+      }
+      end = funcData[0] + (runIt->endAddr - (byte *)func->addr);
+      assert(cur == end && "Invalid deep instruction copy");
     }
   }
-  else instrs = nullptr;
 
   if(rhs.curRand == &rhs._a) {
     curRand = &_a;
@@ -620,7 +633,7 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     }
   )
 
-  return ret_t::Success;
+  return markPrologueAndEpilogue();
 }
 
 ret_t RandomizedFunction::randomize(int seed) {

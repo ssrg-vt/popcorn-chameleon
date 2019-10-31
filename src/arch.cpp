@@ -185,12 +185,11 @@ int32_t arch::framePointerOffset() { return -16; }
 enum x86Restriction {
   F_None = 0,
   F_Immovable,
-  F_RangeLimited,
   F_CheckCallSlot,
-  F_FrameSizeLimited
+  F_EnsureCallSlot,
 };
 
-#define REGION_TYPE( flags ) (flags & 0xf)
+#define REGION_TYPE( flags ) (flags & 0x3)
 
 /*
  * x86 regions, ordered by highest stack address.  Can be used as an index into
@@ -199,11 +198,7 @@ enum x86Restriction {
  */
 enum x86Region {
   R_CalleeSave = 0,
-  R_FPLimited,
-  R_FPMovableCrossing,
   R_Movable,
-  R_SPMovableCrossing,
-  R_SPLimited,
   R_Call,
   R_Alignment,
 };
@@ -211,11 +206,7 @@ enum x86Region {
 /* x86 region names (corresponds to indexs above) */
 const char *x86RegionName[] {
   "callee-save",
-  "FP-limited",
-  "FP-limited/movable crossing",
   "movable",
-  "SP-limited/movable crossing",
-  "SP-limited",
   "call",
   "alignment",
 };
@@ -360,25 +351,7 @@ private:
  * |                       | v
  * |-----------------------|
  * |                       | ^
- * |    FP-limited area    | | Permutable
- * |                       | v
- * |-----------------------|
- * |                       | ^
- * |  FP-limited/Movable   | | Immutable
- * |     Crossing area     | |
- * |                       | v
- * |-----------------------|
- * |                       | ^
  * |     Movable area      | | Randomizable
- * |                       | v
- * |-----------------------|
- * |                       | ^
- * |  SP-limited/Movable   | | Immutable
- * |     Crossing area     | |
- * |                       | v
- * |-----------------------|
- * |                       | ^
- * |    SP-limited area    | | Permutable
  * |                       | v
  * |-----------------------|
  * |                       | ^
@@ -396,14 +369,9 @@ private:
  * - Most compilers emit callee-saved register save/restore procedures as a
  *   series of push/pop instructions; the ordering of this procedure can be
  *   permuted but not fully randomized
- * - x86-64 allows 1-byte displacement encodings for base + displacement memory
- *   references; the displacement for these objects cannot fall outside
- *   -128 <-> 127 (as it will increase the encoding size), so the FP-limited
- *   and SP-limited stack slots are only permutable and not fully randomizable
- * - Slots may cross movable and FP/SP-limited regions; these slots must remain
- *   at their original locations as changing the offset may create different
- *   encoding sizes for different parts of the slot, e.g., one part of the slot
- *   in the FP-limited moved to the movable area
+ * - Arguments passed on the stack are placed according to the x86-64 calling
+ *   convention and cannot be randomized because the called function expects
+ *   the arguments in a certain order.
  *
  * Note: we don't move stack objects between their original regions as it may
  * create incorrect behavior.  For example, moving a stack slot from the
@@ -437,9 +405,9 @@ public:
 
       DEBUG(
         if(offset < 0)
-          DEBUG(WARN("Callee-save location for register " << loc->reg
-                     << " is outside frame - offset from the stack pointer?"
-                     << std::endl));
+          WARN("Callee-save location for register " << loc->reg
+               << " is outside frame - offset from the stack pointer?"
+               << std::endl);
       )
     }
     cs->setOffset(regionSize);
@@ -468,14 +436,10 @@ public:
 
     // Add x86-specific regions ordered by highest stack address first.
     regions.push_back(StackRegionPtr(cs));
-    // Offsets in FP-limited region limited to 1 byte, limit max region offset
-    regions.emplace_back(new PermutableRegion(x86Region::R_FPLimited, 0, 144));
-    regions.emplace_back(new ImmutableRegion(x86Region::R_FPMovableCrossing));
-    // Don't spill into the FP-limited region; due to randomization we may
+    // Don't spill into the callee-saved region; due to randomization we may
     // shrink offset encodings to smaller sizes and change the size of code
-    regions.emplace_back(new RandomizableRegion(x86Region::R_Movable, 144));
-    regions.emplace_back(new ImmutableRegion(x86Region::R_SPMovableCrossing));
-    regions.emplace_back(new PermutableRegion(x86Region::R_SPLimited));
+    regions.emplace_back(
+      new RandomizableRegion(x86Region::R_Movable, regionSize));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Call));
     regions.emplace_back(new ImmutableRegion(x86Region::R_Alignment));
   }
@@ -489,14 +453,6 @@ public:
 
   virtual uint32_t getFrameAlignment() const override { return alignment; }
 
-  void setMaxFrameSize() {
-    assert(regions.size() && "Invalid x86 frame");
-    const StackRegionPtr &cs = regions[x86Region::R_CalleeSave];
-    maxFrameSize = ROUND_DOWN(cs->getOriginalOffset() + INT8_MAX, alignment);
-
-    DEBUGMSG(" -> maximum frame size: " << maxFrameSize << std::endl);
-  }
-
   virtual const char *getRegionName(const StackRegionPtr &r) const override
   { return x86RegionName[REGION_TYPE(r->getFlags())]; }
 
@@ -506,13 +462,6 @@ public:
     uint32_t size = res.size, alignment = res.alignment;
     ret_t code = ret_t::Success;
     std::pair<int, const stack_slot *> slot;
-
-    // Frame size restrictions are handled separately, as they don't apply to
-    // any particular slot
-    if(res.flags == x86Restriction::F_FrameSizeLimited) {
-      setMaxFrameSize();
-      return ret_t::Success;
-    }
 
     // Convert offsets to their containing slots, if any, so that we can avoid
     // adding multiple restrictions for the same slot (e.g., different offsets
@@ -552,42 +501,26 @@ public:
       else DEBUGMSG(" -> callee-saved register @ " << offset << " (size = "
                     << size << ")" << std::endl);
       break;
-    case x86Restriction::F_RangeLimited:
-      switch(res.base) {
-      case arch::RegType::FramePointer:
-        assert(foundSlot && "Invalid frame pointer restriction");
-        if(offset <= regions[x86Region::R_FPLimited]->getMaxOffset()) {
-          regions[x86Region::R_FPLimited]->addSlot(offset, size, alignment);
-          DEBUGMSG(" -> slot @ " << offset
-                   << " limited to 1-byte displacements from FP" << std::endl);
-        }
-        else {
-          regions[x86Region::R_FPMovableCrossing]->addSlot(offset,
-                                                           size,
-                                                           alignment);
-          DEBUGMSG(" -> slot @ " << offset << " is immovable, crosses "
-                   "FP-limited & movable regions" << std::endl);
-        }
-        break;
-      case arch::RegType::StackPointer:
-        // The metadata doesn't contain slot information for the call area
-        if(foundSlot) {
-          regions[x86Region::R_SPLimited]->addSlot(offset, size, alignment);
-          DEBUGMSG(" -> slot @ " << offset
-                   << " limited to 1-byte displacements from SP" << std::endl);
-        }
-        else {
-          regions[x86Region::R_Call]->addSlot(offset, 0, 0);
-          DEBUGMSG(" -> call-area slot @ " << offset << std::endl);
-        }
-        break;
-      default: code = ret_t::AnalysisFailed; break;
-      }
-      break;
     case x86Restriction::F_CheckCallSlot:
+      // The metadata doesn't contain slot information for the call area
       if(!foundSlot) {
         regions[x86Region::R_Call]->addSlot(offset, 0, 0);
         DEBUGMSG(" -> call-area slot @ " << offset << std::endl);
+      }
+      break;
+    case x86Restriction::F_EnsureCallSlot:
+      // Similar to F_CheckCallSlot except the offset *must* correspond to a
+      // call slot -- the instruction had an operand that cannot be randomized.
+      // This happens when the compiler elides inserting bytes for a zero
+      // offset in the base + offset operand.
+      if(!foundSlot) {
+        regions[x86Region::R_Call]->addSlot(offset, 0, 0);
+        DEBUGMSG(" -> call-area slot @ " << offset << std::endl);
+      }
+      else {
+        WARN(" -> slot @ " << offset << " cannot be randomized because "
+             << "compiler didn't insert bytes for offset" << std::endl);
+        code = ret_t::AnalysisFailed;
       }
       break;
     default:
@@ -612,58 +545,6 @@ public:
         r->addSlot(s.first, slot->size, slot->alignment);
         DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
                  << ") is in " << x86RegionName[x86Region::R_Movable]
-                 << " region" << std::endl);
-      }
-    }
-  }
-
-  /**
-   * Put slots not found to have any restrictions into permutable regions.
-   * Because we detected a restriction on the maximum frame size (bulk frame
-   * update only uses 1 byte), we cannot put the remaining slots into the
-   * movable region (randomization may cause frame size to balloon where frame
-   * allocation instructions change size).  Instead, put the remaining slots in
-   * permutable regions to stay within the frame size limitation.
-   */
-  void populateWithRestrictions() {
-#ifdef DEBUG_BUILD
-    int region;
-#endif
-
-    // To avoid increasing the frame size past what's allocatable within a
-    // single byte, convert the movable region (which adds padding) into a
-    // permutable region.
-    StackRegion *newMov = new PermutableRegion(x86Region::R_Movable, 144);
-    regions[x86Region::R_Movable].reset(newMov);
-
-    DEBUGMSG("changed movable to permutable region to stay within maximum "
-             "frame size" << std::endl);
-
-    // To avoid accidentally forcing a larger encoding for the bulk frame
-    // update, put slots in the FP-limited region.  For slots outside of this
-    // region (see comment above), put into the newly-converted movable region.
-    // TODO this doesn't handle SP-limited slots
-    StackRegionPtr &fpLimited = regions[x86Region::R_FPLimited],
-                   &crossing = regions[x86Region::R_FPMovableCrossing],
-                   &movable = regions[x86Region::R_Movable];
-    for(auto &s : slots) {
-      if(!seen.count(s.first)) {
-        const stack_slot *slot = s.second;
-        if(s.first <= 144) {
-          fpLimited->addSlot(s.first, slot->size, slot->alignment);
-          DEBUG(region = x86Region::R_FPLimited);
-        }
-        else if((int)(s.first - slot->size) < 144) {
-          crossing->addSlot(s.first, slot->size, slot->alignment);
-          DEBUG(region = x86Region::R_FPMovableCrossing);
-        }
-        else {
-          movable->addSlot(s.first, slot->size, slot->alignment);
-          DEBUG(region = x86Region::R_Movable);
-        }
-
-        DEBUGMSG(" -> slot @ " << s.first << " (size = " << slot->size
-                 << ") is in " << x86RegionName[region]
                  << " region" << std::endl);
       }
     }
@@ -706,15 +587,17 @@ public:
         // slot extends until the preceding slot).
         if(REGION_TYPE(region->getFlags()) != x86Region::R_Alignment) {
           assert(bubble >= 0 && "Overlapping regions");
-          if(bubble && REGION_TYPE(region->getFlags()) != x86Region::R_Call)
-            DEBUGMSG(" -> bubble: " << curOffset << " - "
-                     << top.original - top.size << std::endl);
+          DEBUG(
+            if(bubble && REGION_TYPE(region->getFlags()) != x86Region::R_Call)
+              DEBUGMSG(" -> bubble: " << curOffset << " - "
+                       << top.original - top.size << std::endl);
+          );
         }
       )
 
       // Extend the preceding region to cover the bubble.  Note that it's
-      // possible to have a negative bubble with the alignment region; just
-      // ignore for now.
+      // possible to have a negative bubble with the alignment region (due to
+      // overlaps); just ignore for now.
       if(bubble > 0 &&
          REGION_TYPE(regions[i-1]->getFlags()) != x86Region::R_CalleeSave &&
          REGION_TYPE(region->getFlags()) != x86Region::R_Call) {
@@ -755,7 +638,7 @@ public:
     if(REGION_TYPE(alignRegion->getFlags()) != x86Region::R_Alignment) return;
 
     assert(regions.size() > 1 && "Invalid stack regions");
-    assert(regions.back()->numSlots() == 1 && "Invalid alignment region");
+    assert(alignRegion->numSlots() == 1 && "Invalid alignment region");
 
     // TODO can the alignment overlap more than one region?
     StackRegionPtr &prevRegion = regions[regions.size() - 2];
@@ -802,27 +685,24 @@ public:
     size_t i, j;
     int curOffset;
 
-    // The regions sizes for SP-based offsets may have been artificially
+    // The region sizes for SP-based offsets may have been artificially
     // inflated due to frame alignment restrictions
     for(i = regions.size() - 1; i > 0; i--) {
       StackRegionPtr &region = regions[i];
-      if(REGION_TYPE(region->getFlags()) != x86Region::R_SPLimited &&
-         REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
+      if(REGION_TYPE(region->getFlags()) != x86Region::R_Call) break;
 
       // We didn't know sizes of call region slots during analysis but now that
       // we've seen all slots, fix those up here
-      if(REGION_TYPE(region->getFlags()) == x86Region::R_Call) {
-        assert(i > 0 && "Invalid stack frame regions");
-        std::vector<SlotMap> &callSlots = region->getSlots();
-        curOffset = regions[i - 1]->getOriginalOffset();
-        for(j = 0; j < callSlots.size(); j++) {
-          callSlots[j].size = callSlots[j].original - curOffset;
-          callSlots[j].alignment = std::min<int>(callSlots[j].size, 8);
-          curOffset = callSlots[j].original;
-        }
-        assert(curOffset == region->getOriginalOffset() &&
-               "Invalid slot sizes for call region");
+      assert(i > 0 && "Invalid stack frame regions");
+      std::vector<SlotMap> &callSlots = region->getSlots();
+      curOffset = regions[i - 1]->getOriginalOffset();
+      for(j = 0; j < callSlots.size(); j++) {
+        callSlots[j].size = callSlots[j].original - curOffset;
+        callSlots[j].alignment = std::min<int>(callSlots[j].size, 8);
+        curOffset = callSlots[j].original;
       }
+      assert(curOffset == region->getOriginalOffset() &&
+             "Invalid slot sizes for call region");
 
       const SlotMap &first = region->getSlots().front();
       region->setSize(region->getOriginalOffset() -
@@ -835,57 +715,45 @@ public:
     }
   }
 
-  /**
-   * Analyze the FP-limited region to see if we can expand the bounds to give
-   * the permutation algorithm some room to work.
-   */
-  void fixupFPLimitedRegion() {
-    int32_t diff, curOffset;
+  virtual ret_t markPrologueAndEpilogue() override {
+    bool foundPrologue = false, foundEpilogue = false;
 
-    if(regions.size() > 1 &&
-       REGION_TYPE(regions[1]->getFlags()) == x86Region::R_FPLimited) {
-      StackRegionPtr &fpLimited = regions[1];
-      if(regions.size() > 2) {
-        // See if there's space between us and the next region to grow
-        const SlotMap &top = regions[2]->getSlots().front();
-        diff = top.original - top.size - fpLimited->getOriginalOffset();
-        assert(diff >= 0 && "FP-limited region overlaps next region");
-        if(!diff) return;
-
-        // Make sure we don't exceed our 1-byte limitation
-        curOffset = std::min(fpLimited->getOriginalOffset() + diff, 144);
-        diff = curOffset - fpLimited->getOriginalOffset();
-        assert(diff >= 0 && "Invalid FP-limited region bounds calculation");
-        if(!diff) return;
-
-        fpLimited->setSize(fpLimited->getOriginalSize() + diff);
-        fpLimited->setOffset(fpLimited->getOriginalOffset() + diff);
-        DEBUGMSG("expanded FP-limited region to offset "
-                 << fpLimited->getOriginalOffset() << std::endl);
+    for(auto &instrRun : instrs) {
+      bool isPrologue = false, isEpilogue = false;
+      for(auto &instr : instrRun.instrs) {
+        if(isCalleeSavePush(instr)) isPrologue = true;
+        if(isCalleeSavePop(instr)) isEpilogue = true;
       }
-      else {
-        curOffset = std::min<int>(maxFrameSize, 144);
-        fpLimited->setOffset(curOffset);
-        fpLimited->setSize(curOffset - regions[0]->getOriginalOffset());
-        DEBUGMSG("expanded FP-limited region to offset " << curOffset
-                 << std::endl);
-      }
+      instrRun.isPrologue = isPrologue;
+      instrRun.isEpilogue = isEpilogue;
+
+      foundPrologue |= isPrologue;
+      foundEpilogue |= isEpilogue;
+      DEBUG(
+        if(isPrologue)
+          DEBUGMSG("prologue at 0x" << std::hex << instrRun.startAddr
+                   << " - 0x" << instrRun.endAddr << std::endl);
+        if(isEpilogue)
+          DEBUGMSG("epilogue at 0x" << std::hex << instrRun.startAddr
+                   << " - 0x" << instrRun.endAddr << std::endl);
+      )
     }
+
+    if(foundPrologue && foundEpilogue) return ret_t::Success;
+    else return ret_t::AnalysisFailed;
   }
 
   virtual ret_t finalizeAnalysis() override {
     uint32_t frameSize;
 
     // Put the slots for which we did not detect a restriction into sections
-    if(maxFrameSize == UINT32_MAX) populateMovable();
-    else populateWithRestrictions();
+    populateMovable();
 
     // Calculate section offsets & prune empty sections.
     regions[0]->sortSlots();
     calculateRegionOffsets(1);
     fixupAlignmentRegion();
     fixupCallRegion();
-    fixupFPLimitedRegion(); // *Must* happen after fixupCallRegion()
 
     // Leaf functions don't necessarily need to abide by alignment restrictions
     if(!ALIGNED(func->frame_size, 16)) {
@@ -913,12 +781,10 @@ public:
     // Due to alignment restrictions, we may have increased the frame size,
     // invalidating previously-calculated SP-based offsets.  Update to account
     // for the new size.
-    // TODO this is incorrect for SP-limited offsets
     start = randomizedFrameSize;
     slotIdx = curRand->size();
     for(i = regions.size() - 1; i >= 0; i--) {
-      if(REGION_TYPE(regions[i]->getFlags()) != x86Region::R_SPLimited &&
-         REGION_TYPE(regions[i]->getFlags()) != x86Region::R_Call) break;
+      if(REGION_TYPE(regions[i]->getFlags()) != x86Region::R_Call) break;
 
       StackRegionPtr &r = regions[i];
       if(start == r->getRandomizedOffset()) break;
@@ -971,9 +837,7 @@ public:
     const StackRegionPtr *region = findRegion(offset);
     if(region) {
       regionType = REGION_TYPE((*region)->getFlags());
-      if(regionType == x86Region::R_FPLimited ||
-         regionType == x86Region::R_Movable ||
-         regionType == x86Region::R_SPLimited) return true;
+      if(regionType == x86Region::R_Movable) return true;
     }
     return false;
   }
@@ -1002,6 +866,50 @@ public:
 
 private:
   uint32_t alignment;
+
+  /**
+   * Return whether the instruction is pushing a callee-saved register onto the
+   * stack.
+   *
+   * @param instr instruction to check
+   * @return true if the instruction is pushing a callee-saved register onto
+   * the stack or false otherwise
+   */
+  bool isCalleeSavePush(instr_t& instr) {
+    switch(instr_get_opcode(&instr)) {
+    case OP_push:
+      assert(opnd_is_reg(instr_get_src(&instr, 0)));
+      switch(opnd_get_reg(instr_get_src(&instr, 0))) {
+      case DR_REG_RBX: case DR_REG_RSP: case DR_REG_RBP: case DR_REG_R12:
+      case DR_REG_R13: case DR_REG_R14: case DR_REG_R15:
+        return true;
+      default: return false;
+      }
+    default: return false;
+    }
+  }
+
+  /**
+   * Return whether the instruction is popping a callee-saved register onto the
+   * stack.
+   *
+   * @param instr instruction to check
+   * @return true if the instruction is popping a callee-saved register onto
+   * the stack or false otherwise
+   */
+  bool isCalleeSavePop(instr_t& instr) {
+    switch(instr_get_opcode(&instr)) {
+    case OP_pop:
+      assert(opnd_is_reg(instr_get_dst(&instr, 0)));
+      switch(opnd_get_reg(instr_get_dst(&instr, 0))) {
+      case DR_REG_RBX: case DR_REG_RSP: case DR_REG_RBP: case DR_REG_R12:
+      case DR_REG_R13: case DR_REG_R14: case DR_REG_R15:
+        return true;
+      default: return false;
+      }
+    default: return false;
+    }
+  }
 
   /**
    * Rewrite prologue/epilogue push/pop sequences according to the randomized
@@ -1181,6 +1089,15 @@ reg_id_t arch::getDRRegType(enum RegType reg) {
   }
 }
 
+bool arch::shouldKeepForRandomization(instr_t *instr) {
+  switch(instr_get_opcode(instr)) {
+  // Keep nops around because Popcorn's compiler may have inserted them for
+  // Chameleon to add new instructions
+  case OP_nop: return true;
+  default: return false;
+  }
+}
+
 /**
  * Return the immediate value used with the stack pointer in a math operation.
  * @param instr the instruction
@@ -1194,7 +1111,11 @@ static int32_t stackPointerMathImm(instr_t *instr) {
 
   for(int i = 0; i < instr_num_srcs(instr); i++) {
     op = instr_get_src(instr, i);
-    if(opnd_is_immed_int(op)) update = opnd_get_immed_int(op);
+    if(opnd_is_immed_int(op)) {
+      assert(CodeTransformer::getOperandSize(op) == 4 &&
+             "compiler didn't encode stack pointer math immediate in 4 bytes");
+      update = opnd_get_immed_int(op);
+    }
     else if(opnd_is_reg(op)) {
       // Ensure the register operand is the stack pointer
       if(opnd_get_reg(op) != DR_REG_XSP) {
@@ -1238,12 +1159,28 @@ int32_t arch::getFrameUpdateSize(instr_t *instr) {
 
 #define WITHIN_BYTE( val ) (INT8_MIN <= disp && disp <= INT8_MAX)
 
-bool
-arch::getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res) {
-  bool restricted = false;
-  int disp;
-  arch::RegType base;
+#if DEBUG_BUILD
+/**
+ * Double check that the compiler emitted 4-byte displacements for a base+disp
+ * operand.
+ *
+ * @param op An operand to check.
+ * @return true if the displacement is encoded in 4 bytes, false otherwise.
+ */
+static inline bool isDisplacement4Bytes(const opnd_t &op) {
+  assert(opnd_is_base_disp(op) && "invalid operand");
+  int disp = opnd_get_disp(op);
+  if(WITHIN_BYTE(disp)) {
+    return opnd_is_disp_force_full(op);
+  }
+  else return true;
+}
+#endif
 
+bool arch::getRestriction(instr_t *instr,
+                          const opnd_t &op,
+                          int offset,
+                          RandRestriction &res) {
   switch(instr_get_opcode(instr)) {
   // Push/pop instructions look like restricted frame references, but they're
   // also frame updates; handle separately in getStackUpdateRestriction()
@@ -1263,55 +1200,52 @@ arch::getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res) {
   // TODO if moving YMM/ZMM registers to/from the stack, do we need to increase
   // alignment to 32 or 64 bytes, respectively?
 
-  // Because x86-64 is so darn flexible, the compiler can encode
-  // displacements with varying sizes depending on the range
-  disp = opnd_get_disp(op);
-  base = arch::getRegTypeDR(opnd_get_base(op));
+  // Popcorn's compiler forces 4-byte displacements, but SP-offset slots still
+  // need to be checked to see if they're argument marshalling for a call (and
+  // thus immovable).
+  arch::RegType base = arch::getRegTypeDR(opnd_get_base(op));
   switch(base) {
-  case RegType::FramePointer:
-    if(WITHIN_BYTE(dsp) && !opnd_is_disp_force_full(op)) {
-      res.flags = x86Restriction::F_RangeLimited;
-      res.base = base;
-      restricted = true;
-    }
-    break;
   case RegType::StackPointer:
-    if(WITHIN_BYTE(disp) && !opnd_is_disp_force_full(op)) {
-      res.flags = x86Restriction::F_RangeLimited;
-      res.base = base;
+    res.base = base;
+    res.offset = offset;
+    if(opnd_get_disp(op) != 0) {
+      assert(isDisplacement4Bytes(op) &&
+             "compiler didn't encode small displacement with 4 bytes");
+      res.flags = x86Restriction::F_CheckCallSlot;
     }
-    // Even if not range restricted, need to check if its a call-area slot
-    else res.flags = x86Restriction::F_CheckCallSlot;
-    restricted = true;
+    else res.flags = x86Restriction::F_EnsureCallSlot;
+    return true;
     break;
-  default:
-    assert(false && "Invalid base register for stack slot");
-    break;
+  case RegType::FramePointer:
+    assert(isDisplacement4Bytes(op) &&
+           "compiler didn't encode small displacement with 4 bytes");
+    // fall through
+  default: return false;
   }
-
-  return restricted;
 }
 
-bool arch::getStackUpdateRestriction(instr_t *instr,
+bool arch::getFrameUpdateRestriction(instr_t *instr,
+                                     int32_t frameSize,
                                      int32_t update,
                                      RandRestriction &res) {
+  int32_t offset;
+
   assert(instr_writes_to_reg(instr, getDRRegType(RegType::StackPointer),
                              DR_QUERY_DEFAULT) &&
          "Invalid stack update instruction");
 
   switch(instr_get_opcode(instr)) {
   case OP_push: case OP_pushf: case OP_pop: case OP_popf:
+    // If growing the frame, the referenced slot includes the update whereas if
+    // we're shrinking the frame it doesn't.
+    offset = (update > 0) ? update : 0;
+    offset = CodeTransformer::canonicalizeSlotOffset(frameSize + update,
+                                                     RegType::StackPointer,
+                                                     0);
+    res.offset = offset;
+    res.alignment = res.size = abs(update);
     res.flags = x86Restriction::F_Immovable;
     return true;
-  case OP_sub: case OP_add:
-    // Although the frame size may be larger than a byte's range, if the update
-    // to the stack pointer itself is within the byte range then we must limit
-    // the randomized frame size
-    if((INT8_MIN + 1) <= update && update <= INT8_MAX) {
-      res.flags = x86Restriction::F_FrameSizeLimited;
-      return true;
-    }
-    /* fall through */
   default: return false;
   }
 }

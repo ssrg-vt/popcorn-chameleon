@@ -404,12 +404,53 @@ public:
  * Struct containing information about randomization restrictions for a slot.
  */
 struct RandRestriction {
-  int offset; /* canonicalized stack offset identifying the slot */
   int32_t flags; /* ISA-specific flags - see details in arch.cpp */
+  int offset; /* canonicalized stack offset identifying the slot */
   uint32_t size, alignment; /* size & alignment of slot */
   uint16_t base; /* base register or UINT16_MAX if no restriction */
   range_t range; /* offset restriction */
 };
+
+/**
+ * A list of consecutive disassembled instructions that are to be randomized.
+ * The instructions within the run can change size, but the run itself must
+ * remain the same size.
+ */
+struct InstructionRun {
+  app_pc startAddr, endAddr;
+  bool isPrologue, isEpilogue;
+  std::vector<instr_t> instrs;
+
+  InstructionRun()
+    : startAddr(0), endAddr(0), isPrologue(false), isEpilogue(false) {}
+  InstructionRun(InstructionRun &&other)
+    : startAddr(other.startAddr), endAddr(other.endAddr),
+      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
+      instrs(std::move(other.instrs)) {}
+  InstructionRun(const InstructionRun &other)
+    : startAddr(other.startAddr), endAddr(other.endAddr),
+      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
+      instrs(other.instrs) {}
+
+  InstructionRun &operator=(const InstructionRun &other) {
+    startAddr = other.startAddr;
+    endAddr = other.endAddr;
+    isPrologue = other.isPrologue;
+    isEpilogue = other.isEpilogue;
+    instrs = other.instrs;
+    return *this;
+  }
+
+  size_t size() const { return instrs.size(); }
+  bool empty() const { return instrs.empty(); }
+};
+
+/**
+ * A sparse list of instructions, containing only those that would be
+ * randomized.  Instructions are organized into runs of consecutive
+ * instructions that would be randomized.
+ */
+typedef std::vector<InstructionRun> SparseInstrList;
 
 /*
  * This class is virtual and must be inherited by an ISA-specific child class
@@ -431,8 +472,6 @@ public:
                      const function_record *func,
                      size_t maxPadding);
   RandomizedFunction(const RandomizedFunction &rhs, MemoryWindow &mw);
-  ~RandomizedFunction()
-  { if(instrs) instrlist_clear_and_destroy(GLOBAL_DCONTEXT, instrs); }
 
   /**
    * Deep copy the randomized function.
@@ -458,9 +497,10 @@ public:
    * instructions.  Users can modify the instructions (including
    * adding/removing instructions) but *must not* delete the list itself.
    */
-  const instrlist_t *getInstructions() const { return instrs; }
-  instrlist_t *getInstructions() { return instrs; }
-  void setInstructions(instrlist_t *instrs) { this->instrs = instrs; }
+  const SparseInstrList &getInstructions() const { return instrs; }
+  SparseInstrList &getInstructions() { return instrs; }
+  void setInstructions(SparseInstrList &&instrs)
+  { this->instrs = std::move(instrs); }
 
   /**
    * Return a stack region's name or none if it doesn't have one.
@@ -475,6 +515,11 @@ public:
    * @return a return code describing the outcome
    */
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
+
+  /**
+   * Mark the instruction runs that contain the function prologue and epilogue.
+   */
+  virtual ret_t markPrologueAndEpilogue() = 0;
 
   /**
    * Finalize all analysis, including generating any extra information required
@@ -634,8 +679,8 @@ protected:
   const Binary &binary;
   const function_record *func;
 
-  /* Disassembled instructions */
-  instrlist_t *instrs;
+  /* Disassembled instructions to be transformed */
+  SparseInstrList instrs;
 
   /* Maximum size of frame */
   uint32_t maxFrameSize;

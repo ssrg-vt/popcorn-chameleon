@@ -253,18 +253,28 @@ void dumpBacktrace(CodeTransformer *CT,
 ret_t initDisassembler();
 
 /**
- * Same as above except take as input a DynamoRIO-encoded register.
+ * Return Chameleon's encoding for a DynamoRIO register type.
  * @param reg register encoded in DynamoRIO's register format
  * @return the register type
  */
 enum RegType getRegTypeDR(reg_id_t reg);
 
 /**
- * Return DynamoRIO's encoding for a register type.
+ * Return DynamoRIO's encoding for a Chameleon register type.
  * @param reg chameleon's register type
  * @return DynamoRIO's register encoding
  */
 reg_id_t getDRRegType(enum RegType reg);
+
+/**
+ * Return whether the analysis pass should keep an instruction even if it
+ * doesn't contain any stack references/updates.
+ *
+ * @param instr the instruction
+ * @return true if the analysis pass should keep the instruction, false
+ * otherwise
+ */
+bool shouldKeepForRandomization(instr_t *instr);
 
 /**
  * Get the amount of space allocated/de-allocated on the stack by an
@@ -275,24 +285,33 @@ reg_id_t getDRRegType(enum RegType reg);
 int32_t getFrameUpdateSize(instr_t *instr);
 
 /**
- * Get offset restrictions, if any, for a base + displacement operand.
+ * Get slot restrictions, if any, for a base + displacement operand.  Sets the
+ * necessary information in res if there are any restrictions.
+ *
  * @param instr the instruction
  * @param op the operand from the instruction
- * @param res output operand populated with any restrictions
+ * @param offset the canoicalized slot offset
+ * @param res output operand populated with flag describing any restrictions
  * @return true if there is a restriction for the operand or false if not
  */
-bool getRestriction(instr_t *instr, const opnd_t &op, RandRestriction &res);
+bool getRestriction(instr_t *instr,
+                    const opnd_t &op,
+                    int offset,
+                    RandRestriction &res);
 
 /**
  * Get offset restrictions, if any, for an instruction which updates the stack
- * frame size.
+ * frame size.  Sets the necessary information in res if there are any
+ * restrictions.
  *
  * @param instr the instruction
+ * @param frameSize the current frame size before applying the frame update
  * @param update size & direction of the update
  * @param res output operand populated with any restrictions
  * @return true if there is a restriction for the instruction or false if not
  */
-bool getStackUpdateRestriction(instr_t *instr,
+bool getFrameUpdateRestriction(instr_t *instr,
+                               int32_t frameSize,
                                int32_t update,
                                RandRestriction &res);
 
