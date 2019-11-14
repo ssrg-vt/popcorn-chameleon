@@ -418,25 +418,28 @@ struct RandRestriction {
  */
 struct InstructionRun {
   app_pc startAddr, endAddr;
-  bool isPrologue, isEpilogue;
+  bool containsPrologue, containsEpilogue;
   std::vector<instr_t> instrs;
 
   InstructionRun()
-    : startAddr(0), endAddr(0), isPrologue(false), isEpilogue(false) {}
+    : startAddr(0), endAddr(0), containsPrologue(false),
+      containsEpilogue(false) {}
   InstructionRun(InstructionRun &&other)
     : startAddr(other.startAddr), endAddr(other.endAddr),
-      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
+      containsPrologue(other.containsPrologue),
+      containsEpilogue(other.containsEpilogue),
       instrs(std::move(other.instrs)) {}
   InstructionRun(const InstructionRun &other)
     : startAddr(other.startAddr), endAddr(other.endAddr),
-      isPrologue(other.isPrologue), isEpilogue(other.isEpilogue),
+      containsPrologue(other.containsPrologue),
+      containsEpilogue(other.containsEpilogue),
       instrs(other.instrs) {}
 
   InstructionRun &operator=(const InstructionRun &other) {
     startAddr = other.startAddr;
     endAddr = other.endAddr;
-    isPrologue = other.isPrologue;
-    isEpilogue = other.isEpilogue;
+    containsPrologue = other.containsPrologue;
+    containsEpilogue = other.containsEpilogue;
     instrs = other.instrs;
     return *this;
   }
