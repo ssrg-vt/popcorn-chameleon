@@ -719,21 +719,21 @@ public:
     bool foundPrologue = false, foundEpilogue = false;
 
     for(auto &instrRun : instrs) {
-      bool isPrologue = false, isEpilogue = false;
+      bool containsPrologue = false, containsEpilogue = false;
       for(auto &instr : instrRun.instrs) {
-        if(isCalleeSavePush(instr)) isPrologue = true;
-        if(isCalleeSavePop(instr)) isEpilogue = true;
+        if(isCalleeSavePush(instr)) containsPrologue = true;
+        if(isCalleeSavePop(instr)) containsEpilogue = true;
       }
-      instrRun.isPrologue = isPrologue;
-      instrRun.isEpilogue = isEpilogue;
+      instrRun.containsPrologue = containsPrologue;
+      instrRun.containsEpilogue = containsEpilogue;
 
-      foundPrologue |= isPrologue;
-      foundEpilogue |= isEpilogue;
+      foundPrologue |= containsPrologue;
+      foundEpilogue |= containsEpilogue;
       DEBUG(
-        if(isPrologue)
+        if(containsPrologue)
           DEBUGMSG("prologue at 0x" << std::hex << instrRun.startAddr
                    << " - 0x" << instrRun.endAddr << std::endl);
-        if(isEpilogue)
+        if(containsEpilogue)
           DEBUGMSG("epilogue at 0x" << std::hex << instrRun.startAddr
                    << " - 0x" << instrRun.endAddr << std::endl);
       )
@@ -890,8 +890,8 @@ private:
   }
 
   /**
-   * Return whether the instruction is popping a callee-saved register onto the
-   * stack.
+   * Return whether the instruction is popping a callee-saved register off of
+   * the stack.
    *
    * @param instr instruction to check
    * @return true if the instruction is popping a callee-saved register onto
