@@ -1308,7 +1308,12 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
     if(!wouldRandomize) {
       curInstrRun.instrs.pop_back();
       if(!curInstrRun.empty()) {
-        curInstrRun.endAddr = real;
+        curInstrRun.endAddr = real - instrSize;
+
+        DEBUGMSG_VERBOSE(" + instruction run from 0x" << std::hex
+                         << (uint64_t)curInstrRun.startAddr << " to 0x"
+                         << (uint64_t)curInstrRun.endAddr << std::endl);
+
         instrs.emplace_back(std::move(curInstrRun));
       }
       curInstrRun.startAddr = real;
@@ -1318,16 +1323,16 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
   // Add the last run if non-empty
   if(wouldRandomize) {
     curInstrRun.endAddr = real;
+
+    DEBUGMSG_VERBOSE(" + instruction run from 0x" << std::hex
+                     << (uint64_t)curInstrRun.startAddr << " to 0x"
+                     << (uint64_t)curInstrRun.endAddr << std::endl);
+
     instrs.emplace_back(std::move(curInstrRun));
-  } else {
-    curInstrRun.instrs.pop_back();
-    if(!curInstrRun.empty()) {
-      curInstrRun.endAddr = real;
-      instrs.emplace_back(std::move(curInstrRun));
-    }
   }
 
   // Add the remaining slots, i.e., those that don't have any restrictions
+  info->setInstructions(std::move(instrs));
   code = info->finalizeAnalysis();
 
   DEBUG_VERBOSE(
@@ -1336,7 +1341,6 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
                << std::endl);
   )
 
-  info->setInstructions(std::move(instrs));
   return code;
 }
 

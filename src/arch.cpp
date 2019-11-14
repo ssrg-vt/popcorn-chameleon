@@ -719,28 +719,33 @@ public:
     bool foundPrologue = false, foundEpilogue = false;
 
     for(auto &instrRun : instrs) {
-      bool isPrologue = false, isEpilogue = false;
+      bool containsPrologue = false, containsEpilogue = false;
       for(auto &instr : instrRun.instrs) {
-        if(isCalleeSavePush(instr)) isPrologue = true;
-        if(isCalleeSavePop(instr)) isEpilogue = true;
+        if(isCalleeSavePush(instr)) containsPrologue = true;
+        if(isCalleeSavePop(instr)) containsEpilogue = true;
       }
-      instrRun.isPrologue = isPrologue;
-      instrRun.isEpilogue = isEpilogue;
+      instrRun.containsPrologue = containsPrologue;
+      instrRun.containsEpilogue = containsEpilogue;
 
-      foundPrologue |= isPrologue;
-      foundEpilogue |= isEpilogue;
+      foundPrologue |= containsPrologue;
+      foundEpilogue |= containsEpilogue;
       DEBUG(
-        if(isPrologue)
-          DEBUGMSG("prologue at 0x" << std::hex << instrRun.startAddr
-                   << " - 0x" << instrRun.endAddr << std::endl);
-        if(isEpilogue)
-          DEBUGMSG("epilogue at 0x" << std::hex << instrRun.startAddr
-                   << " - 0x" << instrRun.endAddr << std::endl);
+        if(containsPrologue)
+          DEBUGMSG("prologue at 0x" << std::hex << (uint64_t)instrRun.startAddr
+                   << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
+        if(containsEpilogue)
+          DEBUGMSG("epilogue at 0x" << std::hex << (uint64_t)instrRun.startAddr
+                   << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
       )
     }
 
-    if(foundPrologue && foundEpilogue) return ret_t::Success;
-    else return ret_t::AnalysisFailed;
+    // This is not necessarily an error because a function may not expect to
+    // clean up, e.g., __libc_start_main ends by calling exit()
+    if(!foundEpilogue) WARN("Could not find epilogue for function @ "
+                            << std::hex << func->addr << std::endl);
+
+    if(!foundPrologue) return ret_t::AnalysisFailed;
+    else return ret_t::Success;
   }
 
   virtual ret_t finalizeAnalysis() override {
@@ -890,8 +895,8 @@ private:
   }
 
   /**
-   * Return whether the instruction is popping a callee-saved register onto the
-   * stack.
+   * Return whether the instruction is popping a callee-saved register off of
+   * the stack.
    *
    * @param instr instruction to check
    * @return true if the instruction is popping a callee-saved register onto
