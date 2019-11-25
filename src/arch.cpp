@@ -1099,6 +1099,18 @@ bool arch::shouldKeepForRandomization(instr_t *instr) {
   // Keep nops around because Popcorn's compiler may have inserted them for
   // Chameleon to add new instructions
   case OP_nop: return true;
+
+  // Connect the prologue into a single run, which has the following format:
+  //   push %rbp
+  //   movq %rsp, %rbp
+  //   ...push other callee-saved registers...
+  case OP_mov_st: {
+    opnd_t src = instr_get_src(instr, 0);
+    if(!opnd_is_reg(src) || opnd_get_reg(src) != DR_REG_RSP) return false;
+    opnd_t dst = instr_get_dst(instr, 0);
+    if(!opnd_is_reg(dst) || opnd_get_reg(dst) != DR_REG_RBP) return false;
+    return true;
+  }
   default: return false;
   }
 }
