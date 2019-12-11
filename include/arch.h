@@ -190,11 +190,13 @@ int32_t framePointerOffset();
  * @param binary a Binary object
  * @param func a function record object
  * @param maxPadding maximum padding added between fully-randomizable slots
+ * @param window Memory window containing function's memory for instructions
  * @return a RandomizedFunction object
  */
 RandomizedFunctionPtr getRandomizedFunction(const Binary &binary,
                                             const function_record *func,
-                                            size_t maxPadding);
+                                            size_t maxPadding,
+                                            MemoryWindow &window);
 
 /**
  * Rewrite the child's stack according to the newly-randomized code.
