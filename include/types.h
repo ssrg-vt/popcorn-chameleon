@@ -169,6 +169,7 @@ public:
    *         otherwise
    */
   bool operator!() const { return entries == nullptr; }
+
 private:
   size_t cur, len;
   T *entries;

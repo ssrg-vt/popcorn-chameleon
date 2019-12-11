@@ -6,9 +6,156 @@
 
 #include "regs.h"
 
+#include <array>
+
 using namespace chameleon;
 
 #if defined __x86_64__
+
+namespace {
+
+/* Where to add new instruction */
+enum Position { FRONT, BACK };
+
+void debugPrintAddedInstr(instr_t &instr, Position position = BACK) {
+  DEBUG_VERBOSE(
+    DEBUGMSG_INSTR("  + size = " << instr_length(GLOBAL_DCONTEXT, &instr)
+                   << " " << (position == FRONT ? "(prepend) " : ""), &instr);
+  )
+}
+
+void debugPrintDeletedInstr(instr_t &instr, Position position = BACK) {
+  DEBUG_VERBOSE(
+    DEBUGMSG_INSTR("  - size = " << instr_length(GLOBAL_DCONTEXT, &instr)
+                   << " " << (position == FRONT ? "(prepend) " : ""), &instr);
+  )
+}
+
+/**
+ * Add a new instruction to the back of a list of instructions and set it up
+ * for inserting into a function.
+ *
+ * @param instr A new instruction to be initialized
+ * @param opcode The instruction's opcode
+ * @param srcs Source operands
+ * @param dsts Destination operands
+ * @param position Where to insert the new instruction
+ * @return a reference to the newly added instruction
+ */
+template <size_t NSrc, size_t NDst>
+instr_t &addInstruction(std::vector<instr_t> &instrs,
+                        int opcode,
+                        const std::array<opnd_t, NSrc> &srcs,
+                        const std::array<opnd_t, NDst> &dsts,
+                        Position position = BACK) {
+  std::vector<instr_t>::iterator insertPosition;
+  switch(position) {
+  case FRONT:
+    insertPosition = instrs.begin();
+    break;
+  case BACK:
+    insertPosition = instrs.end();
+    break;
+  default:
+    ERROR("Unhandled enum value" << std::endl);
+    assert(false && "Unhandled enum value");
+  }
+
+  instr_t &instr = *instrs.emplace(insertPosition);
+  instr_init(GLOBAL_DCONTEXT, &instr);
+  instr_set_opcode(&instr, opcode);
+  instr_set_num_opnds(GLOBAL_DCONTEXT, &instr, dsts.size(), srcs.size());
+  for(size_t i = 0; i < srcs.size(); i++) {
+    instr_set_src(&instr, i, srcs[i]);
+  }
+  for(size_t i = 0; i < dsts.size(); i++) {
+    instr_set_dst(&instr, i, dsts[i]);
+  }
+  return instr;
+}
+
+/**
+ * Replace a subset of instructions in a run with new instructions.
+ * @param instrs instruction being modified
+ * @param start iterator to start of range of instructions being replaced
+ * @param end iterator to end of range of instructions being replaced (not
+ * inclusive)
+ * @param newInstrs new instructions to put in instruction run
+ * @bufferStart start of instruction memory buffer to encode new instructions
+ */
+ret_t replaceInstructionsInRun(InstructionRun &instrs,
+                               std::vector<instr_t>::iterator start,
+                               std::vector<instr_t>::iterator end,
+                               std::vector<instr_t> newInstrs,
+                               app_pc bufferStart) {
+  std::vector<instr_t> fullRun;
+  fullRun.reserve(instrs.instrs.size()); // Probably too big but close enough
+
+  // Copy instructions before the range being replaced into new vector
+  auto it = instrs.instrs.begin(), e = instrs.instrs.end();
+  while(it != start) {
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("  keep   -> ", &*it));
+
+    fullRun.emplace_back(std::move(*it));
+    it++;
+  }
+  assert(it != e && "Invalid replacement range");
+
+  // Copy new instructions into the vector & encode into buffer
+  app_pc real = instr_get_app_pc(&*start);
+  for(auto &instr : newInstrs) {
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("  add    -> ", &instr));
+
+    byte *instrEnd = instr_encode_to_copy(GLOBAL_DCONTEXT, &instr,
+                                          bufferStart, real);
+    if(!instrEnd) return ret_t::TransformFailed;
+    size_t size = instrEnd - bufferStart;
+    instr_set_raw_bits(&instr, bufferStart, size);
+    bufferStart += size;
+    real += size;
+
+    fullRun.emplace_back(std::move(instr));
+  }
+
+  // If end is the sentinal end iterator, then it doesn't actually point to an
+  // instruction and we need to manually calculate the end address using the
+  // last instruction
+  app_pc endAddr;
+  if(end == e) {
+    auto prev = end - 1;
+    endAddr = instr_get_app_pc(&*prev) + instr_length(GLOBAL_DCONTEXT, &*prev);
+  } else {
+    endAddr = instr_get_app_pc(&*end);
+  }
+
+  if(real != endAddr) {
+    DEBUGMSG("New instructions not the same size, expected " << std::hex
+             << (uintptr_t)endAddr << " but got "
+             << (uintptr_t)real << std::endl);
+    return ret_t::TransformFailed;
+  }
+
+  // Clean up range being replaced
+  while(it != end) {
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("  remove -> ", &*it));
+
+    instr_free(GLOBAL_DCONTEXT, &*it);
+    it++;
+  }
+
+  // Copy instructions after the range being replaced into new vector
+  while(it != e) {
+    DEBUG_VERBOSE(DEBUGMSG_INSTR("  keep   -> ", &*it));
+
+    fullRun.emplace_back(std::move(*it));
+    it++;
+  }
+
+  instrs.instrs = std::move(fullRun);
+  return ret_t::Success;
+}
+
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Miscellaneous
@@ -382,8 +529,9 @@ class x86RandomizedFunction : public RandomizedFunction {
 public:
   x86RandomizedFunction(const Binary &binary,
                         const function_record *func,
-                        size_t maxPadding)
-    : RandomizedFunction(binary, func, maxPadding), alignment(16) {
+                        size_t maxPadding,
+                        MemoryWindow &window)
+    : RandomizedFunction(binary, func, maxPadding, window), alignment(16) {
     int offset;
     size_t size, regionSize = 0;
 
@@ -715,8 +863,59 @@ public:
     }
   }
 
-  virtual ret_t markPrologueAndEpilogue() override {
+  std::vector<StackRegionPtr>::iterator findRegionByType(x86Region type) {
+    std::vector<StackRegionPtr>::iterator it;
+    for(it = regions.begin(); it != regions.end(); it++) {
+      if(REGION_TYPE((*it)->getFlags()) == type) return it;
+    }
+    return it;
+  }
+
+  void moveCalleeSaveToRandomizable() {
+    int offset;
+    size_t size;
+
+    // If there's no randomizable region, make one
+    auto regionIt = findRegionByType(x86Region::R_Movable);
+    if(regionIt == regions.end()) {
+      regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
+      regionIt = regions.end() - 1;
+    }
+
+    DEBUGMSG_VERBOSE("moving callee-save slots to fully randomizable region"
+                     << std::endl);
+
+    auto &region = *regionIt;
+    Binary::unwind_iterator ui = binary.getUnwindLocations(func);
+    for(; !ui.end(); ++ui) {
+      const unwind_loc *loc = *ui;
+      size = arch::getCalleeSaveSize(loc->reg);
+      offset =
+        CodeTransformer::canonicalizeSlotOffset(func->frame_size,
+                                                arch::RegType::FramePointer,
+                                                loc->offset);
+      region->addSlot(offset, size, size);
+
+      DEBUGMSG_VERBOSE("  slot @ " << offset << ", size=" << size
+                       << std::endl);
+    }
+
+    DEBUGMSG("updated fully randomizable region to hold callee-save slots, "
+             "new size = " << region->getOriginalOffset() << std::endl);
+
+    region->setMinStartingOffset(0);
+    region->setSize(region->getOriginalOffset());
+    region->sortSlots();
+
+    regionIt = findRegionByType(x86Region::R_CalleeSave);
+    assert(regionIt != regions.end() && "No callee-save region");
+    regions.erase(regionIt);
+  }
+
+  virtual ret_t rewritePrologueAndEpilogue() override {
+    ret_t code;
     bool foundPrologue = false, foundEpilogue = false;
+    int calleeSaveOffset;
 
     for(auto &instrRun : instrs) {
       bool containsPrologue = false, containsEpilogue = false;
@@ -729,14 +928,19 @@ public:
 
       foundPrologue |= containsPrologue;
       foundEpilogue |= containsEpilogue;
-      DEBUG(
-        if(containsPrologue)
-          DEBUGMSG("prologue at 0x" << std::hex << (uint64_t)instrRun.startAddr
-                   << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
-        if(containsEpilogue)
-          DEBUGMSG("epilogue at 0x" << std::hex << (uint64_t)instrRun.startAddr
-                   << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
-      )
+
+      if(containsPrologue) {
+        DEBUGMSG("prologue at 0x" << std::hex << (uint64_t)instrRun.startAddr
+                 << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
+        code = rewritePrologueForRandomization(instrRun, calleeSaveOffset);
+        if(code != ret_t::Success) return code;
+      }
+      if(containsEpilogue) {
+        DEBUGMSG("epilogue at 0x" << std::hex << (uint64_t)instrRun.startAddr
+                 << " - 0x" << (uint64_t)instrRun.endAddr << std::endl);
+        code = rewriteEpilogueForRandomization(instrRun, calleeSaveOffset);
+        if(code != ret_t::Success) return code;
+      }
     }
 
     // This is not necessarily an error because a function may not expect to
@@ -745,7 +949,268 @@ public:
                             << std::hex << func->addr << std::endl);
 
     if(!foundPrologue) return ret_t::AnalysisFailed;
-    else return ret_t::Success;
+
+    moveCalleeSaveToRandomizable();
+
+    return ret_t::Success;
+  }
+
+  virtual ret_t
+  rewritePrologueForRandomization(InstructionRun &instrs,
+                                  int &calleeSaveOffset) override {
+    int spUpdate = 0;
+    size_t origSize = 0, newSize;
+    opnd_t src, src2, dst;
+    std::vector<instr_t> newInstrs;
+
+    DEBUGMSG_VERBOSE("rewriting prologue" << std::endl);
+
+    // Move the return address from its original location to the "new" slot
+    // (which will eventually be randomized)
+    src = opnd_create_base_disp(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8);
+    dst = opnd_create_reg(DR_REG_RAX);
+    instr_t &movToReg = addInstruction<1, 1>(newInstrs, OP_movq,
+                                             {{src}}, {{dst}});
+    newSize = instr_length(GLOBAL_DCONTEXT, &movToReg);
+
+    src = dst;
+    dst = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8, true,
+                                   true, false);
+    instr_t &movToStack = addInstruction<1, 1>(newInstrs, OP_movq,
+                                               {{src}}, {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &movToStack);
+
+    for(auto &instr : newInstrs) debugPrintAddedInstr(instr);
+
+    // Walk through the prologue, converting push into movq instructions and
+    // updating the frame allocation math to include the callee-save space
+    calleeSaveOffset = 0;
+    auto it = instrs.instrs.begin();
+    for(auto e = instrs.instrs.end(); it != e; it++) {
+      auto &instr = *it;
+      bool finished = false;
+
+      switch(instr_get_opcode(&instr)) {
+      case OP_nop: break;
+      case OP_push:
+        assert(opnd_is_reg(instr_get_src(&instr, 0)));
+        if(!isCalleeSavePush(instr)) {
+          // TODO handle the case where the compiler uses "push %rax" to
+          // allocate/align the frame
+          assert(opnd_is_reg(instr_get_src(&instr, 0)) &&
+                 opnd_get_reg(instr_get_src(&instr, 0)) == DR_REG_RAX &&
+                 "Unhandled frame setup instruction");
+          assert(spUpdate == 0 && "Multiple SP update instructions?");
+
+          // The compiler inserted a push %rax to align the frame, convert to
+          // subtraction instruction
+          spUpdate = 8;
+          src = opnd_create_immed_int(spUpdate, OPSZ_4);
+          src2 = opnd_create_reg(DR_REG_RSP);
+          dst = opnd_create_reg(DR_REG_RSP);
+          addInstruction<2, 1>(newInstrs, OP_sub, {{src, src2}}, {{dst}});
+          break;
+        }
+
+        calleeSaveOffset -= 8;
+        src = opnd_create_reg(opnd_get_reg(instr_get_src(&instr, 0)));
+        dst = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0,
+                                       calleeSaveOffset, OPSZ_8, true,
+                                       true, false);
+        addInstruction<1, 1>(newInstrs, OP_movq, {{src}}, {{dst}});
+        break;
+      case OP_mov_st:
+        src = instr_get_src(&instr, 0);
+        assert(opnd_is_reg(src) && opnd_get_reg(src) == DR_REG_RSP);
+        dst = instr_get_dst(&instr, 0);
+        assert(opnd_is_reg(dst) && opnd_get_reg(dst) == DR_REG_RBP);
+
+        // New rbp points to CFA - 0x10
+        src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, -8,
+                                       OPSZ_lea, true, true, false);
+        dst = opnd_create_reg(DR_REG_RBP);
+        addInstruction<1, 1>(newInstrs, OP_lea, {{src}}, {{dst}});
+        break;
+      case OP_sub:
+        assert(opnd_is_immed_int(instr_get_src(&instr, 0)) &&
+               opnd_is_reg(instr_get_src(&instr, 1)) &&
+               opnd_get_reg(instr_get_src(&instr, 1)) == DR_REG_RSP &&
+               opnd_is_reg(instr_get_dst(&instr, 0)) &&
+               opnd_get_reg(instr_get_src(&instr, 1)) == DR_REG_RSP);
+        assert(spUpdate == 0 && "Multiple SP update instructions?");
+
+        src = instr_get_src(&instr, 0);
+        spUpdate = opnd_get_immed_int(src) + abs(calleeSaveOffset);
+        src = opnd_create_immed_int(spUpdate, OPSZ_4);
+        src2 = opnd_create_reg(DR_REG_RSP);
+        dst = opnd_create_reg(DR_REG_RSP);
+        addInstruction<2, 1>(newInstrs, OP_sub, {{src, src2}}, {{dst}});
+        break;
+      default:
+        // Any remaining instructions are not part of the prologue
+        finished = true;
+        break;
+      }
+
+      if(finished) break;
+
+      origSize += instr_length(GLOBAL_DCONTEXT, &instr);
+      if(instr_get_opcode(&instr) != OP_nop) {
+        auto &newInstr = newInstrs.back();
+        newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
+
+        debugPrintDeletedInstr(instr);
+        debugPrintAddedInstr(newInstr);
+      }
+    }
+
+    // Add an instruction to update the SP if the prologue didn't already
+    if(spUpdate == 0) {
+      src = opnd_create_immed_int(abs(calleeSaveOffset), OPSZ_4);
+      src2 = opnd_create_reg(DR_REG_RSP);
+      dst = opnd_create_reg(DR_REG_RSP);
+      auto &newInstr = addInstruction<2, 1>(newInstrs, OP_sub,
+                                            {{src, src2}}, {{dst}});
+      newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
+      debugPrintAddedInstr(newInstr);
+    }
+
+    DEBUGMSG("size: original = " << origSize << " vs new = " << newSize
+             << std::endl);
+    if(origSize < newSize) {
+      DEBUGMSG("not enough space to rewrite prologue" << std::endl);
+      return ret_t::AnalysisFailed;
+    }
+
+    // Implant new instructions
+    uint64_t offset = (uint64_t)(instrs.startAddr) - func->addr;
+    return replaceInstructionsInRun(instrs,
+                                    instrs.instrs.begin(),
+                                    it,
+                                    std::move(newInstrs),
+                                    funcData[offset]);
+  }
+
+  virtual ret_t
+  rewriteEpilogueForRandomization(InstructionRun &instrs,
+                                  int calleeSaveOffset) override {
+    int spUpdate = 0, calleeSaveSize = abs(calleeSaveOffset);
+    size_t origSize = 0, newSize = 0;
+    opnd_t src, src2, dst;
+    std::vector<instr_t> newInstrs;
+
+    DEBUGMSG_VERBOSE("rewriting epilogue" << std::endl);
+
+    // Walk through the epilogue, converting pop into movq instructions and
+    // updating the frame allocation math to include the callee-save space
+    auto start = instrs.instrs.end();
+    for(auto it = instrs.instrs.begin(), e = instrs.instrs.end();
+        it != e;
+        it++) {
+      auto &instr = *it;
+      bool transformed = false;
+
+      switch(instr_get_opcode(&instr)) {
+      case OP_nop:
+        transformed = true;
+        break;
+      case OP_pop:
+        assert(opnd_is_reg(instr_get_dst(&instr, 0)) &&
+               isCalleeSavePop(instr));
+        transformed = true;
+
+        src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0,
+                                       calleeSaveOffset, OPSZ_8, true,
+                                       true, false);
+        dst = opnd_create_reg(opnd_get_reg(instr_get_dst(&instr, 0)));
+        addInstruction<1, 1>(newInstrs, OP_movq, {{src}}, {{dst}});
+        calleeSaveOffset += 8;
+        break;
+      case OP_add:
+        assert(opnd_is_immed_int(instr_get_src(&instr, 0)) &&
+               opnd_is_reg(instr_get_src(&instr, 1)) &&
+               opnd_is_reg(instr_get_dst(&instr, 0)));
+        assert(spUpdate == 0 && "Multiple SP update instructions?");
+        transformed = true;
+
+        src = instr_get_src(&instr, 0);
+        spUpdate = opnd_get_immed_int(src) + abs(calleeSaveOffset);
+        src = opnd_create_immed_int(spUpdate, OPSZ_4);
+        src2 = opnd_create_reg(DR_REG_RSP);
+        dst = opnd_create_reg(DR_REG_RSP);
+        addInstruction<2, 1>(newInstrs, OP_add, {{src, src2}}, {{dst}});
+        break;
+      // We can't break out of the entire loop like in the prologue because the
+      // epilogue can come *after* non-epilogue instructions
+      default: break;
+      }
+
+      if(transformed) {
+        // Mark the first instruction we want transform
+        if(start == instrs.instrs.end()) {
+          start = it;
+        }
+
+        origSize += instr_length(GLOBAL_DCONTEXT, &instr);
+        if(instr_get_opcode(&instr) != OP_nop) {
+          auto &newInstr = newInstrs.back();
+          newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
+
+          debugPrintDeletedInstr(instr);
+          debugPrintAddedInstr(newInstr);
+        }
+      }
+    }
+
+    // Add an instruction to update the SP if the prologue didn't already
+    if(spUpdate == 0) {
+      src = opnd_create_immed_int(calleeSaveSize, OPSZ_4);
+      src2 = opnd_create_reg(DR_REG_RSP);
+      dst = opnd_create_reg(DR_REG_RSP);
+      auto &newInstr = addInstruction<2, 1>(newInstrs, OP_add,
+                                            {{src, src2}}, {{dst}}, FRONT);
+      newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
+      debugPrintAddedInstr(newInstr, FRONT);
+    }
+
+    // Move the return address back to its original location for the return
+    // instruction.  We can't use rax or rdx as a scratch register during
+    // return address restoration as they may contain return values.
+    reg_id_t scratchReg = DR_REG_RCX;
+    src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8, true,
+                                   true, false);
+    dst = opnd_create_reg(scratchReg);
+    instr_t &movToReg = addInstruction<1, 1>(newInstrs, OP_movq,
+                                             {{src}}, {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &movToReg);
+
+    src = dst;
+    dst = opnd_create_base_disp(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8);
+    instr_t &movToStack = addInstruction<1, 1>(newInstrs, OP_movq,
+                                               {{src}}, {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &movToStack);
+
+    DEBUG_VERBOSE(
+      auto spUpdateInstr = newInstrs.end();
+      spUpdateInstr -= 2;
+      for(auto e = newInstrs.end(); spUpdateInstr != e; spUpdateInstr++) {
+        debugPrintAddedInstr(*spUpdateInstr);
+      }
+    )
+
+    DEBUGMSG("size: original = " << origSize << " vs new = " << newSize
+             << std::endl);
+    if(origSize < newSize) {
+      DEBUGMSG("not enough space to rewrite epilogue" << std::endl);
+      return ret_t::AnalysisFailed;
+    }
+
+    uint64_t offset = (uint64_t)(instrs.startAddr) - func->addr;
+    return replaceInstructionsInRun(instrs,
+                                    start,
+                                    instrs.instrs.end() - 1,
+                                    std::move(newInstrs),
+                                    funcData[offset]);
   }
 
   virtual ret_t finalizeAnalysis() override {
@@ -962,9 +1427,10 @@ private:
 RandomizedFunctionPtr
 arch::getRandomizedFunction(const Binary &binary,
                             const function_record *func,
-                            size_t maxPadding) {
+                            size_t maxPadding,
+                            MemoryWindow &window) {
   return RandomizedFunctionPtr(
-    new x86RandomizedFunction(binary, func, maxPadding));
+    new x86RandomizedFunction(binary, func, maxPadding, window));
 }
 
 ret_t arch::transformStack(CodeTransformer *CT,

@@ -473,7 +473,8 @@ public:
   RandomizedFunction() = delete;
   RandomizedFunction(const Binary &binary,
                      const function_record *func,
-                     size_t maxPadding);
+                     size_t maxPadding,
+                     MemoryWindow &mw);
   RandomizedFunction(const RandomizedFunction &rhs, MemoryWindow &mw);
 
   /**
@@ -493,6 +494,12 @@ public:
    * @return the function record
    */
   const function_record *getFunctionRecord() const { return func; }
+
+  /**
+   * Get an iterator to the memory holding the function's instructions.
+   * @return iterator to the function's memory
+   */
+  byte_iterator getInstructionMemory() const { return funcData; }
 
   /**
    * Get & set the function's instructions.  After setting the instruction
@@ -520,9 +527,35 @@ public:
   virtual ret_t addRestriction(const RandRestriction &res) = 0;
 
   /**
-   * Mark the instruction runs that contain the function prologue and epilogue.
+   * Rewrite the prologue and epilogue(s) for full randomization.
+   * @return a return code describing the outcome
    */
-  virtual ret_t markPrologueAndEpilogue() = 0;
+  virtual ret_t rewritePrologueAndEpilogue() = 0;
+
+  /**
+   * Rewrite the prologue to use move instructions so that the callee-save
+   * instruction area is fully randomizable.
+   *
+   * @param instrs Instructions comprising the epilogue
+   * @param calleeSaveOffset Output argument set to the size of the callee-save
+   * area
+   * @param a return code describing the outcome
+   */
+  virtual
+  ret_t rewritePrologueForRandomization(InstructionRun &instrs,
+                                        int &calleeSaveOffset) = 0;
+
+  /**
+   * Rewrite the epilogue to use move instructions so that the callee-save
+   * instruction area is fully randomizable.
+   *
+   * @param instrs Instructions comprising the epilogue
+   * @param calleeSaveOffset Size of callee-save area
+   * @param a return code describing the outcome
+   */
+  virtual
+  ret_t rewriteEpilogueForRandomization(InstructionRun &instrs,
+                                        int calleeSaveOffset) = 0;
 
   /**
    * Finalize all analysis, including generating any extra information required
@@ -681,6 +714,9 @@ protected:
   /* Binary & function metadata */
   const Binary &binary;
   const function_record *func;
+
+  /* Buffer containing function's instructions */
+  byte_iterator funcData;
 
   /* Disassembled instructions to be transformed */
   SparseInstrList instrs;

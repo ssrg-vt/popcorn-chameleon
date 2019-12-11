@@ -453,13 +453,18 @@ static bool slotCmp(const std::pair<int, const stack_slot *> &a,
 
 RandomizedFunction::RandomizedFunction(const Binary &binary,
                                        const function_record *func,
-                                       size_t maxPadding)
+                                       size_t maxPadding,
+                                       MemoryWindow &mw)
   : binary(binary), func(func), maxFrameSize(UINT32_MAX),
     prevRandFrameSize(func->frame_size), randomizedFrameSize(func->frame_size),
     maxPadding(maxPadding) {
   int offset;
   arch::RegType type;
   Binary::slot_iterator si = binary.getStackSlots(func);
+
+  funcData = mw.getData(func->addr);
+  assert(funcData[0] && funcData.getLength() >= func->code_size &&
+         "No data for function");
 
   curRand = &_a;
   prevRand = &_b;
@@ -488,11 +493,12 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
   // Copy the instructions and point raw bits to the new code buffer
   if(!rhs.instrs.empty()) {
     size_t instrSize;
-    byte_iterator funcData = mw.getData(func->addr);
+    funcData = mw.getData(func->addr);
     byte *cur, *end;
     instrs = rhs.instrs;
 
-    assert(funcData[0] && "Copying from invalid RandomizedFunction");
+    assert(funcData[0] && funcData.getLength() >= func->code_size &&
+           "Copying from invalid RandomizedFunction");
 
     auto rhsRunIt = rhs.instrs.begin();
     for(auto runIt = instrs.begin(), re = instrs.end();
@@ -633,7 +639,7 @@ ret_t RandomizedFunction::finalizeAnalysis() {
     }
   )
 
-  return markPrologueAndEpilogue();
+  return rewritePrologueAndEpilogue();
 }
 
 ret_t RandomizedFunction::randomize(int seed) {

@@ -1209,7 +1209,7 @@ ret_t CodeTransformer::analyzeFunction(RandomizedFunctionPtr &info) {
            maxFrameSize = arch::initialFrameSize();
   size_t instrSize;
   const function_record *func = info->getFunctionRecord();
-  byte_iterator funcData = codeWindow.getData(func->addr);
+  byte_iterator funcData = info->getInstructionMemory();
   byte *real = (byte *)func->addr, *cur = funcData[0], *prev,
        *end = cur + func->code_size;
   SparseInstrList instrs;
@@ -1375,7 +1375,7 @@ ret_t CodeTransformer::analyzeFunctions() {
     t.start();
 
     RandomizedFunctionPtr info =
-      arch::getRandomizedFunction(binary, func, slotPadding);
+      arch::getRandomizedFunction(binary, func, slotPadding, codeWindow);
     RandomizedFunctionMap::iterator it =
       functions.emplace(func->addr, std::move(info)).first;
     code = analyzeFunction(it->second);
