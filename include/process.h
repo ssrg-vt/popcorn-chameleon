@@ -354,6 +354,12 @@ public:
   ret_t readRegion(uintptr_t addr, byte_iterator &buffer) const;
 
   /**
+   * Print 8 bytes of data from child's memory.
+   * @param addr the address to read
+   */
+  void dumpMem(uintptr_t addr) const;
+
+  /**
    * Write 8 bytes of data to the child's memory.
    * @param addr the address to write
    * @param data bytes to write to the address

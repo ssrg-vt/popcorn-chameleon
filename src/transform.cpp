@@ -1440,7 +1440,7 @@ ret_t CodeTransformer::randomizeOperands(const RandomizedFunctionPtr &info,
     }
 
     regOffset = slotOffsetFromRegister(randFrameSize, type, newOffset);
-    opnd_set_disp_ex(&op, regOffset, false, true, false);
+    opnd_set_disp_ex(&op, regOffset, true, true, false);
     SetOp(instr, i, op);
     changed = true;
 
@@ -1539,6 +1539,13 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
                        << std::setw(2) << instrSize << " ", instr);
       )
 
+      if(info->skipTransforming(instr)) {
+        DEBUGMSG_VERBOSE(" -> skipping randomizing" << std::endl);
+        cur += instrSize;
+        real += instrSize;
+        continue;
+      }
+
       // See frame size cleanup comment in analyzeFunction()
       if(!frameSize) {
         DEBUGMSG_VERBOSE("found epilogue in function body, restoring frame size "
@@ -1548,17 +1555,22 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
         randFrameSize = maxRandFrameSize;
       }
 
-      // Rewrite stack slot reference operands to their randomized locations
-      code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
-                              (info, frameSize, randFrameSize, instr, changed);
-      if(code != ret_t::Success) return code;
-      code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
-                              (info, frameSize, randFrameSize, instr, changed);
-      if(code != ret_t::Success) return code;
-
-      // Allow each ISA-specific randomized function to have its way
+      // Allow each ISA-specific randomized function to have its way before
+      // applying generic transformations - this allow architecture-specific
+      // overrides of transformations
       code = info->transformInstr(frameSize, randFrameSize, instr, changed);
       if(code != ret_t::Success) return code;
+
+      // Rewrite stack slot reference operands to their randomized locations if
+      // there was not already ISA-specific handling
+      if(!changed) {
+        code = randomizeOperands<instr_num_srcs, instr_get_src, instr_set_src>
+                                (info, frameSize, randFrameSize, instr, changed);
+        if(code != ret_t::Success) return code;
+        code = randomizeOperands<instr_num_dsts, instr_get_dst, instr_set_dst>
+                                (info, frameSize, randFrameSize, instr, changed);
+        if(code != ret_t::Success) return code;
+      }
 
       // Keep track of stack pointer updates & rewrite frame update instructions
       // with randomized size
@@ -1620,7 +1632,8 @@ ret_t CodeTransformer::randomizeFunction(RandomizedFunctionPtr &info,
           if(instrSize != (cur - prev))
             DEBUGMSG_VERBOSE(" -> changed size of instruction: " << instrSize
                              << " vs. " << (cur - prev) << std::endl);
-          DEBUGMSG_INSTR(" -> rewrote: ", instr)
+          DEBUGMSG_INSTR(" -> rewrote: size = " << (size_t)(cur - prev) << " ",
+                         instr)
         );
 
         count++;

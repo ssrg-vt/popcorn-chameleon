@@ -626,7 +626,7 @@ public:
    */
   void addTransformAddr(uintptr_t addr, TransformType type) {
     assert(funcContains(func, addr) && "Transformation point not in function");
-    transformAddrs[addr] = type;;
+    transformAddrs[addr] = type;
   }
 
   /**
@@ -694,6 +694,13 @@ public:
    * @return true if the offset should be randomized or false otherwise
    */
   virtual bool shouldTransformSlot(int offset) const = 0;
+
+  /**
+   * Return whether or not to skip randomizing an instruction.
+   * @param instr An instruction slated to be randomized
+   * @return true if the instruction should be skipped or false otherwise
+   */
+  virtual bool skipTransforming(instr_t *instr) const = 0;
 
   /**
    * Hook to allow ISA-specific implementations to do any other transformations

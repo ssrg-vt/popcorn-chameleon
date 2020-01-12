@@ -40,14 +40,15 @@ void debugPrintDeletedInstr(instr_t &instr, Position position = BACK) {
  * @param srcs Source operands
  * @param dsts Destination operands
  * @param position Where to insert the new instruction
- * @return a reference to the newly added instruction
+ * @return an iterator to the newly added instruction
  */
 template <size_t NSrc, size_t NDst>
-instr_t &addInstruction(std::vector<instr_t> &instrs,
-                        int opcode,
-                        const std::array<opnd_t, NSrc> &srcs,
-                        const std::array<opnd_t, NDst> &dsts,
-                        Position position = BACK) {
+std::vector<instr_t>::iterator
+addInstruction(std::vector<instr_t> &instrs,
+               int opcode,
+               const std::array<opnd_t, NSrc> &srcs,
+               const std::array<opnd_t, NDst> &dsts,
+               Position position = BACK) {
   std::vector<instr_t>::iterator insertPosition;
   switch(position) {
   case FRONT:
@@ -61,7 +62,8 @@ instr_t &addInstruction(std::vector<instr_t> &instrs,
     assert(false && "Unhandled enum value");
   }
 
-  instr_t &instr = *instrs.emplace(insertPosition);
+  auto instrIt = instrs.emplace(insertPosition);
+  instr_t &instr = *instrIt;
   instr_init(GLOBAL_DCONTEXT, &instr);
   instr_set_opcode(&instr, opcode);
   instr_set_num_opnds(GLOBAL_DCONTEXT, &instr, dsts.size(), srcs.size());
@@ -71,7 +73,8 @@ instr_t &addInstruction(std::vector<instr_t> &instrs,
   for(size_t i = 0; i < dsts.size(); i++) {
     instr_set_dst(&instr, i, dsts[i]);
   }
-  return instr;
+
+  return instrIt;
 }
 
 /**
@@ -103,6 +106,7 @@ ret_t replaceInstructionsInRun(InstructionRun &instrs,
 
   // Copy new instructions into the vector & encode into buffer
   app_pc real = instr_get_app_pc(&*start);
+  bufferStart += (real - instrs.startAddr);
   for(auto &instr : newInstrs) {
     DEBUG_VERBOSE(DEBUGMSG_INSTR("  add    -> ", &instr));
 
@@ -153,6 +157,10 @@ ret_t replaceInstructionsInRun(InstructionRun &instrs,
     instr_free(GLOBAL_DCONTEXT, &*it);
     it++;
   }
+
+  DEBUG_VERBOSE(
+    if(numNops > 0) DEBUGMSG("  remove -> nop x " << numNops << std::endl);
+  )
 
   // Copy instructions after the range being replaced into new vector
   while(it != e) {
@@ -361,6 +369,11 @@ enum x86Region {
   R_Alignment,
 };
 
+enum x86InstrNote {
+  F_DoNotRandomize = 1 << 10,
+  F_FramePointerSetup
+};
+
 /* x86 region names (corresponds to indexs above) */
 const char *x86RegionName[] {
   "callee-save",
@@ -369,6 +382,7 @@ const char *x86RegionName[] {
   "alignment",
 };
 
+// TODO remove - this is dead code now that we rewrite the prologue/epilogue
 /**
  * Region for x86's callee-saved register stack region.  Permutes the order in
  * which registers are pushed/popped in the function's prologue/epilogue.
@@ -505,7 +519,7 @@ private:
  *
  * |-----------------------|
  * |                       | ^
- * |   Callee-save area    | | Permutable
+ * |   Callee-save area    | | Permutable (will become randomizable)
  * |                       | v
  * |-----------------------|
  * |                       | ^
@@ -522,11 +536,12 @@ private:
  * |                       | v
  * |-----------------------|
  *
- * The regions above the call area are randomizable (with limitations).
+ * The regions above the call area are randomizable.
  *
  * - Most compilers emit callee-saved register save/restore procedures as a
- *   series of push/pop instructions; the ordering of this procedure can be
- *   permuted but not fully randomized
+ *   series of push/pop instructions; the Popcorn compiler has been modified
+ *   to emit extra nops in the prologue/epilogue so that Chameleon can fully
+ *   randomize callee-saved register locations.
  * - Arguments passed on the stack are placed according to the x86-64 calling
  *   convention and cannot be randomized because the called function expects
  *   the arguments in a certain order.
@@ -882,51 +897,62 @@ public:
     return it;
   }
 
-  void moveCalleeSaveToRandomizable() {
-    int offset;
-    size_t size;
-
-    auto calleeSaveIt = findRegionByType(x86Region::R_CalleeSave);
-    assert(calleeSaveIt!= regions.end() && "No callee-save region");
-    auto &calleeSave = *calleeSaveIt;
-
+  /**
+   * Make all non-call argument slots randomizable by moving them to the
+   * correct section.
+   */
+  void makeSlotsToRandomizable() {
     // If there's no fully randomizable region, make one
     auto randomizableIt = findRegionByType(x86Region::R_Movable);
     if(randomizableIt == regions.end()) {
-      regions.emplace_back(new RandomizableRegion(x86Region::R_Movable));
-      randomizableIt = regions.end() - 1;
+      auto calleeSaveIt = findRegionByType(x86Region::R_CalleeSave);
+      assert(calleeSaveIt!= regions.end() && "No callee-save region");
+      auto &calleeSave = *calleeSaveIt;
+
+      randomizableIt = regions.insert(calleeSaveIt + 1,
+        StackRegionPtr(new RandomizableRegion(x86Region::R_Movable)));
       (*randomizableIt)->setOffset(calleeSave->getOriginalOffset());
     }
-    auto &randomizable = *randomizableIt;
+    (*randomizableIt)->setMinStartingOffset(0);
+    (*randomizableIt)->setMaxOffset(INT32_MAX);
 
-    DEBUGMSG_VERBOSE("moving callee-save slots to fully randomizable region"
-                     << std::endl);
+    // Move slots from the callee-save and alignment region to the randomizable
+    // region.  There may not *actually* be an alignment slot; the compiler may
+    // have inserted a push instruction just to align the frame.  Be safe and
+    // move any detected slot to the randomizable region just in case.
+    for(auto regionType : {R_CalleeSave, R_Alignment}) {
+      auto regionIt = findRegionByType(regionType);
+      if(regionIt == regions.end()) continue;
+      auto &removedRegionPtr = *regionIt;
 
-    Binary::unwind_iterator ui = binary.getUnwindLocations(func);
-    for(; !ui.end(); ++ui) {
-      const unwind_loc *loc = *ui;
-      size = arch::getCalleeSaveSize(loc->reg);
-      offset =
-        CodeTransformer::canonicalizeSlotOffset(func->frame_size,
-                                                arch::RegType::FramePointer,
-                                                loc->offset);
-      randomizable->addSlot(offset, size, size);
+      DEBUGMSG_VERBOSE("moving " << x86RegionName[regionType] << " region's "
+                       "slots to randomizable region" << std::endl);
 
-      DEBUGMSG_VERBOSE("  slot @ " << offset << ", size=" << size
-                       << std::endl);
+      auto randomizableIt = findRegionByType(x86Region::R_Movable);
+      assert(randomizableIt != regions.end() && "Removed wrong region?");
+      auto &randomizablePtr = *randomizableIt;
+
+      for(const auto &slot : removedRegionPtr->getSlots()) {
+        randomizablePtr->addSlot(slot.original, slot.size, slot.alignment);
+        DEBUGMSG_VERBOSE("  slot @ " << slot.original << std::endl);
+      }
+
+      int end = std::max(removedRegionPtr->getOriginalOffset(),
+                         randomizablePtr->getOriginalOffset());
+      randomizablePtr->setOffset(end);
+      randomizablePtr->setSize(end);
+
+      regions.erase(regionIt);
     }
 
-    randomizable->setMinStartingOffset(0);
-    randomizable->setMaxOffset(INT32_MAX);
-    randomizable->setSize(randomizable->getOriginalOffset());
-    randomizable->sortSlots();
+    randomizableIt = findRegionByType(x86Region::R_Movable);
+    assert(randomizableIt != regions.end() && "Removed wrong region?");
+    auto &randomizablePtr = *randomizableIt;
+    randomizablePtr->sortSlots();
 
-    DEBUGMSG("updated fully randomizable region to hold callee-save slots, "
-             "new size = " << randomizable->getOriginalOffset() << std::endl);
-
-    regions.erase(calleeSaveIt);
-    DEBUGMSG("removed permutable callee-save region" << std::endl);
-    // TODO do we need to remove alignment region?
+    DEBUGMSG("updated randomizable region to hold callee-save and alignment "
+             "slots, new size = " << randomizablePtr->getOriginalSize()
+             << std::endl);
   }
 
   virtual ret_t rewritePrologueAndEpilogue() override {
@@ -967,7 +993,7 @@ public:
 
     if(!foundPrologue) return ret_t::AnalysisFailed;
 
-    moveCalleeSaveToRandomizable();
+    makeSlotsToRandomizable();
 
     return ret_t::Success;
   }
@@ -976,28 +1002,12 @@ public:
   rewritePrologueForRandomization(InstructionRun &instrs,
                                   int &calleeSaveOffset) override {
     int spUpdate = 0;
-    size_t origSize = 0, newSize;
+    size_t origSize = 0, newSize = 0;
     opnd_t src, src2, dst;
     std::vector<instr_t> newInstrs;
+    std::vector<instr_t>::iterator newInstIt;
 
     DEBUGMSG_VERBOSE("rewriting prologue" << std::endl);
-
-    // Move the return address from its original location to the "new" slot
-    // (which will eventually be randomized)
-    src = opnd_create_base_disp(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8);
-    dst = opnd_create_reg(DR_REG_RAX);
-    instr_t &movToReg = addInstruction<1, 1>(newInstrs, OP_movq,
-                                             {{src}}, {{dst}});
-    newSize = instr_length(GLOBAL_DCONTEXT, &movToReg);
-
-    src = dst;
-    dst = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8, true,
-                                   true, false);
-    instr_t &movToStack = addInstruction<1, 1>(newInstrs, OP_movq,
-                                               {{src}}, {{dst}});
-    newSize += instr_length(GLOBAL_DCONTEXT, &movToStack);
-
-    for(auto &instr : newInstrs) debugPrintAddedInstr(instr);
 
     // Walk through the prologue, converting push into movq instructions and
     // updating the frame allocation math to include the callee-save space
@@ -1006,10 +1016,11 @@ public:
     for(auto e = instrs.instrs.end(); it != e; it++) {
       auto &instr = *it;
       bool finished = false;
+      newInstIt = newInstrs.end();
 
       switch(instr_get_opcode(&instr)) {
       case OP_nop: break;
-      case OP_push:
+      case OP_push: {
         assert(opnd_is_reg(instr_get_src(&instr, 0)));
         if(!isCalleeSavePush(instr)) {
           assert(opnd_is_reg(instr_get_src(&instr, 0)) &&
@@ -1018,39 +1029,35 @@ public:
           assert(spUpdate == 0 && "Multiple SP update instructions?");
 
           // The compiler inserted a push %rax to align/alllocate stack space
-          // for the frame, convert to subtraction instruction
           spUpdate = abs(calleeSaveOffset) + 8;
-          src = opnd_create_immed_int(spUpdate, OPSZ_4);
-          src2 = opnd_create_reg(DR_REG_RSP);
-          dst = opnd_create_reg(DR_REG_RSP);
-          addInstruction<2, 1>(newInstrs, OP_sub, {{src, src2}}, {{dst}});
           break;
         }
 
         calleeSaveOffset -= 8;
-        src = opnd_create_reg(opnd_get_reg(instr_get_src(&instr, 0)));
-        dst = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0,
-                                       calleeSaveOffset, OPSZ_8, true,
+        reg_id_t reg = opnd_get_reg(instr_get_src(&instr, 0));
+        // Saving old RBP/setting up new RBP requires special handling below
+        if(reg == DR_REG_RBP) break;
+
+        // Note: next offset is calleeSaveOffset + 8 because we're offsetting
+        // from the newly set up FBP, which doesn't include space for saved FBP
+        src = opnd_create_reg(reg);
+        dst = opnd_create_base_disp_ex(DR_REG_RBP, DR_REG_NULL, 0,
+                                       calleeSaveOffset + 8, OPSZ_8, true,
                                        true, false);
-        addInstruction<1, 1>(newInstrs, OP_movq, {{src}}, {{dst}});
+        newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_st,
+                                         {{src}}, {{dst}});
         break;
-      case OP_mov_st:
+      }
+      case OP_mov_st: {
         src = instr_get_src(&instr, 0);
         dst = instr_get_dst(&instr, 0);
         // If it's not mov %rsp, %rbp then it's not part of the prologue
         if(!opnd_is_reg(src) || opnd_get_reg(src) != DR_REG_RSP ||
-           !opnd_is_reg(dst) || opnd_get_reg(dst) != DR_REG_RBP) {
+           !opnd_is_reg(dst) || opnd_get_reg(dst) != DR_REG_RBP)
           finished = true;
-          break;
-        }
-
-        // New rbp points to CFA - 0x10
-        src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, -8,
-                                       OPSZ_lea, true, true, false);
-        dst = opnd_create_reg(DR_REG_RBP);
-        addInstruction<1, 1>(newInstrs, OP_lea, {{src}}, {{dst}});
         break;
-      case OP_sub:
+      }
+      case OP_sub: {
         assert(opnd_is_immed_int(instr_get_src(&instr, 0)) &&
                opnd_is_reg(instr_get_src(&instr, 1)) &&
                opnd_get_reg(instr_get_src(&instr, 1)) == DR_REG_RSP &&
@@ -1060,11 +1067,8 @@ public:
 
         src = instr_get_src(&instr, 0);
         spUpdate = opnd_get_immed_int(src) + abs(calleeSaveOffset);
-        src = opnd_create_immed_int(spUpdate, OPSZ_4);
-        src2 = opnd_create_reg(DR_REG_RSP);
-        dst = opnd_create_reg(DR_REG_RSP);
-        addInstruction<2, 1>(newInstrs, OP_sub, {{src, src2}}, {{dst}});
         break;
+      }
       default:
         // Any remaining instructions are not part of the prologue
         finished = true;
@@ -1074,25 +1078,56 @@ public:
       if(finished) break;
 
       origSize += instr_length(GLOBAL_DCONTEXT, &instr);
-      if(instr_get_opcode(&instr) != OP_nop) {
-        auto &newInstr = newInstrs.back();
-        newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
-
-        debugPrintDeletedInstr(instr);
-        debugPrintAddedInstr(newInstr);
+      if(newInstIt != newInstrs.end()) {
+        newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
       }
+
+      if(instr_get_opcode(&instr) != OP_nop) debugPrintDeletedInstr(instr);
     }
 
-    // Add an instruction to update the SP if the prologue didn't already
-    if(spUpdate == 0) {
-      src = opnd_create_immed_int(abs(calleeSaveOffset), OPSZ_4);
-      src2 = opnd_create_reg(DR_REG_RSP);
-      dst = opnd_create_reg(DR_REG_RSP);
-      auto &newInstr = addInstruction<2, 1>(newInstrs, OP_sub,
-                                            {{src, src2}}, {{dst}});
-      newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
-      debugPrintAddedInstr(newInstr);
-    }
+    if(spUpdate == 0) spUpdate = abs(calleeSaveOffset);
+
+    // Set up the the new frame pointer and save the old one
+    src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, spUpdate - 8,
+                                   OPSZ_lea, true, true, false);
+    dst = opnd_create_reg(DR_REG_RBP);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_lea, {{src}},
+                                     {{dst}}, FRONT);
+    instr_set_note(&*newInstIt, (void *)x86InstrNote::F_FramePointerSetup);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    src = opnd_create_reg(DR_REG_RBP);
+    dst = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, spUpdate - 8,
+                                   OPSZ_8, true, true, false);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_st, {{src}},
+                                     {{dst}}, FRONT);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    // Add an instruction to update the SP
+    src = opnd_create_immed_int(spUpdate, OPSZ_4);
+    src2 = opnd_create_reg(DR_REG_RSP);
+    dst = opnd_create_reg(DR_REG_RSP);
+    newInstIt = addInstruction<2, 1>(newInstrs, OP_sub, {{src, src2}},
+                                     {{dst}}, FRONT);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    // Move the return address from its original location to a register. It'll
+    // be moved to its randomized location after allocating the frame.
+    src = opnd_create_base_disp(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8);
+    dst = opnd_create_reg(retAddrScratchReg);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_ld, {{src}},
+                                     {{dst}}, FRONT);
+    instr_set_note(&*newInstIt, (void *)x86InstrNote::F_DoNotRandomize);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    // Move the return address to its randomized spot on the stack
+    src = opnd_create_reg(retAddrScratchReg);
+    dst = opnd_create_base_disp_ex(DR_REG_RBP, DR_REG_NULL, 0, 8, OPSZ_8, true,
+                                   true, false);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_st, {{src}}, {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    for(auto &inst : newInstrs) debugPrintAddedInstr(inst);
 
     DEBUGMSG("size: original = " << origSize << " vs new = " << newSize
              << std::endl);
@@ -1118,6 +1153,7 @@ public:
     size_t origSize = 0, newSize = 0;
     opnd_t src, src2, dst;
     std::vector<instr_t> newInstrs;
+    std::vector<instr_t>::iterator newInstIt;
 
     DEBUGMSG_VERBOSE("rewriting epilogue" << std::endl);
 
@@ -1132,6 +1168,7 @@ public:
         it++) {
       auto &instr = *it;
       bool transformed = false;
+      newInstIt = instrs.instrs.end();
 
       switch(instr_get_opcode(&instr)) {
       case OP_nop:
@@ -1142,11 +1179,16 @@ public:
                isCalleeSavePop(instr));
         transformed = true;
 
-        src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0,
-                                       calleeSaveOffset, OPSZ_8, true,
+        // Restoring RBP requires special handling below
+        if(opnd_get_reg(instr_get_dst(&instr, 0)) == DR_REG_RBP) break;
+
+        // See note above about calleeSaveOffset + 8
+        src = opnd_create_base_disp_ex(DR_REG_RBP, DR_REG_NULL, 0,
+                                       calleeSaveOffset + 8, OPSZ_8, true,
                                        true, false);
         dst = opnd_create_reg(opnd_get_reg(instr_get_dst(&instr, 0)));
-        addInstruction<1, 1>(newInstrs, OP_movq, {{src}}, {{dst}});
+        newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_ld,
+                                         {{src}}, {{dst}});
         calleeSaveOffset += 8;
         break;
       case OP_add:
@@ -1158,10 +1200,6 @@ public:
 
         src = instr_get_src(&instr, 0);
         spUpdate = opnd_get_immed_int(src) + abs(calleeSaveOffset);
-        src = opnd_create_immed_int(spUpdate, OPSZ_4);
-        src2 = opnd_create_reg(DR_REG_RSP);
-        dst = opnd_create_reg(DR_REG_RSP);
-        addInstruction<2, 1>(newInstrs, OP_add, {{src, src2}}, {{dst}});
         break;
       // We can't break out of the entire loop like in the prologue because the
       // epilogue can come *after* non-epilogue instructions
@@ -1177,54 +1215,54 @@ public:
         if(start == instrs.instrs.end()) start = it;
 
         origSize += instr_length(GLOBAL_DCONTEXT, &instr);
-        if(instr_get_opcode(&instr) != OP_nop) {
-          auto &newInstr = newInstrs.back();
-          newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
-
-          debugPrintDeletedInstr(instr);
-          debugPrintAddedInstr(newInstr);
+        if(newInstIt != instrs.instrs.end()) {
+          newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
         }
+
+        if(instr_get_opcode(&instr) != OP_nop) debugPrintDeletedInstr(instr);
       }
       // Mark the first instruction after the end of the epilogue
       else if(start != instrs.instrs.end() && end == instrs.instrs.end())
         end = it;
     }
 
-    // Add an instruction to update the SP if the epilogue didn't already
-    if(spUpdate == 0) {
-      src = opnd_create_immed_int(calleeSaveSize, OPSZ_4);
-      src2 = opnd_create_reg(DR_REG_RSP);
-      dst = opnd_create_reg(DR_REG_RSP);
-      auto &newInstr = addInstruction<2, 1>(newInstrs, OP_add,
-                                            {{src, src2}}, {{dst}}, FRONT);
-      newSize += instr_length(GLOBAL_DCONTEXT, &newInstr);
-      debugPrintAddedInstr(newInstr, FRONT);
-    }
-
     // Move the return address back to its original location for the return
     // instruction.  We can't use rax or rdx as a scratch register during
     // return address restoration as they may contain return values.
-    reg_id_t scratchReg = DR_REG_RCX;
-    src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8, true,
+    src = opnd_create_base_disp_ex(DR_REG_RBP, DR_REG_NULL, 0, 8, OPSZ_8, true,
                                    true, false);
-    dst = opnd_create_reg(scratchReg);
-    instr_t &movToReg = addInstruction<1, 1>(newInstrs, OP_movq,
-                                             {{src}}, {{dst}});
-    newSize += instr_length(GLOBAL_DCONTEXT, &movToReg);
+    dst = opnd_create_reg(retAddrScratchReg);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_ld, {{src}},
+                                     {{dst}}, FRONT);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
 
-    src = dst;
+    if(spUpdate == 0) spUpdate = calleeSaveSize;
+
+    // Restore the saved FBP.  Use the offset from RSP to be consistent with
+    // prologue.
+    src = opnd_create_base_disp_ex(DR_REG_RSP, DR_REG_NULL, 0, spUpdate - 8,
+                                   OPSZ_8, true, true, false);
+    dst = opnd_create_reg(DR_REG_RBP);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_ld, {{src}}, {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    // Add an instruction to update the SP
+    src = opnd_create_immed_int(spUpdate, OPSZ_4);
+    src2 = opnd_create_reg(DR_REG_RSP);
+    dst = opnd_create_reg(DR_REG_RSP);
+    newInstIt = addInstruction<2, 1>(newInstrs, OP_add, {{src, src2}},
+                                     {{dst}});
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
+
+    // Finally, move the return address back into its original slot in
+    // preparation for returning
+    src = opnd_create_reg(retAddrScratchReg);
     dst = opnd_create_base_disp(DR_REG_RSP, DR_REG_NULL, 0, 0, OPSZ_8);
-    instr_t &movToStack = addInstruction<1, 1>(newInstrs, OP_movq,
-                                               {{src}}, {{dst}});
-    newSize += instr_length(GLOBAL_DCONTEXT, &movToStack);
+    newInstIt = addInstruction<1, 1>(newInstrs, OP_mov_st, {{src}}, {{dst}});
+    instr_set_note(&*newInstIt, (void *)x86InstrNote::F_DoNotRandomize);
+    newSize += instr_length(GLOBAL_DCONTEXT, &*newInstIt);
 
-    DEBUG_VERBOSE(
-      auto spUpdateInstr = newInstrs.end();
-      spUpdateInstr -= 2;
-      for(auto e = newInstrs.end(); spUpdateInstr != e; spUpdateInstr++) {
-        debugPrintAddedInstr(*spUpdateInstr);
-      }
-    )
+    for(auto &inst : newInstrs) debugPrintAddedInstr(inst);
 
     DEBUGMSG("size: original = " << origSize << " vs new = " << newSize
              << std::endl);
@@ -1308,27 +1346,25 @@ public:
   }
 
   /**
-   * For x86-64, the bulk frame update allocates space for all regions below
-   * the callee-save region; search for an update within that region.
+   * The bulk frame updates space for the entire frame, including being
+   * rewritten to incoporate space for callee-save register storage.
    */
   virtual bool isBulkFrameUpdate(instr_t *instr, int offset) const override {
     switch(instr_get_opcode(instr)) {
     default: return false;
     case OP_add: case OP_sub:
-      // Note: it should be okay to check against the original offset as the
-      // callee-save region shouldn't change size
-      if(offset > regions[0]->getOriginalOffset()) return true;
+      if(offset >= regions[0]->getOriginalOffset()) return true;
       else return false;
     }
   }
 
   /**
-   * For x86-64, the bulk update consists of the FP-limited, movable,
-   * SP-limited, call and alignment regions.
+   * The bulk frame update includes the all stack regions.
    */
   virtual uint32_t getRandomizedBulkFrameUpdate() const override {
-    assert(regions.size() > 1 && "No bulk frame update");
-    return randomizedFrameSize - (regions[0]->getRandomizedOffset());
+    assert(randomizedFrameSize >= 16 && "Invalid frame size");
+    // Don't include implicitly-allocated return address slot
+    return randomizedFrameSize - 8;
   }
 
   virtual bool shouldTransformSlot(int offset) const override {
@@ -1341,29 +1377,56 @@ public:
     return false;
   }
 
+  virtual bool skipTransforming(instr_t *instr) const override {
+    // TODO avoiding randomizing the instruction with the note is an
+    // implementation artifact (i.e., hack) from rewriting the prologue and
+    // epilogue.  Those functions shouldn't put the instruction in the run.
+    if(instr_get_note(instr) == (void *)x86InstrNote::F_DoNotRandomize)
+      return true;
+    else {
+      switch(instr_get_opcode(instr)) {
+      case OP_ret: case OP_ret_far: return true;
+      default: break;
+      }
+    }
+    return false;
+  }
+
   virtual ret_t transformInstr(uint32_t frameSize,
                                uint32_t randFrameSize,
                                instr_t *instr,
                                bool &changed) const override {
-    ret_t code = ret_t::Success;
+    opnd_t src, dst;
 
     // Note: frameSize does *not* include push/pop update
     switch(instr_get_opcode(instr)) {
-    case OP_push:
-      code = swapCalleeSaveReg<instr_get_src, instr_set_src>
-                              (frameSize, instr, -8, changed);
-      break;
-    case OP_pop:
-      code = swapCalleeSaveReg<instr_get_dst, instr_set_dst>
-                              (frameSize, instr, 0, changed);
+    case OP_lea:
+      if(instr_get_note(instr) == (void *)x86InstrNote::F_FramePointerSetup) {
+        assert(instr_num_srcs(instr) == 1 && instr_num_dsts(instr) == 1);
+        assert(opnd_is_base_disp(instr_get_src(instr, 0)) &&
+               opnd_is_reg(instr_get_dst(instr, 0)));
+        assert(opnd_get_base(instr_get_src(instr, 0)) == DR_REG_RSP &&
+               opnd_get_reg(instr_get_dst(instr, 0)) == DR_REG_RBP);
+
+        src = instr_get_src(instr, 0);
+        dst = instr_get_dst(instr, 0);
+        opnd_set_disp(&src, randFrameSize - 16);
+        instr_set_src(instr, 0, src);
+        changed = true;
+
+        DEBUGMSG_VERBOSE(" -> FBP setup, changing displacement to "
+                         << randFrameSize - 16 << std::endl);
+      }
       break;
     default: break;
     }
 
-    return code;
+    return ret_t::Success;
   }
 
 private:
+  constexpr static reg_id_t retAddrScratchReg = { DR_REG_R11 };
+
   uint32_t alignment;
 
   /**

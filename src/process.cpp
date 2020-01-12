@@ -504,6 +504,20 @@ ret_t Process::read(uintptr_t addr, uint64_t &data) const {
   return ret_t::Success;
 }
 
+void Process::dumpMem(uintptr_t addr) const {
+  if(traceable()) {
+    uint64_t data;
+    if(trace::getMem(pid, addr, data)) {
+      DEBUGMSG("memory @ 0x" << std::hex << addr << ": " << data << std::endl);
+    }
+    else {
+      DEBUGMSG("ptrace read failed at address 0x" << std::hex << addr << ": "
+               << strerror(errno) << std::endl);
+    }
+  }
+  else DEBUGMSG("can't dump memory - not traceable" << std::endl);
+}
+
 ret_t Process::readRegion(uintptr_t addr, byte_iterator &buffer) const {
   ssize_t bytesRead;
 
