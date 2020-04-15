@@ -1381,15 +1381,7 @@ public:
     // TODO avoiding randomizing the instruction with the note is an
     // implementation artifact (i.e., hack) from rewriting the prologue and
     // epilogue.  Those functions shouldn't put the instruction in the run.
-    if(instr_get_note(instr) == (void *)x86InstrNote::F_DoNotRandomize)
-      return true;
-    else {
-      switch(instr_get_opcode(instr)) {
-      case OP_ret: case OP_ret_far: return true;
-      default: break;
-      }
-    }
-    return false;
+    return instr_get_note(instr) == (void *)x86InstrNote::F_DoNotRandomize;
   }
 
   virtual ret_t transformInstr(uint32_t frameSize,
@@ -1417,6 +1409,13 @@ public:
         DEBUGMSG_VERBOSE(" -> FBP setup, changing displacement to "
                          << randFrameSize - 16 << std::endl);
       }
+      break;
+    case OP_ret: case OP_ret_far:
+      // We can't skip returns (skipTransforming() above) because we need to
+      // run the stack update detection logic to reset frame sizes for
+      // epilogues inside function bodies.  We also don't want to rewrite their
+      // operands, so mark them as handled by ISA-specific transformation.
+      changed = true;
       break;
     default: break;
     }
