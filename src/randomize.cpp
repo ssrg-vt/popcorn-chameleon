@@ -494,7 +494,8 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
   if(!rhs.instrs.empty()) {
     size_t instrSize;
     funcData = mw.getData(func->addr);
-    byte *cur, *end;
+    byte *cur;
+    DEBUG(byte *end);
     instrs = rhs.instrs;
 
     assert(funcData[0] && funcData.getLength() >= func->code_size &&
@@ -523,8 +524,11 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
         instr_set_raw_bits(instr, cur, instrSize);
         cur += instrSize;
       }
-      end = funcData[0] + (runIt->endAddr - (byte *)func->addr);
-      assert(cur == end && "Invalid deep instruction copy");
+
+      DEBUG(
+        end = funcData[0] + (runIt->endAddr - (byte *)func->addr);
+        assert(cur == end && "Invalid deep instruction copy");
+      );
     }
   }
 
