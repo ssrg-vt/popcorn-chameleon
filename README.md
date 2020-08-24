@@ -46,7 +46,7 @@ $ ./install-compel.sh -c ~/criu -i /usr/local/chameleon   # run with -h for more
 * Clone Popcorn Linux's compiler from the [GitHub repository](https://github.com/ssrg-vt/popcorn-compiler) and switch to the `security` branch:
 
 ```
-$ git clone https://://github.com/ssrg-vt/popcorn-compiler.git
+$ git clone https://github.com/ssrg-vt/popcorn-compiler.git
 $ ls ~/
 criu  popcorn-chameleon  popcorn-compiler
 $ cd ~/popcorn-compiler
