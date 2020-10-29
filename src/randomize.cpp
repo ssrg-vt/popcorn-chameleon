@@ -495,7 +495,8 @@ RandomizedFunction::RandomizedFunction(const RandomizedFunction &rhs,
     size_t instrSize;
     funcData = mw.getData(func->addr);
     byte *cur;
-    DEBUG(byte *end);
+    //DEBUG(byte *end);
+    byte *end;
     instrs = rhs.instrs;
 
     assert(funcData[0] && funcData.getLength() >= func->code_size &&
