@@ -141,7 +141,8 @@ ret_t replaceInstructionsInRun(InstructionRun &instrs,
 
   // Clean up range being replaced
   // TODO do before encoding new instructions?
-  DEBUG(size_t numNops = 0);
+  //DEBUG(size_t numNops = 0);
+  size_t numNops = 0;
   while(it != end) {
     DEBUG_VERBOSE(
       if(instr_get_opcode(&*it) == OP_nop) numNops++;
