@@ -6,7 +6,14 @@ Chameleon is a userspace framework for dynamic and secure application memory tra
 
 ## Prerequisites
 
-Before installing Chameleon, we need to install several pieces of open source software.  For the following directions we'll refer to the *installation directory* as the directory where supporting software is installed (and the final built Chameleon executable should you choose to install it).  The directions default to using `/usr/local/chameleon` as the installation directory.  Additionally, we'll refer to *Chameleon's repository*, which is the location where you've cloned `popcorn-chameleon`.  The directions default to `~/popcorn-chameleon` as the repository's location.
+Before installing Chameleon, we need to install some dependencies for CRIU/libcompel. On ubuntu 18.04, you can install them with:
+```
+$ sudo apt-get update
+$ sudo apt install libprotobuf-dev libprotobuf-c0-dev protobuf-c-compiler protobuf-compiler python-protobuf pkg-config libbsd-dev libcap-dev
+```
+For other Linux distribution, you can refer [here](https://criu.org/Installation).
+
+We also need to install several pieces of open source software.  For the following directions we'll refer to the *installation directory* as the directory where supporting software is installed (and the final built Chameleon executable should you choose to install it).  The directions default to using `/usr/local/chameleon` as the installation directory.  Additionally, we'll refer to *Chameleon's repository*, which is the location where you've cloned `popcorn-chameleon`.  The directions default to `~/popcorn-chameleon` as the repository's location.
 
 **Tip:** if you use `/usr/local/chameleon` as the installation directory, change the directory's ownership permissions so you don't have to be root to install software there.
 
